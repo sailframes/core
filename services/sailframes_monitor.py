@@ -550,6 +550,26 @@ DASHBOARD_HTML = """
         .conn-ok { background: #1b5e20; color: #a5d6a7; }
         .conn-warn { background: #e65100; color: #ffcc80; }
         .conn-off { background: #37474f; color: #78909c; }
+        /* Recording control styles */
+        .recording-card { background: #1a2a40; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+        .recording-card.recording { border: 2px solid #f44336; background: linear-gradient(135deg, #1a2a40 0%, #2d1a1a 100%); }
+        .recording-btn { padding: 14px 32px; font-size: 18px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+        .recording-btn.start { background: #4caf50; color: white; }
+        .recording-btn.start:hover { background: #66bb6a; }
+        .recording-btn.stop { background: #f44336; color: white; }
+        .recording-btn.stop:hover { background: #ef5350; }
+        .recording-btn:disabled { background: #455a64; cursor: wait; }
+        .sensor-status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+        .sensor-status { padding: 8px 12px; border-radius: 6px; background: #0d1929; text-align: center; }
+        .sensor-status .name { font-size: 11px; color: #78909c; text-transform: uppercase; margin-bottom: 4px; }
+        .sensor-status .indicator { font-size: 12px; font-weight: 600; }
+        .sensor-status.recording .indicator { color: #4caf50; }
+        .sensor-status.not-recording .indicator { color: #78909c; }
+        .sensor-status.error .indicator { color: #f44336; }
+        .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+        .rec-dot.active { background: #f44336; animation: pulse 1s infinite; }
+        .rec-dot.inactive { background: #455a64; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body>
@@ -563,6 +583,47 @@ DASHBOARD_HTML = """
             <div class="clock" id="clock"></div>
         </div>
     </div>
+
+    <!-- Recording Control -->
+    <div id="recording-card" class="recording-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+            <div>
+                <h2 style="margin: 0; font-size: 16px; color: #fff;">Recording Control</h2>
+                <div id="recording-status-text" style="font-size: 13px; color: #78909c; margin-top: 4px;">Sensors idle</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span id="rec-indicator" style="display: none;"><span class="rec-dot active"></span><span style="color: #f44336; font-weight: 600;">REC</span></span>
+                <button id="recording-btn" class="recording-btn start" onclick="toggleRecording()">START RECORDING</button>
+            </div>
+        </div>
+        <div class="sensor-status-grid">
+            <div id="sensor-gps" class="sensor-status not-recording">
+                <div class="name">GPS</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-imu" class="sensor-status not-recording">
+                <div class="name">IMU</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-wind" class="sensor-status not-recording">
+                <div class="name">Wind</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-pressure" class="sensor-status not-recording">
+                <div class="name">Pressure</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-camera-cockpit" class="sensor-status not-recording">
+                <div class="name">Cam Cockpit</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-camera-sails" class="sensor-status not-recording">
+                <div class="name">Cam Sails</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+        </div>
+    </div>
+
     <div class="grid">
         <div class="card">
             <h2>CPU Temp</h2>
@@ -1150,6 +1211,99 @@ DASHBOARD_HTML = """
                 btn.textContent = 'Shutdown';
             });
     }
+
+    // Recording Control Functions
+    let isRecording = false;
+
+    function toggleRecording() {
+        const btn = document.getElementById('recording-btn');
+        btn.disabled = true;
+        btn.textContent = isRecording ? 'STOPPING...' : 'STARTING...';
+
+        const endpoint = isRecording ? '/api/recording/stop' : '/api/recording/start';
+        fetch(endpoint, { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false;
+                if (data.success) {
+                    isRecording = !isRecording;
+                }
+                updateRecordingUI();
+            })
+            .catch(e => {
+                console.error('Recording toggle error:', e);
+                btn.disabled = false;
+                updateRecordingUI();
+            });
+    }
+
+    function updateRecordingUI() {
+        fetch('/api/recording/status')
+            .then(r => r.json())
+            .then(data => {
+                const card = document.getElementById('recording-card');
+                const btn = document.getElementById('recording-btn');
+                const indicator = document.getElementById('rec-indicator');
+                const statusText = document.getElementById('recording-status-text');
+
+                isRecording = data.any_recording;
+
+                if (isRecording) {
+                    card.classList.add('recording');
+                    btn.className = 'recording-btn stop';
+                    btn.textContent = 'STOP RECORDING';
+                    indicator.style.display = 'inline';
+                    const recordingCount = Object.values(data.sensors).filter(s => s.recording).length;
+                    statusText.textContent = recordingCount + ' sensor(s) recording';
+                } else {
+                    card.classList.remove('recording');
+                    btn.className = 'recording-btn start';
+                    btn.textContent = 'START RECORDING';
+                    indicator.style.display = 'none';
+                    statusText.textContent = 'Sensors idle';
+                }
+
+                // Update individual sensor statuses
+                updateSensorStatus('sensor-gps', data.sensors.gps);
+                updateSensorStatus('sensor-imu', data.sensors.imu);
+                updateSensorStatus('sensor-wind', data.sensors.wind);
+                updateSensorStatus('sensor-pressure', data.sensors.pressure);
+                updateSensorStatus('sensor-camera-cockpit', data.sensors.camera_cockpit);
+                updateSensorStatus('sensor-camera-sails', data.sensors.camera_sails);
+            })
+            .catch(e => console.log('Recording status error:', e));
+    }
+
+    function updateSensorStatus(elementId, sensor) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+
+        const indicator = el.querySelector('.indicator');
+        const dot = indicator.querySelector('.rec-dot');
+
+        if (sensor.recording) {
+            el.className = 'sensor-status recording';
+            dot.className = 'rec-dot active';
+            indicator.innerHTML = '<span class="rec-dot active"></span>Recording';
+        } else if (sensor.service_running && !sensor.connected) {
+            el.className = 'sensor-status error';
+            dot.className = 'rec-dot inactive';
+            indicator.innerHTML = '<span class="rec-dot inactive"></span>No Signal';
+        } else if (sensor.service_running) {
+            el.className = 'sensor-status not-recording';
+            dot.className = 'rec-dot inactive';
+            indicator.innerHTML = '<span class="rec-dot inactive"></span>Waiting';
+        } else {
+            el.className = 'sensor-status not-recording';
+            dot.className = 'rec-dot inactive';
+            indicator.innerHTML = '<span class="rec-dot inactive"></span>Off';
+        }
+    }
+
+    // Update recording status periodically
+    setInterval(updateRecordingUI, 2000);
+    // Initial load
+    updateRecordingUI();
 
     function scanBluetooth() {
         document.getElementById('bt-modal').style.display = 'block';
@@ -3028,6 +3182,134 @@ def api_camera_stop(camera_id):
     except Exception as e:
         logger.error(f"Camera {camera_id} stop error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/recording/start', methods=['POST'])
+def api_recording_start():
+    """Start recording on all sensor services."""
+    results = {}
+    services = ['sailframes-gps', 'sailframes-imu', 'sailframes-pressure', 'sailframes-wind',
+                'sailframes-camera-cockpit', 'sailframes-camera-sails']
+
+    for service in services:
+        try:
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'start', service],
+                capture_output=True, text=True, timeout=10
+            )
+            results[service] = result.returncode == 0
+        except Exception as e:
+            results[service] = False
+            logger.error(f"Failed to start {service}: {e}")
+
+    success = all(results.values())
+    if success:
+        logger.info("All recording services started via API")
+    else:
+        failed = [s for s, ok in results.items() if not ok]
+        logger.warning(f"Some services failed to start: {failed}")
+
+    return jsonify({'success': success, 'results': results})
+
+
+@app.route('/api/recording/stop', methods=['POST'])
+def api_recording_stop():
+    """Stop recording on all sensor services."""
+    results = {}
+    services = ['sailframes-gps', 'sailframes-imu', 'sailframes-pressure', 'sailframes-wind',
+                'sailframes-camera-cockpit', 'sailframes-camera-sails']
+
+    for service in services:
+        try:
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'stop', service],
+                capture_output=True, text=True, timeout=10
+            )
+            results[service] = result.returncode == 0
+        except Exception as e:
+            results[service] = False
+            logger.error(f"Failed to stop {service}: {e}")
+
+    success = all(results.values())
+    if success:
+        logger.info("All recording services stopped via API")
+    else:
+        failed = [s for s, ok in results.items() if not ok]
+        logger.warning(f"Some services failed to stop: {failed}")
+
+    return jsonify({'success': success, 'results': results})
+
+
+@app.route('/api/recording/status')
+def api_recording_status():
+    """Get recording status for all sensors."""
+    status = {
+        'gps': {
+            'service_running': check_service_status('sailframes-gps'),
+            'connected': False,
+            'recording': False,
+        },
+        'imu': {
+            'service_running': check_service_status('sailframes-imu'),
+            'connected': False,
+            'recording': False,
+        },
+        'pressure': {
+            'service_running': check_service_status('sailframes-pressure'),
+            'connected': False,
+            'recording': False,
+        },
+        'wind': {
+            'service_running': check_service_status('sailframes-wind'),
+            'connected': False,
+            'recording': False,
+        },
+        'camera_cockpit': {
+            'service_running': check_service_status('sailframes-camera-cockpit'),
+            'connected': True,  # Camera assumed connected if service runs
+            'recording': False,
+        },
+        'camera_sails': {
+            'service_running': check_service_status('sailframes-camera-sails'),
+            'connected': True,
+            'recording': False,
+        },
+    }
+
+    # Check actual sensor connections from status files
+    gps_status = get_gps_status()
+    if gps_status and gps_status.get('connected'):
+        status['gps']['connected'] = True
+        status['gps']['recording'] = status['gps']['service_running']
+
+    imu_status = get_imu_status()
+    if imu_status and imu_status.get('connected'):
+        status['imu']['connected'] = True
+        status['imu']['recording'] = status['imu']['service_running']
+
+    pressure_status = get_pressure_status()
+    if pressure_status and pressure_status.get('connected'):
+        status['pressure']['connected'] = True
+        status['pressure']['recording'] = status['pressure']['service_running']
+
+    wind_status = get_wind_status()
+    if wind_status and wind_status.get('connected'):
+        status['wind']['connected'] = True
+        status['wind']['recording'] = status['wind']['service_running']
+
+    # Cameras record if service is running
+    status['camera_cockpit']['recording'] = status['camera_cockpit']['service_running']
+    status['camera_sails']['recording'] = status['camera_sails']['service_running']
+
+    # Overall recording state
+    any_recording = any(s['recording'] for s in status.values())
+    all_recording = all(s['recording'] for s in status.values())
+
+    return jsonify({
+        'sensors': status,
+        'any_recording': any_recording,
+        'all_recording': all_recording,
+    })
 
 
 @app.route('/api/camera/<camera_id>/snapshot', methods=['POST'])
