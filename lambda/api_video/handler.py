@@ -8,7 +8,8 @@ import os
 import boto3
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -123,8 +124,13 @@ def get_playlist_duration(playlist_key: str) -> float:
 
 
 def get_times_from_segments(prefix: str) -> tuple:
-    """Fallback: extract times from segment filenames."""
+    """Fallback: extract times from segment filenames.
+
+    Video filenames use local time (America/New_York), so we convert to UTC.
+    """
     segments = []
+    local_tz = ZoneInfo('America/New_York')
+
     paginator = s3.get_paginator('list_objects_v2')
     for page in paginator.paginate(Bucket=DATA_BUCKET, Prefix=prefix):
         for obj in page.get('Contents', []):
@@ -135,12 +141,17 @@ def get_times_from_segments(prefix: str) -> tuple:
                 if ts_match:
                     ts_str = ts_match.group(1)
                     try:
-                        ts = datetime.strptime(ts_str, '%Y%m%d_%H%M%S')
-                        segments.append(ts)
+                        # Parse as local time (ET)
+                        local_dt = datetime.strptime(ts_str, '%Y%m%d_%H%M%S')
+                        # Attach timezone and convert to UTC
+                        local_dt = local_dt.replace(tzinfo=local_tz)
+                        utc_dt = local_dt.astimezone(timezone.utc)
+                        segments.append(utc_dt)
                     except ValueError:
                         pass
 
     if segments:
         segments.sort()
-        return segments[0].isoformat() + 'Z', segments[-1].isoformat() + 'Z'
+        # Return as ISO format with Z suffix (UTC)
+        return segments[0].strftime('%Y-%m-%dT%H:%M:%SZ'), segments[-1].strftime('%Y-%m-%dT%H:%M:%SZ')
     return None, None
