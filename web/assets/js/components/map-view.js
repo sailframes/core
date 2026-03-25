@@ -55,13 +55,20 @@ class MapView {
     }
 
     _addMarkerRotation() {
-        // Simple rotation support for the marker
+        // Rotation support that preserves Leaflet's translate transform
         const marker = this.positionMarker;
+        marker._rotationAngle = 0;
+
         marker.setRotation = function(angle) {
+            this._rotationAngle = angle;
             const icon = this.getElement();
             if (icon) {
-                icon.style.transform = `rotate(${angle}deg)`;
-                icon.style.transformOrigin = 'center center';
+                // Find the SVG inside and rotate only that, not the container
+                const svg = icon.querySelector('svg');
+                if (svg) {
+                    svg.style.transform = `rotate(${angle}deg)`;
+                    svg.style.transformOrigin = 'center center';
+                }
             }
         };
     }
