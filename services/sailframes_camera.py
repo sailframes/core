@@ -93,22 +93,21 @@ def run(config, camera_id):
         sys.exit(1)
 
     # Configure for video recording
+    # Set autofocus in the initial configuration for Pi Camera Module 3
+    af_mode = cam_config.get('autofocus', 'continuous')
+    af_mode_value = {"continuous": 2, "single": 1, "manual": 0}.get(af_mode, 2)
+
     video_config = picam2.create_video_configuration(
         main={"size": (width, height), "format": "RGB888"},
         controls={
             "FrameRate": fps,
+            "AfMode": af_mode_value,      # 0=Manual, 1=Auto, 2=Continuous
+            "AfSpeed": 1,                  # 0=Normal, 1=Fast
+            "AfRange": 0,                  # 0=Normal, 1=Macro, 2=Full
         }
     )
     picam2.configure(video_config)
-
-    # Set autofocus mode
-    af_mode = cam_config.get('autofocus', 'continuous')
-    if af_mode == 'continuous':
-        picam2.set_controls({"AfMode": 2})  # Continuous autofocus
-    elif af_mode == 'manual':
-        picam2.set_controls({"AfMode": 0})
-    elif af_mode == 'single':
-        picam2.set_controls({"AfMode": 1})
+    logger.info(f"Autofocus mode: {af_mode} (AfMode={af_mode_value}, AfSpeed=Fast)")
 
     # Apply rotation if configured
     rotation = cam_config.get('rotation', 0)
@@ -121,8 +120,13 @@ def run(config, camera_id):
     picam2.start()
     logger.info(f"Camera {camera_id} started")
 
-    # Allow auto-exposure to settle
-    time.sleep(2)
+    # Trigger autofocus after start for continuous mode
+    if af_mode == 'continuous':
+        picam2.set_controls({"AfTrigger": 1})  # Start continuous AF
+        logger.info("Continuous autofocus triggered")
+
+    # Allow auto-exposure and autofocus to settle
+    time.sleep(3)
 
     data_dir = get_data_dir(config, camera_id)
     segment_count = 0
