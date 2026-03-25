@@ -107,6 +107,44 @@ gpspipe -w -n 3    # Verify GPS is receiving data
 - When offline: Falls back to GPS (~50ms accuracy via NMEA)
 - On boot with wrong clock: Auto-corrects from GPS within seconds
 
+### Persistent Journald (Debug Logs)
+
+Logs are stored persistently to survive reboots, enabling post-sail debugging.
+
+**Configuration:** `/etc/systemd/journald.conf.d/sailframes.conf`
+```ini
+[Journal]
+Storage=persistent      # Survives reboots
+Compress=yes            # Save disk space
+SystemMaxUse=500M       # Max disk usage
+SystemKeepFree=100M     # Keep disk space free
+MaxRetentionSec=2week   # Keep 2 weeks of logs
+MaxFileSec=1day         # Rotate daily
+MaxLevelStore=debug     # Store all log levels
+SyncIntervalSec=1m      # Sync every minute (balance safety vs SD wear)
+```
+
+**Post-sail debugging commands:**
+```bash
+# List all boots (previous sail sessions)
+journalctl --list-boots
+
+# View logs from previous boot
+journalctl -b -1
+
+# View errors/warnings from previous boot
+journalctl -b -1 -p warning
+
+# View sailframes services from a specific time
+journalctl --since "2026-03-24 13:00" --until "2026-03-24 16:00" -u "sailframes*"
+
+# View kernel messages (power issues, USB disconnects)
+journalctl -b -1 -k | grep -iE "usb|power|voltage|under"
+
+# Export logs for analysis
+journalctl --since "2026-03-24" --output=json > /tmp/sail-logs.json
+```
+
 ---
 
 ## Sensor Wiring Summary
