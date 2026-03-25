@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { NavLink, Routes, Route } from "react-router-dom";
+import { API_URL } from "./config";
 import SessionBrowser from "../components/SessionBrowser";
 import MapPlayer from "../components/MapPlayer";
 import VideoPlayer from "../components/VideoPlayer";
@@ -21,7 +22,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetch("/api/sessions")
+    fetch(`${API_URL}/api/sessions`)
       .then((r) => r.json())
       .then((data) => setSessions(data.sessions || []))
       .catch(console.error);
@@ -34,8 +35,8 @@ export default function App() {
 
     try {
       const [dataRes, analysisRes] = await Promise.all([
-        fetch(`/api/data/${device_id}/${date}`).then((r) => r.json()),
-        fetch(`/api/analysis/${device_id}/${date}`).then((r) => r.json()).catch(() => null),
+        fetch(`${API_URL}/api/data/${device_id}/${date}`).then((r) => r.json()),
+        fetch(`${API_URL}/api/analysis/${device_id}/${date}`).then((r) => r.json()).catch(() => null),
       ]);
       setSensorData(dataRes);
       setAnalysis(analysisRes);

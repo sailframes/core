@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from "react";
+import { API_URL } from "../src/config";
 
 export default function BoatProfiles() {
   const [boats, setBoats] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/boats")
+    fetch(`${API_URL}/api/boats`)
       .then((r) => r.json())
       .then((data) => setBoats(data.boats || []))
       .catch(console.error)

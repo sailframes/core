@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { API_URL } from "../src/config";
 
 const METRICS = [
   { value: "max_speed", label: "Max Speed (kts)" },
@@ -19,7 +20,7 @@ export default function Leaderboard() {
     const params = new URLSearchParams({ metric, limit: "20" });
     if (boatClass) params.set("boat_class", boatClass);
 
-    fetch(`/api/leaderboard?${params}`)
+    fetch(`${API_URL}/api/leaderboard?${params}`)
       .then((r) => r.json())
       .then((data) => setEntries(data.entries || []))
       .catch(console.error)

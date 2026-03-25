@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from "react";
 import Hls from "hls.js";
+import { API_URL } from "../src/config";
 
 export default function VideoPlayer({ session, currentTime, onTimeChange }) {
   const videoRef = useRef(null);
@@ -10,7 +11,7 @@ export default function VideoPlayer({ session, currentTime, onTimeChange }) {
   // Load video info when session changes
   useEffect(() => {
     if (!session) return;
-    fetch(`/api/video/${session.device_id}/${session.date}`)
+    fetch(`${API_URL}/api/video/${session.device_id}/${session.date}`)
       .then((r) => r.json())
       .then((data) => setVideoInfo(data.cameras || {}))
       .catch(() => setVideoInfo(null));
