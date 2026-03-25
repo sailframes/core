@@ -1,0 +1,15 @@
+# SailFrames gpsd configuration
+# Configures gpsd for the ZED-F9P GPS receiver
+#
+# Install: sudo cp gpsd-default /etc/default/gpsd
+# Apply:   sudo systemctl restart gpsd
+
+# Devices gpsd should collect to at boot time.
+DEVICES="/dev/ttyACM0"
+
+# Other options you want to pass to gpsd
+# -n = don't wait for client to connect before polling GPS
+GPSD_OPTIONS="-n"
+
+# Automatically hot add/remove USB GPS devices via gpsdctl
+USBAUTO="true"
