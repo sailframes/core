@@ -190,6 +190,22 @@ Resources:
           DATA_BUCKET: !Ref DataBucket
           CLOUDFRONT_DOMAIN: !GetAtt WebsiteBucket.WebsiteURL
 
+  ApiAnalysisFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'sailframes-api-analysis-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Sub 'sailframes-lambda-code-${Environment}'
+        S3Key: api_analysis.zip
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucket
+
   # ============================================
   # VIDEO TRANSCODING
   # ============================================
@@ -419,6 +435,30 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref ApiVideoFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
+  # Analysis endpoint
+  AnalysisIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiAnalysisFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  AnalysisRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'GET /api/analysis/{device_id}/{date}'
+      Target: !Sub 'integrations/${AnalysisIntegration}'
+
+  AnalysisPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiAnalysisFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'

@@ -5,11 +5,25 @@ with fallback estimation when sensors are unavailable.
 """
 
 import math
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
 
 from .models import GpsPoint, ImuReading, WindReading
+
+
+def _to_timestamp(t) -> float:
+    """Convert ISO string or datetime to Unix timestamp."""
+    if isinstance(t, (int, float)):
+        return float(t)
+    if isinstance(t, str):
+        # Handle ISO format with Z suffix
+        t = t.replace("Z", "+00:00")
+        return datetime.fromisoformat(t).timestamp()
+    if isinstance(t, datetime):
+        return t.timestamp()
+    return 0.0
 
 
 def apparent_to_true_wind(
@@ -58,13 +72,13 @@ def compute_true_wind_series(
     if not gps or not wind:
         return []
 
-    gps_times = np.array([p.timestamp for p in gps])
+    gps_times = np.array([_to_timestamp(p.timestamp) for p in gps])
     gps_speeds = np.array([p.speed_kts for p in gps])
     gps_headings = np.array([p.heading_deg for p in gps])
 
     # Use IMU heading if available (higher rate, more accurate)
     if imu and len(imu) > 10:
-        imu_times = np.array([r.timestamp for r in imu])
+        imu_times = np.array([_to_timestamp(r.timestamp) for r in imu])
         imu_headings = np.array([r.heading_deg for r in imu])
     else:
         imu_times = gps_times
@@ -72,7 +86,7 @@ def compute_true_wind_series(
 
     results = []
     for w in wind:
-        t = w.timestamp
+        t = _to_timestamp(w.timestamp)
         if t < gps_times[0] or t > gps_times[-1]:
             continue
 
@@ -84,7 +98,7 @@ def compute_true_wind_series(
         )
 
         results.append({
-            "timestamp": t,
+            "timestamp": w.timestamp,
             "tws_kts": round(tws, 2),
             "twa_deg": round(twa, 1),
             "twd_deg": round(twd, 1),

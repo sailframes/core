@@ -79,7 +79,7 @@ package_lambdas() {
 
     log "Packaging Lambda functions..."
 
-    local functions=("process_upload" "api_sessions" "api_data" "api_video")
+    local functions=("process_upload" "api_sessions" "api_data" "api_video" "api_analysis")
 
     for func in "${functions[@]}"; do
         local func_dir="$LAMBDA_DIR/$func"

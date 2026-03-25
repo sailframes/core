@@ -7,11 +7,24 @@ saving results alongside the processed data.
 import json
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+
+def _to_timestamp(t) -> float:
+    """Convert ISO string or datetime to Unix timestamp."""
+    if isinstance(t, (int, float)):
+        return float(t)
+    if isinstance(t, str):
+        t = t.replace("Z", "+00:00")
+        return datetime.fromisoformat(t).timestamp()
+    if isinstance(t, datetime):
+        return t.timestamp()
+    return 0.0
 
 from processing.maneuvers import detect_maneuvers, maneuver_summary
 from processing.models import GpsPoint, ImuReading, SessionMetadata, WindReading
@@ -37,33 +50,33 @@ def load_sensor_json(path: Path) -> list[dict]:
 
 def parse_gps(records: list[dict]) -> list[GpsPoint]:
     return [GpsPoint(
-        timestamp=r["timestamp"],
+        timestamp=_to_timestamp(r.get("timestamp", r.get("t", ""))),
         lat=r.get("lat", r.get("latitude", 0)),
         lon=r.get("lon", r.get("longitude", 0)),
-        speed_kts=r.get("speed_kts", r.get("speed", 0)),
-        heading_deg=r.get("heading_deg", r.get("heading", 0)),
-        fix_quality=r.get("fix_quality", 0),
-    ) for r in records if "timestamp" in r]
+        speed_kts=r.get("speed_kts", r.get("speed_kn", r.get("speed", 0))),
+        heading_deg=r.get("heading_deg", r.get("course", r.get("heading", 0))),
+        fix_quality=r.get("fix_quality", r.get("fix", 0)),
+    ) for r in records if "timestamp" in r or "t" in r]
 
 
 def parse_imu(records: list[dict]) -> list[ImuReading]:
     return [ImuReading(
-        timestamp=r["timestamp"],
+        timestamp=_to_timestamp(r.get("timestamp", r.get("t", ""))),
         heading_deg=r.get("heading_deg", r.get("heading", 0)),
         pitch_deg=r.get("pitch_deg", r.get("pitch", 0)),
         heel_deg=r.get("heel_deg", r.get("heel", 0)),
         accel_x=r.get("accel_x", 0),
         accel_y=r.get("accel_y", 0),
         accel_z=r.get("accel_z", 0),
-    ) for r in records if "timestamp" in r]
+    ) for r in records if "timestamp" in r or "t" in r]
 
 
 def parse_wind(records: list[dict]) -> list[WindReading]:
     return [WindReading(
-        timestamp=r["timestamp"],
-        apparent_speed_kts=r.get("apparent_speed_kts", r.get("speed_kts", 0)),
-        apparent_angle_deg=r.get("apparent_angle_deg", r.get("angle_deg", 0)),
-    ) for r in records if "timestamp" in r]
+        timestamp=_to_timestamp(r.get("timestamp", r.get("t", ""))),
+        apparent_speed_kts=r.get("apparent_speed_kts", r.get("aws_kn", r.get("speed_kts", 0))),
+        apparent_angle_deg=r.get("apparent_angle_deg", r.get("awa", r.get("angle_deg", 0))),
+    ) for r in records if "timestamp" in r or "t" in r]
 
 
 def analyze_session(data_dir: Path) -> dict:
