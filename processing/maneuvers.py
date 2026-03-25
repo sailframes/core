@@ -12,13 +12,14 @@ from .models import GpsPoint, ImuReading, Maneuver, ManeuverType
 
 
 # Detection thresholds
-MIN_HEADING_CHANGE_DEG = 60  # minimum heading change to qualify
+MIN_HEADING_CHANGE_DEG = 40  # minimum heading change to qualify (lowered from 60)
 MAX_MANEUVER_DURATION_SEC = 30  # max time for heading change
 MIN_BOAT_SPEED_KTS = 1.5  # ignore turns while nearly stopped
 SPEED_RECOVERY_THRESHOLD = 0.9  # 90% of entry speed
 MAX_RECOVERY_WINDOW_SEC = 60
-TURN_RATE_THRESHOLD = 3.0  # deg/sec to detect turn (lowered from 5.0)
+TURN_RATE_THRESHOLD = 3.0  # deg/sec to detect turn
 TURN_WINDOW_EXTEND_SEC = 5  # extend window before/after rapid portion
+MIN_MANEUVER_SPACING_SEC = 20  # minimum time between maneuvers to avoid duplicates
 
 
 def detect_maneuvers(
@@ -28,19 +29,15 @@ def detect_maneuvers(
 ) -> list[Maneuver]:
     """Detect tacks and gybes from heading changes.
 
-    Uses IMU heading if available (50Hz), falls back to GPS heading (10Hz).
+    Uses sliding window to find significant heading changes in GPS course.
     Classifies as tack vs gybe using true wind direction if provided.
     """
     if len(gps) < 20:
         return []
 
-    # Build heading time series (prefer IMU for higher resolution)
-    if imu and len(imu) > 50:
-        times = np.array([r.timestamp for r in imu])
-        headings = np.array([r.heading_deg for r in imu])
-    else:
-        times = np.array([p.timestamp for p in gps])
-        headings = np.array([p.heading_deg for p in gps])
+    # Use GPS course for heading - IMU heading often has mounting offset issues
+    times = np.array([p.timestamp for p in gps])
+    headings = np.array([p.heading_deg for p in gps])
 
     # GPS speed series for speed loss calculation
     gps_times = np.array([p.timestamp for p in gps])
@@ -48,63 +45,62 @@ def detect_maneuvers(
     gps_lats = np.array([p.lat for p in gps])
     gps_lons = np.array([p.lon for p in gps])
 
-    # Compute heading rate of change (degrees/sec)
-    dt = np.diff(times)
-    dt[dt == 0] = 0.001  # avoid division by zero
-    dh = _angular_diff(headings[1:], headings[:-1])
-    heading_rate = dh / dt
+    # Use sliding window to detect significant heading changes
+    # Window of 20-30 seconds captures typical tack/gybe duration
+    WINDOW_SIZE = 25  # samples (seconds at 1Hz)
 
-    # Find regions of rapid heading change
-    rapid_turn = np.abs(heading_rate) > TURN_RATE_THRESHOLD
     maneuvers = []
+    last_maneuver_end = -999999
 
-    i = 0
-    while i < len(rapid_turn):
-        if not rapid_turn[i]:
+    i = WINDOW_SIZE
+    while i < len(headings):
+        # Check heading change over window
+        heading_change = _angular_diff(headings[i], headings[i - WINDOW_SIZE])
+
+        # Skip if not a significant change
+        if abs(heading_change) < MIN_HEADING_CHANGE_DEG:
             i += 1
             continue
 
-        # Found start of a turn - find the extent of rapid portion
-        rapid_start = i
-        while i < len(rapid_turn) and rapid_turn[i]:
+        # Skip if too close to last maneuver
+        t_start = times[i - WINDOW_SIZE]
+        if t_start < last_maneuver_end + MIN_MANEUVER_SPACING_SEC:
             i += 1
-        rapid_end = i
+            continue
 
-        # Extend window to capture full maneuver (before/after rapid portion)
-        # Find where heading was stable before the turn
-        start_idx = rapid_start
-        t_rapid_start = times[rapid_start]
-        while start_idx > 0 and (t_rapid_start - times[start_idx]) < TURN_WINDOW_EXTEND_SEC:
-            if abs(heading_rate[start_idx - 1]) < 1.0:  # stable heading
+        # Found a potential maneuver - refine the boundaries
+        # Find the actual start (where heading started changing)
+        start_idx = i - WINDOW_SIZE
+        while start_idx < i - 5:
+            local_change = abs(_angular_diff(headings[start_idx + 5], headings[start_idx]))
+            if local_change > 10:  # Found where significant change starts
                 break
-            start_idx -= 1
+            start_idx += 1
 
-        # Find where heading stabilizes after the turn
-        end_idx = min(rapid_end, len(headings) - 1)
-        t_rapid_end = times[min(rapid_end, len(times) - 1)]
-        while end_idx < len(heading_rate) and (times[end_idx] - t_rapid_end) < TURN_WINDOW_EXTEND_SEC:
-            if abs(heading_rate[end_idx]) < 1.0:  # stable heading
+        # Find the actual end (where heading stabilized)
+        end_idx = i
+        while end_idx < min(len(headings) - 5, i + WINDOW_SIZE):
+            local_change = abs(_angular_diff(headings[end_idx + 5], headings[end_idx]))
+            if local_change < 5:  # Heading stabilized
                 break
             end_idx += 1
 
         t_start = times[start_idx]
-        t_end = times[min(end_idx, len(times) - 1)]
+        t_end = times[end_idx]
         duration = t_end - t_start
 
         if duration > MAX_MANEUVER_DURATION_SEC:
+            i += 5
             continue
 
-        # Total heading change
         heading_before = headings[start_idx]
-        heading_after = headings[min(end_idx, len(headings) - 1)]
+        heading_after = headings[end_idx]
         heading_change = _angular_diff(heading_after, heading_before)
-
-        if abs(heading_change) < MIN_HEADING_CHANGE_DEG:
-            continue
 
         # Speed metrics (interpolate GPS speed at maneuver boundaries)
         speed_before = float(np.interp(t_start, gps_times, gps_speeds))
         if speed_before < MIN_BOAT_SPEED_KTS:
+            i += 1
             continue
 
         # Find minimum speed during maneuver
@@ -152,6 +148,11 @@ def detect_maneuvers(
             start_lat=start_lat,
             start_lon=start_lon,
         ))
+        last_maneuver_end = t_end
+
+        # Skip past this maneuver to avoid duplicate detection
+        i = end_idx + WINDOW_SIZE
+        continue
 
     return maneuvers
 
