@@ -39,18 +39,20 @@ syncs to AWS after each session, and provides web-based race analysis and replay
 
 ## I2C Address Map (No Conflicts)
 
-| Device | Address |
-|---|---|
-| BNO085 IMU | 0x4A |
-| DPS310 Pressure | 0x77 |
-| PiSugar Battery | 0x57 |
-| PiSugar RTC | 0x68 |
-| LCD Display | 0x27 |
+| Device | Address | Status |
+|---|---|---|
+| LCD Display | 0x27 | Active |
+| BNO085 IMU | 0x4A | Active |
+| DS3231 RTC | 0x68 | Planned (order Adafruit 3013) |
+| DPS310 Pressure | 0x77 | Active |
+
+Note: PiSugar battery hat (0x57, 0x68) was removed due to vibration issues.
+Now using USB-C power bank for power.
 
 Verify all devices after wiring:
 ```bash
 sudo i2cdetect -y 1
-# Expected: 0x27, 0x4a, 0x57, 0x68, 0x77
+# Expected: 0x27, 0x4a, 0x77 (add 0x68 when DS3231 installed)
 ```
 
 ---
@@ -75,6 +77,35 @@ pip install adafruit-circuitpython-dps310 --break-system-packages
 pip install bleak              # BLE for Calypso wind sensor
 pip install pyserial           # ZED-F9P UART fallback
 ```
+
+### GPS Time Sync (chrony + gpsd)
+
+The system uses GPS time to keep the clock accurate while offline (on the water).
+Without this, the Pi's clock can drift significantly on power cycles.
+
+**Configuration files:**
+- `/etc/default/gpsd` — GPS device settings
+- `/etc/chrony/conf.d/gps.conf` — GPS as time source
+
+**Key settings in `/etc/chrony/conf.d/gps.conf`:**
+```ini
+# GPS via gpsd shared memory
+refclock SHM 0 refid GPS precision 1e-1 offset 0.0 delay 0.2 poll 3 trust
+makestep 1 -1   # Allow large time corrections (important after power loss)
+local stratum 10
+```
+
+**Verify GPS time source:**
+```bash
+chronyc sources    # Shows GPS as #* or #+ when active
+chronyc tracking   # Shows time sync status
+gpspipe -w -n 3    # Verify GPS is receiving data
+```
+
+**Behavior:**
+- When online: Uses NTP servers (more accurate)
+- When offline: Falls back to GPS (~50ms accuracy via NMEA)
+- On boot with wrong clock: Auto-corrects from GPS within seconds
 
 ---
 
