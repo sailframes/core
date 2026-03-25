@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-SailFrames Battery Logger
-Logs battery metrics and process power usage for analysis.
-- Tracks battery sessions (unplug to plug)
-- Logs voltage, current, percentage over time
+SailFrames Power Usage Logger
+Logs system resource usage and process stats for power analysis.
 - Records top CPU-consuming processes
+- Tracks CPU, memory, temperature over time
+- Optionally logs battery metrics if INA219 sensor present
+- Works without battery sensor (USB-C power bank mode)
 - Stores data in CSV files for dashboard review
 """
 
-import os
-import sys
 import csv
 import time
 import signal
@@ -38,7 +37,6 @@ VOLTAGE_CRITICAL = 3.5     # Critical threshold - shutdown imminent
 VOLTAGE_SAG_THRESHOLD = 0.1  # Warn if voltage drops this much between readings
 
 running = True
-current_session = None
 
 
 def signal_handler(sig, frame):
@@ -86,8 +84,8 @@ def get_battery_info():
             'power_mw': round(power_mw, 1),
             'charging': current_ma < 0,
         }
-    except Exception as e:
-        logger.error(f"Battery read error: {e}")
+    except Exception:
+        # No battery sensor present - this is normal for USB-C power bank mode
         return None
 
 
@@ -143,141 +141,16 @@ def get_cpu_temp():
         return None
 
 
-class BatterySession:
-    """Tracks a single battery discharge session."""
-
-    def __init__(self, start_time, start_percent, start_voltage):
-        self.session_id = start_time.strftime('%Y%m%d_%H%M%S')
-        self.start_time = start_time
-        self.start_percent = start_percent
-        self.start_voltage = start_voltage
-        self.end_time = None
-        self.end_percent = None
-        self.end_voltage = None
-        self.min_voltage = start_voltage
-        self.max_current_ma = 0
-        self.total_power_mwh = 0
-        self.sample_count = 0
-
-        # Create session log file
-        self.log_file = DATA_DIR / f'session_{self.session_id}.csv'
-        self.process_file = DATA_DIR / f'processes_{self.session_id}.csv'
-
-        # Initialize CSV files
-        with open(self.log_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['timestamp', 'voltage', 'current_ma', 'percent',
-                           'power_mw', 'cpu_percent', 'memory_percent', 'cpu_temp'])
-
-        with open(self.process_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['timestamp', 'pid', 'name', 'cpu_percent', 'memory_percent'])
-
-        logger.info(f"Started battery session {self.session_id} at {start_percent}%")
-
-    def log_sample(self, battery, system, processes):
-        """Log a single sample to the session."""
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        # Update session stats
-        self.sample_count += 1
-        if battery['voltage'] < self.min_voltage:
-            self.min_voltage = battery['voltage']
-        if battery['current_ma'] > self.max_current_ma:
-            self.max_current_ma = battery['current_ma']
-
-        # Accumulate power (mWh = mW * hours)
-        hours = LOG_INTERVAL / 3600
-        self.total_power_mwh += battery['power_mw'] * hours
-
-        # Write battery log
-        with open(self.log_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                timestamp,
-                battery['voltage'],
-                battery['current_ma'],
-                battery['percent'],
-                battery['power_mw'],
-                system['cpu_percent'],
-                system['memory_percent'],
-                system['cpu_temp'],
-            ])
-
-        # Write process log
-        with open(self.process_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            for proc in processes:
-                writer.writerow([
-                    timestamp,
-                    proc['pid'],
-                    proc['name'],
-                    proc['cpu_percent'],
-                    proc['memory_percent'],
-                ])
-
-    def end(self, end_percent, end_voltage):
-        """End the session and write summary if meaningful."""
-        self.end_time = datetime.now(timezone.utc)
-        self.end_percent = end_percent
-        self.end_voltage = end_voltage
-
-        duration = self.end_time - self.start_time
-        duration_mins = duration.total_seconds() / 60
-        percent_used = self.start_percent - self.end_percent
-
-        # Skip sessions that are too short or didn't use meaningful power
-        # This filters out noise from USB-C current fluctuations
-        MIN_SAMPLES = 2  # At least 2 samples (~1 minute at 30s interval)
-        MIN_POWER_MWH = 1.0  # At least 1 mWh used
-
-        if self.sample_count < MIN_SAMPLES or self.total_power_mwh < MIN_POWER_MWH:
-            logger.info(f"Discarding short session {self.session_id}: "
-                       f"{self.sample_count} samples, {self.total_power_mwh:.1f} mWh")
-            # Clean up temp files for discarded session
-            try:
-                self.log_file.unlink(missing_ok=True)
-                self.process_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return None
-
-        summary = {
-            'session_id': self.session_id,
-            'start_time': self.start_time.isoformat(),
-            'end_time': self.end_time.isoformat(),
-            'duration_minutes': round(duration_mins, 1),
-            'start_percent': self.start_percent,
-            'end_percent': self.end_percent,
-            'percent_used': round(percent_used, 1),
-            'start_voltage': self.start_voltage,
-            'end_voltage': self.end_voltage,
-            'min_voltage': self.min_voltage,
-            'max_current_ma': self.max_current_ma,
-            'total_power_mwh': round(self.total_power_mwh, 1),
-            'sample_count': self.sample_count,
-        }
-
-        # Append to sessions summary file
-        summary_file = DATA_DIR / 'sessions.csv'
-        write_header = not summary_file.exists()
-
-        with open(summary_file, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=summary.keys())
-            if write_header:
-                writer.writeheader()
-            writer.writerow(summary)
-
-        logger.info(f"Ended session {self.session_id}: {duration_mins:.1f} min, "
-                   f"{percent_used:.1f}% used, {self.total_power_mwh:.1f} mWh")
-
-        return summary
-
-
 def get_daily_log_file():
-    """Get path to today's continuous battery log file."""
+    """Get path to today's continuous power log file."""
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    return DATA_DIR / f'battery_{today}.csv'
+    return DATA_DIR / f'power_{today}.csv'
+
+
+def get_daily_process_file():
+    """Get path to today's process log file."""
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    return DATA_DIR / f'processes_{today}.csv'
 
 
 def ensure_daily_log_header(log_file):
@@ -286,19 +159,29 @@ def ensure_daily_log_header(log_file):
         with open(log_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
-                'timestamp', 'voltage', 'current_ma', 'percent', 'power_mw',
-                'charging', 'cpu_percent', 'memory_percent', 'cpu_temp'
+                'timestamp', 'cpu_percent', 'memory_percent', 'cpu_temp',
+                'voltage', 'current_ma', 'percent', 'power_mw', 'charging'
             ])
         return True
     return False
 
 
+def ensure_process_log_header(log_file):
+    """Create process log file with header if it doesn't exist."""
+    if not log_file.exists():
+        with open(log_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'pid', 'name', 'cpu_percent', 'memory_percent'])
+        return True
+    return False
+
+
 def run():
-    global current_session, running
+    global running
 
     # Ensure data directory exists
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Battery logger started, logging to {DATA_DIR}")
+    logger.info(f"Power usage logger started, logging to {DATA_DIR}")
 
     # Initial CPU measurement to prime psutil
     psutil.cpu_percent()
@@ -309,121 +192,109 @@ def run():
             pass
     time.sleep(1)
 
-    last_charging = None
-    # Debounce counter - require multiple consecutive readings to change state
-    # This prevents false sessions from momentary current fluctuations
-    DEBOUNCE_COUNT = 3  # Require 3 consecutive readings (~1.5 min) to confirm state change
-    discharge_count = 0
-    charge_count = 0
     rows_logged = 0
     current_log_file = None
+    current_process_file = None
     last_voltage = None
     last_warning_time = 0
+    battery_available = None  # None = unknown, True/False after first check
 
     while running:
-        battery = get_battery_info()
-        if battery is None:
-            time.sleep(LOG_INTERVAL)
-            continue
-
-        voltage = battery['voltage']
-        current_time = time.time()
-
-        # Voltage warnings (throttled to once per minute)
-        if current_time - last_warning_time > 60:
-            if voltage < VOLTAGE_CRITICAL:
-                logger.warning(f"CRITICAL: Battery voltage {voltage:.3f}V - shutdown imminent!")
-                last_warning_time = current_time
-            elif voltage < VOLTAGE_WARNING:
-                logger.warning(f"LOW VOLTAGE: Battery at {voltage:.3f}V ({battery['percent']:.0f}%)")
-                last_warning_time = current_time
-
-        # Detect voltage sag (sudden drop)
-        if last_voltage is not None:
-            voltage_drop = last_voltage - voltage
-            if voltage_drop >= VOLTAGE_SAG_THRESHOLD:
-                logger.warning(f"VOLTAGE SAG: Dropped {voltage_drop:.3f}V ({last_voltage:.3f}V -> {voltage:.3f}V) - possible power issue")
-        last_voltage = voltage
-
+        # Get system stats (always available)
         system = get_system_stats()
         processes = get_top_processes()
 
-        # Always log to daily continuous file
+        # Try to get battery info (optional - may not have sensor)
+        battery = get_battery_info()
+
+        # Log battery sensor availability once
+        if battery_available is None:
+            battery_available = battery is not None
+            if battery_available:
+                logger.info("Battery sensor (INA219) detected")
+            else:
+                logger.info("No battery sensor - logging system stats only (USB-C power bank mode)")
+
+        # Battery voltage warnings (only if sensor present)
+        if battery:
+            voltage = battery['voltage']
+            current_time = time.time()
+
+            if current_time - last_warning_time > 60:
+                if voltage < VOLTAGE_CRITICAL:
+                    logger.warning(f"CRITICAL: Battery voltage {voltage:.3f}V - shutdown imminent!")
+                    last_warning_time = current_time
+                elif voltage < VOLTAGE_WARNING:
+                    logger.warning(f"LOW VOLTAGE: Battery at {voltage:.3f}V ({battery['percent']:.0f}%)")
+                    last_warning_time = current_time
+
+            # Detect voltage sag
+            if last_voltage is not None:
+                voltage_drop = last_voltage - voltage
+                if voltage_drop >= VOLTAGE_SAG_THRESHOLD:
+                    logger.warning(f"VOLTAGE SAG: Dropped {voltage_drop:.3f}V")
+            last_voltage = voltage
+
+        # Ensure daily log files exist
         daily_log = get_daily_log_file()
+        process_log = get_daily_process_file()
+
         if daily_log != current_log_file:
             if ensure_daily_log_header(daily_log):
                 logger.info(f"Created new daily log: {daily_log}")
             current_log_file = daily_log
             rows_logged = 0
 
+        if process_log != current_process_file:
+            if ensure_process_log_header(process_log):
+                logger.info(f"Created new process log: {process_log}")
+            current_process_file = process_log
+
         timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Log system stats (with optional battery data)
         with open(daily_log, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([
                 timestamp,
-                battery['voltage'],
-                battery['current_ma'],
-                battery['percent'],
-                battery['power_mw'],
-                'charging' if battery['charging'] else 'discharging',
                 system['cpu_percent'],
                 system['memory_percent'],
                 system['cpu_temp'],
+                battery['voltage'] if battery else '',
+                battery['current_ma'] if battery else '',
+                battery['percent'] if battery else '',
+                battery['power_mw'] if battery else '',
+                ('charging' if battery['charging'] else 'discharging') if battery else '',
             ])
+
+        # Log top processes
+        with open(process_log, 'a', newline='') as f:
+            writer = csv.writer(f)
+            for proc in processes:
+                writer.writerow([
+                    timestamp,
+                    proc['pid'],
+                    proc['name'],
+                    proc['cpu_percent'],
+                    proc['memory_percent'],
+                ])
+
         rows_logged += 1
 
         # Log status every 60 samples (~30 min)
         if rows_logged % 60 == 0:
-            state = 'charging' if battery['charging'] else 'discharging'
-            logger.info(f"Battery: {battery['percent']}% {battery['voltage']}V "
-                       f"{battery['current_ma']}mA ({state})")
-
-        # Debounced charging state detection for session tracking
-        if battery['charging']:
-            charge_count += 1
-            discharge_count = 0
-        else:
-            discharge_count += 1
-            charge_count = 0
-
-        # Detect charging state change with debouncing
-        if last_charging is not None:
-            if last_charging and discharge_count >= DEBOUNCE_COUNT:
-                # Confirmed discharging - begin new session
-                current_session = BatterySession(
-                    datetime.now(timezone.utc),
-                    battery['percent'],
-                    battery['voltage']
-                )
-                logger.info(f"Started discharge session at {battery['percent']}%")
-            elif not last_charging and charge_count >= DEBOUNCE_COUNT:
-                # Confirmed charging - end session
-                if current_session:
-                    current_session.end(battery['percent'], battery['voltage'])
-                    current_session = None
-
-        # Update last_charging only when state is confirmed
-        if charge_count >= DEBOUNCE_COUNT:
-            last_charging = True
-        elif discharge_count >= DEBOUNCE_COUNT:
-            last_charging = False
-        elif last_charging is None:
-            # Initial state - use current reading
-            last_charging = battery['charging']
-
-        # Also log to session file if we're in a discharge session
-        if current_session and not battery['charging']:
-            current_session.log_sample(battery, system, processes)
+            if battery:
+                state = 'charging' if battery['charging'] else 'discharging'
+                logger.info(f"Battery: {battery['percent']}% {battery['voltage']}V "
+                           f"{battery['current_ma']}mA ({state}) | "
+                           f"CPU: {system['cpu_percent']}% Temp: {system['cpu_temp']}C")
+            else:
+                logger.info(f"CPU: {system['cpu_percent']}% Mem: {system['memory_percent']}% "
+                           f"Temp: {system['cpu_temp']}C")
 
         time.sleep(LOG_INTERVAL)
 
-    # Clean shutdown - end any active session
-    if current_session:
-        battery = get_battery_info()
-        if battery:
-            current_session.end(battery['percent'], battery['voltage'])
-
-    logger.info("Battery logger stopped")
+    logger.info("Power usage logger stopped")
 
 
 if __name__ == '__main__':
