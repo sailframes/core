@@ -17,6 +17,8 @@ MAX_MANEUVER_DURATION_SEC = 30  # max time for heading change
 MIN_BOAT_SPEED_KTS = 1.5  # ignore turns while nearly stopped
 SPEED_RECOVERY_THRESHOLD = 0.9  # 90% of entry speed
 MAX_RECOVERY_WINDOW_SEC = 60
+TURN_RATE_THRESHOLD = 3.0  # deg/sec to detect turn (lowered from 5.0)
+TURN_WINDOW_EXTEND_SEC = 5  # extend window before/after rapid portion
 
 
 def detect_maneuvers(
@@ -53,7 +55,7 @@ def detect_maneuvers(
     heading_rate = dh / dt
 
     # Find regions of rapid heading change
-    rapid_turn = np.abs(heading_rate) > 5.0  # >5 deg/sec
+    rapid_turn = np.abs(heading_rate) > TURN_RATE_THRESHOLD
     maneuvers = []
 
     i = 0
@@ -62,11 +64,28 @@ def detect_maneuvers(
             i += 1
             continue
 
-        # Found start of a turn - find the extent
-        start_idx = i
+        # Found start of a turn - find the extent of rapid portion
+        rapid_start = i
         while i < len(rapid_turn) and rapid_turn[i]:
             i += 1
-        end_idx = i
+        rapid_end = i
+
+        # Extend window to capture full maneuver (before/after rapid portion)
+        # Find where heading was stable before the turn
+        start_idx = rapid_start
+        t_rapid_start = times[rapid_start]
+        while start_idx > 0 and (t_rapid_start - times[start_idx]) < TURN_WINDOW_EXTEND_SEC:
+            if abs(heading_rate[start_idx - 1]) < 1.0:  # stable heading
+                break
+            start_idx -= 1
+
+        # Find where heading stabilizes after the turn
+        end_idx = min(rapid_end, len(headings) - 1)
+        t_rapid_end = times[min(rapid_end, len(times) - 1)]
+        while end_idx < len(heading_rate) and (times[end_idx] - t_rapid_end) < TURN_WINDOW_EXTEND_SEC:
+            if abs(heading_rate[end_idx]) < 1.0:  # stable heading
+                break
+            end_idx += 1
 
         t_start = times[start_idx]
         t_end = times[min(end_idx, len(times) - 1)]
