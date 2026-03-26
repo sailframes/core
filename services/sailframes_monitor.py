@@ -64,7 +64,8 @@ def get_cpu_temp():
 
 def get_battery_info():
     """
-    Read battery status from Waveshare UPS HAT (D) via I2C.
+    Read battery status from Waveshare UPS HAT (D) via I2C, or return external
+    power bank status if no HAT is detected.
     - INA219 at 0x43: voltage/current monitoring
     - Battery percentage calculated from output voltage:
       - Full (charging): ~4.2V output
@@ -83,8 +84,23 @@ def get_battery_info():
         import smbus2
         bus = smbus2.SMBus(1)
 
+        # Try to read from INA219 - will fail if no HAT present
+        try:
+            raw_bus = bus.read_word_data(INA219_ADDR, REG_BUS_VOLTAGE)
+        except OSError:
+            bus.close()
+            # No HAT detected - using external USB power bank
+            return {
+                'type': 'external',
+                'name': 'USB Power Bank',
+                'capacity': '50Ah',
+                'voltage': None,
+                'percent': None,
+                'current_ma': None,
+                'charging': None,
+            }
+
         # Read output voltage from INA219
-        raw_bus = bus.read_word_data(INA219_ADDR, REG_BUS_VOLTAGE)
         raw_bus = ((raw_bus & 0xFF) << 8) | ((raw_bus >> 8) & 0xFF)
         voltage = (raw_bus >> 3) * 0.004
 
@@ -149,6 +165,7 @@ def get_battery_info():
             full_time = full_dt.strftime('%I:%M %p')
 
         return {
+            'type': 'hat',
             'voltage': round(voltage, 2),
             'percent': round(percent, 1),
             'current_ma': round(current_ma, 0),
@@ -162,7 +179,16 @@ def get_battery_info():
         }
     except Exception as e:
         logger.debug(f"Battery read error: {e}")
-        return {'voltage': None, 'percent': None, 'current_ma': None, 'charging': None}
+        # Assume external power bank if we can't read battery
+        return {
+            'type': 'external',
+            'name': 'USB Power Bank',
+            'capacity': '50Ah',
+            'voltage': None,
+            'percent': None,
+            'current_ma': None,
+            'charging': None,
+        }
 
 
 def get_disk_usage(mount_point):
@@ -463,6 +489,10 @@ def monitor_loop(config):
 
     system_state['device_id'] = config['device']['id']
 
+    # Service status check interval (less frequent to avoid file descriptor exhaustion)
+    SERVICE_CHECK_INTERVAL = 60  # seconds
+    last_service_check = 0
+
     while running:
         system_state['cpu_temp_c'] = get_cpu_temp()
         system_state['cpu_percent'] = psutil.cpu_percent(interval=1)
@@ -477,26 +507,31 @@ def monitor_loop(config):
         system_state['uptime_sec'] = int(time.monotonic())
         system_state['last_update'] = datetime.now(timezone.utc).isoformat()
 
-        # Check service status
-        system_state['services'] = {
-            'gps': check_service_status('sailframes-gps'),
-            'imu': check_service_status('sailframes-imu'),
-            'pressure': check_service_status('sailframes-pressure'),
-            'wind': check_service_status('sailframes-wind'),
-        }
-        # Track cameras separately for individual control
-        system_state['cameras'] = {
-            'cockpit': check_service_status('sailframes-camera-cockpit'),
-            'sails': check_service_status('sailframes-camera-sails'),
-        }
-        # Netdata monitoring (optional, can be toggled)
-        system_state['netdata'] = check_service_status('netdata')
+        # Check service status less frequently (every 60s instead of every 10s)
+        # This reduces subprocess calls from 60k/day to 10k/day, preventing fd exhaustion
+        now = time.monotonic()
+        if now - last_service_check >= SERVICE_CHECK_INTERVAL:
+            last_service_check = now
+            system_state['services'] = {
+                'gps': check_service_status('sailframes-gps'),
+                'imu': check_service_status('sailframes-imu'),
+                'pressure': check_service_status('sailframes-pressure'),
+                'wind': check_service_status('sailframes-wind'),
+            }
+            # Track cameras separately for individual control
+            system_state['cameras'] = {
+                'cockpit': check_service_status('sailframes-camera-cockpit'),
+                'sails': check_service_status('sailframes-camera-sails'),
+            }
+            # Netdata monitoring (optional, can be toggled)
+            system_state['netdata'] = check_service_status('netdata')
 
-        # Low battery shutdown - only if batteries are actually present
+        # Low battery shutdown - only if HAT battery is present (not external power bank)
         # (voltage > 5V means batteries installed, not just HAT with no/dead batteries)
+        battery_type = system_state['battery'].get('type')
         battery_pct = system_state['battery'].get('percent')
         battery_voltage = system_state['battery'].get('voltage')
-        if (battery_pct is not None and battery_voltage is not None
+        if (battery_type != 'external' and battery_pct is not None and battery_voltage is not None
             and battery_voltage > 5.0 and battery_pct < shutdown_percent):
             logger.warning(f"Battery at {battery_pct}% ({battery_voltage}V)! Initiating clean shutdown.")
             subprocess.run(['sudo', 'shutdown', '-h', 'now'])
@@ -630,9 +665,15 @@ DASHBOARD_HTML = """
             <div class="value"><span id="cpu-temp">{{ state.cpu_temp_c or '—' }}</span><span class="unit">°C</span></div>
         </div>
         <div class="card">
+            {% if state.battery.type == 'external' %}
+            <h2>Power</h2>
+            <div class="value"><span id="battery-percent">50</span><span class="unit">Ah</span></div>
+            <div class="sub" id="battery-details">USB Power Bank · Check display for level</div>
+            <div id="battery-estimate" class="sub" style="margin-top: 4px; display: none;"></div>
+            {% else %}
             <h2>Battery <span id="battery-charging-icon" style="display: {{ 'inline' if state.battery.charging else 'none' }};" class="charging">⚡</span></h2>
             <div class="value"><span id="battery-percent">{{ state.battery.percent or '—' }}</span><span class="unit">%</span></div>
-            <div class="sub"><span id="battery-voltage">{{ state.battery.voltage or '—' }}</span>V · <span id="battery-current">{{ state.battery.current_ma or '—' }}</span>mA · <span id="battery-status">{% if state.battery.charging %}<span class="charging">Charging</span>{% else %}<span class="discharging">On Battery</span>{% endif %}</span></div>
+            <div class="sub" id="battery-details"><span id="battery-voltage">{{ state.battery.voltage or '—' }}</span>V · <span id="battery-current">{{ state.battery.current_ma or '—' }}</span>mA · <span id="battery-status">{% if state.battery.charging %}<span class="charging">Charging</span>{% else %}<span class="discharging">On Battery</span>{% endif %}</span></div>
             <div id="battery-estimate" class="sub" style="margin-top: 4px;">
             {% if state.battery.remaining_str and not state.battery.charging %}
             <span style="color: #ff9800;">~{{ state.battery.remaining_str }} remaining · empty ~{{ state.battery.empty_time }}</span>
@@ -640,6 +681,7 @@ DASHBOARD_HTML = """
             <span style="color: #1976d2;">~{{ state.battery.charge_str }} to full · ready ~{{ state.battery.full_time }}</span>
             {% endif %}
             </div>
+            {% endif %}
         </div>
         <div class="card">
             <h2>Disk Free</h2>
@@ -702,7 +744,10 @@ DASHBOARD_HTML = """
     <!-- Wind Section -->
     <div id="wind-section" class="card" style="margin-top: 12px;">
         <div id="wind-connected" style="display: {{ 'block' if state.wind and state.wind.connected else 'none' }};">
-            <h2>💨 Wind — <span id="wind-device-name">{{ state.wind.device_name if state.wind else 'Connected' }}</span></h2>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0;">💨 Wind — <span id="wind-device-name">{{ state.wind.device_name if state.wind else 'Connected' }}</span></h2>
+                <button id="btn-wind-restart" onclick="restartWind()" style="background: #455a64; color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">🔄 Restart</button>
+            </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;">
                 <div>
                     <div style="font-size: 11px; color: #78909c;">APPARENT WIND SPEED</div>
@@ -742,7 +787,10 @@ DASHBOARD_HTML = """
                     <div style="color: #78909c; font-style: italic;">Wind service not running</div>
                     {% endif %}
                 </div>
-                <button onclick="scanBluetooth()" style="background: #1976d2; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Scan Bluetooth</button>
+                <div style="display: flex; gap: 8px;">
+                    <button onclick="restartWind()" style="background: #455a64; color: white; border: none; padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;">🔄 Restart</button>
+                    <button onclick="scanBluetooth()" style="background: #1976d2; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Scan Bluetooth</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1459,6 +1507,36 @@ DASHBOARD_HTML = """
         });
     }
 
+    function restartWind() {
+        const btn = document.getElementById('btn-wind-restart');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '⏳ Restarting...';
+        }
+
+        fetch('/api/wind/restart', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                alert('Wind service restarted. Reconnecting to sensor...');
+                location.reload();
+            } else {
+                alert('Error: ' + (data.error || 'Failed to restart wind service'));
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '🔄 Restart';
+                }
+            }
+        })
+        .catch(e => {
+            alert('Error: ' + e);
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '🔄 Restart';
+            }
+        });
+    }
+
     // WiFi Mode
     function loadWiFiStatus() {
         fetch('/api/wifi/status')
@@ -1650,21 +1728,38 @@ DASHBOARD_HTML = """
 
                 // Battery
                 if (data.battery) {
-                    document.getElementById('battery-percent').textContent = data.battery.percent || '—';
-                    document.getElementById('battery-voltage').textContent = data.battery.voltage || '—';
-                    document.getElementById('battery-current').textContent = data.battery.current_ma || '—';
-                    document.getElementById('battery-charging-icon').style.display = data.battery.charging ? 'inline' : 'none';
-                    document.getElementById('battery-status').innerHTML = data.battery.charging
-                        ? '<span class="charging">Charging</span>'
-                        : '<span class="discharging">On Battery</span>';
+                    if (data.battery.type === 'external') {
+                        // External USB power bank - no live data
+                        document.getElementById('battery-percent').textContent = '50';
+                        const details = document.getElementById('battery-details');
+                        if (details) details.textContent = 'USB Power Bank · Check display for level';
+                        const estimate = document.getElementById('battery-estimate');
+                        if (estimate) estimate.style.display = 'none';
+                        const icon = document.getElementById('battery-charging-icon');
+                        if (icon) icon.style.display = 'none';
+                    } else {
+                        // HAT battery with live data
+                        document.getElementById('battery-percent').textContent = data.battery.percent || '—';
+                        const voltageEl = document.getElementById('battery-voltage');
+                        const currentEl = document.getElementById('battery-current');
+                        const statusEl = document.getElementById('battery-status');
+                        if (voltageEl) voltageEl.textContent = data.battery.voltage || '—';
+                        if (currentEl) currentEl.textContent = data.battery.current_ma || '—';
+                        const icon = document.getElementById('battery-charging-icon');
+                        if (icon) icon.style.display = data.battery.charging ? 'inline' : 'none';
+                        if (statusEl) statusEl.innerHTML = data.battery.charging
+                            ? '<span class="charging">Charging</span>'
+                            : '<span class="discharging">On Battery</span>';
 
-                    let estimate = '';
-                    if (data.battery.remaining_str && !data.battery.charging) {
-                        estimate = '<span style="color: #ff9800;">~' + data.battery.remaining_str + ' remaining · empty ~' + data.battery.empty_time + '</span>';
-                    } else if (data.battery.charge_str && data.battery.charging) {
-                        estimate = '<span style="color: #1976d2;">~' + data.battery.charge_str + ' to full · ready ~' + data.battery.full_time + '</span>';
+                        let estimate = '';
+                        if (data.battery.remaining_str && !data.battery.charging) {
+                            estimate = '<span style="color: #ff9800;">~' + data.battery.remaining_str + ' remaining · empty ~' + data.battery.empty_time + '</span>';
+                        } else if (data.battery.charge_str && data.battery.charging) {
+                            estimate = '<span style="color: #1976d2;">~' + data.battery.charge_str + ' to full · ready ~' + data.battery.full_time + '</span>';
+                        }
+                        const estimateEl = document.getElementById('battery-estimate');
+                        if (estimateEl) estimateEl.innerHTML = estimate;
                     }
-                    document.getElementById('battery-estimate').innerHTML = estimate;
                 }
 
                 // GPS indicator
@@ -3494,6 +3589,31 @@ def api_bluetooth_set_wind():
 def api_wind_status():
     """Get current wind sensor status."""
     return jsonify(get_wind_status() or {'connected': False})
+
+
+@app.route('/api/wind/restart', methods=['POST'])
+def api_wind_restart():
+    """Restart wind sensor service."""
+    try:
+        # Kill first (faster than stop), then start
+        subprocess.run(
+            ['sudo', 'systemctl', 'kill', 'sailframes-wind'],
+            capture_output=True, text=True, timeout=5
+        )
+        time.sleep(1)
+        result = subprocess.run(
+            ['sudo', 'systemctl', 'start', 'sailframes-wind'],
+            capture_output=True, text=True, timeout=10
+        )
+        success = result.returncode == 0
+        if success:
+            logger.info("Wind service restarted via API")
+        else:
+            logger.warning(f"Failed to restart wind service: {result.stderr}")
+        return jsonify({'success': success, 'error': result.stderr if not success else None})
+    except Exception as e:
+        logger.error(f"Wind restart error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/imu/status')
