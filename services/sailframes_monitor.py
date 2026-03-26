@@ -3435,7 +3435,9 @@ def api_camera_snapshot(camera_id):
             # Camera is busy recording - extract frame from current video
             # Find the latest video file for this camera
             today = datetime.now().strftime('%Y-%m-%d')
-            video_dir = Path(f'/home/paul/sailframes-data/{today}/video/{camera_id}')
+            _config = load_config()
+            data_dir = _config['storage']['data_dir']
+            video_dir = Path(f'{data_dir}/{today}/video/{camera_id}')
 
             if not video_dir.exists():
                 return jsonify({'success': False, 'error': 'No video directory found'}), 404
