@@ -58,9 +58,23 @@ def error_response(status: int, message: str) -> dict:
     }
 
 
+def get_manifest(device_id: str, date: str) -> dict:
+    """Load session manifest."""
+    key = f"processed/{device_id}/{date}/manifest.json"
+    try:
+        response = s3.get_object(Bucket=DATA_BUCKET, Key=key)
+        return json.loads(response['Body'].read().decode('utf-8'))
+    except Exception as e:
+        logger.warning(f"Could not load manifest: {e}")
+        return {}
+
+
 def load_session_data(device_id: str, date: str, sensors: list,
                       start_time: str, end_time: str, resolution: str) -> dict:
     """Load and merge sensor data for the session."""
+    # Load manifest for session bounds (includes video times)
+    manifest = get_manifest(device_id, date)
+
     result = {
         'device_id': device_id,
         'date': date,
@@ -118,8 +132,14 @@ def load_session_data(device_id: str, date: str, sensors: list,
         merged.append(point)
 
     result['data'] = merged
-    result['start_time'] = sorted_times[0] if sorted_times else None
-    result['end_time'] = sorted_times[-1] if sorted_times else None
     result['sample_count'] = len(merged)
+
+    # Use manifest session times (includes video) if available, else fall back to sensor times
+    if manifest.get('start_time'):
+        result['start_time'] = manifest['start_time']
+        result['end_time'] = manifest.get('end_time') or (sorted_times[-1] if sorted_times else None)
+    else:
+        result['start_time'] = sorted_times[0] if sorted_times else None
+        result['end_time'] = sorted_times[-1] if sorted_times else None
 
     return result

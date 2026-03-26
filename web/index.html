@@ -39,8 +39,12 @@
     </header>
 
     <main class="main">
-        <!-- Left panel: Map (collapsible) -->
+        <!-- Left panel: Video + Map -->
         <section class="panel map-panel" id="map-panel">
+            <!-- Video (compact, on top) -->
+            <div class="video-container video-compact" id="video-container" style="display: none;">
+                <video id="video-cockpit" muted></video>
+            </div>
             <div class="panel-header">
                 <h2>Track</h2>
                 <div class="stats" id="map-stats">
@@ -53,76 +57,33 @@
             <div class="resize-handle" id="map-resize-handle"></div>
         </section>
 
-        <!-- Right panel: Charts and Video -->
+        <!-- Right panel: Unified Chart -->
         <section class="panel data-panel">
-            <!-- Charts - All Measurements -->
-            <div class="charts-container">
-                <!-- Row 1: Attitude & Wind -->
-                <div class="chart-row">
-                    <div class="chart-box">
-                        <h3>Heel &amp; Pitch (deg)</h3>
-                        <canvas id="chart-attitude"></canvas>
+            <div class="unified-chart-container">
+                <!-- Measurement toggles -->
+                <div class="chart-controls">
+                    <div class="chart-toggles" id="chart-toggles">
+                        <button class="toggle-btn active" data-series="heel" style="--series-color: #1d9bf0;">Heel</button>
+                        <button class="toggle-btn active" data-series="pitch" style="--series-color: #ffad1f;">Pitch</button>
+                        <button class="toggle-btn" data-series="aws" style="--series-color: #00ba7c;">AWS</button>
+                        <button class="toggle-btn" data-series="awa" style="--series-color: #f4212e;">AWA</button>
+                        <button class="toggle-btn" data-series="sog" style="--series-color: #e879f9;">SOG</button>
+                        <button class="toggle-btn" data-series="heading" style="--series-color: #38bdf8;">Heading</button>
+                        <button class="toggle-btn" data-series="course" style="--series-color: #fbbf24;">Course</button>
+                        <button class="toggle-btn" data-series="accelX" style="--series-color: #fb7185;">Accel X</button>
+                        <button class="toggle-btn" data-series="accelY" style="--series-color: #4ade80;">Accel Y</button>
+                        <button class="toggle-btn" data-series="pressure" style="--series-color: #a78bfa;">Pressure</button>
                     </div>
-                    <div class="chart-box">
-                        <h3>Wind Speed &amp; Angle</h3>
-                        <canvas id="chart-wind"></canvas>
-                    </div>
-                </div>
-                <!-- Row 2: Speed & Heading -->
-                <div class="chart-row">
-                    <div class="chart-box">
-                        <h3>SOG (kn)</h3>
-                        <canvas id="chart-speed"></canvas>
-                    </div>
-                    <div class="chart-box">
-                        <h3>Heading (deg)</h3>
-                        <canvas id="chart-heading"></canvas>
+                    <div class="zoom-controls">
+                        <button class="zoom-btn" id="btn-zoom-out" title="Zoom Out">−</button>
+                        <button class="zoom-btn" id="btn-zoom-reset" title="Reset Zoom">⟲</button>
+                        <button class="zoom-btn" id="btn-zoom-in" title="Zoom In">+</button>
+                        <span class="zoom-label" id="zoom-label">100%</span>
                     </div>
                 </div>
-                <!-- Row 3: Acceleration -->
-                <div class="chart-row">
-                    <div class="chart-box">
-                        <h3>Acceleration X/Y (m/s²)</h3>
-                        <canvas id="chart-accel-xy"></canvas>
-                    </div>
-                    <div class="chart-box">
-                        <h3>Acceleration Z (m/s²)</h3>
-                        <canvas id="chart-accel-z"></canvas>
-                    </div>
-                </div>
-                <!-- Row 4: Pressure & Temperature -->
-                <div class="chart-row">
-                    <div class="chart-box">
-                        <h3>Pressure (hPa)</h3>
-                        <canvas id="chart-pressure"></canvas>
-                    </div>
-                    <div class="chart-box">
-                        <h3>Temperature (°C)</h3>
-                        <canvas id="chart-temperature"></canvas>
-                    </div>
-                </div>
-                <!-- Row 5: Wind Details -->
-                <div class="chart-row">
-                    <div class="chart-box">
-                        <h3>Wind Compass (deg)</h3>
-                        <canvas id="chart-wind-compass"></canvas>
-                    </div>
-                    <div class="chart-box">
-                        <h3>Wind Sensor Temp &amp; Battery</h3>
-                        <canvas id="chart-wind-meta"></canvas>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Video -->
-            <div class="video-container" id="video-container" style="display: none;">
-                <div class="video-box">
-                    <h3>Cockpit</h3>
-                    <video id="video-cockpit" muted></video>
-                </div>
-                <div class="video-box">
-                    <h3>Sails</h3>
-                    <video id="video-sails" muted></video>
+                <!-- Single unified chart -->
+                <div class="chart-box unified-chart">
+                    <canvas id="chart-unified"></canvas>
                 </div>
             </div>
         </section>

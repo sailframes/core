@@ -293,7 +293,13 @@ async def run_async(config):
         logger.info(f"Connecting to {device.name} ({device.address})")
 
         try:
-            async with BleakClient(device.address, timeout=30) as client:
+            # Use longer timeout and pass device object for better compatibility
+            client = BleakClient(device, timeout=60)
+            await client.connect()
+            logger.info("BLE connected, waiting for device to stabilize...")
+            await asyncio.sleep(2)  # Give device time to stabilize before service discovery
+
+            try:
                 logger.info("BLE connected")
                 device_name = device.name
                 device_address = device.address
@@ -484,6 +490,13 @@ async def run_async(config):
                         data_dir = get_data_dir(config)
                         csv_file, writer = create_csv_writer(data_dir)
                         rows_written = 0
+
+            finally:
+                # Ensure client is disconnected
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
 
         except Exception as e:
             logger.warning(f"BLE connection error: {e}")

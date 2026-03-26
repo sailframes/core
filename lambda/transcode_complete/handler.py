@@ -91,10 +91,16 @@ def merge_playlists(device_id: str, date: str, camera: str):
     segment_count = 0
     total_duration = 0.0
 
+    first_playlist = True
     for playlist_key in playlists:
         try:
             response = s3.get_object(Bucket=DATA_BUCKET, Key=playlist_key)
             content = response['Body'].read().decode('utf-8')
+
+            # Add discontinuity marker between different source videos
+            if not first_playlist:
+                merged_lines.append("#EXT-X-DISCONTINUITY")
+            first_playlist = False
 
             for line in content.split('\n'):
                 line = line.strip()

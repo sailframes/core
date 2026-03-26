@@ -1,20 +1,21 @@
 /**
- * ChartPanel - Time-series charts with Chart.js
+ * ChartPanel - Unified time-series chart with toggleable measurements
  */
 class ChartPanel {
     constructor() {
-        this.charts = {};
+        this.chart = null;
         this.data = {};
         this.dataIndex = {};
-        this.rawData = {};  // Store raw data arrays for stats
+        this.rawData = {};
+        this.visibleSeries = new Set(['heel', 'pitch']);  // Default visible
+        this.zoomLevel = 1;
+        this.zoomCenter = 0.5;  // Center of visible range (0-1)
         this.verticalLinePlugin = this._createVerticalLinePlugin();
-        this.fullscreenChart = null;
-        this.fullscreenOverlay = null;
 
         this._init();
         this._setupTimeSync();
-        this._setupFullscreen();
-        this._setupChartInteraction();
+        this._setupToggles();
+        this._setupZoom();
     }
 
     _createVerticalLinePlugin() {
@@ -41,691 +42,310 @@ class ChartPanel {
     }
 
     _init() {
-        const chartOptions = {
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false,
-            plugins: {
-                legend: {
-                    display: true,
-                    position: 'top',
-                    labels: {
-                        color: '#8b98a5',
-                        boxWidth: 12,
-                        padding: 8,
-                        font: { size: 10 }
-                    }
-                },
-                tooltip: { enabled: false }
-            },
-            scales: {
-                x: {
-                    display: false
-                },
-                y: {
-                    ticks: { color: '#8b98a5', font: { size: 10 } },
-                    grid: { color: 'rgba(47, 51, 54, 0.5)' }
-                }
-            },
-            elements: {
-                point: { radius: 0 },
-                line: { borderWidth: 2 }
-            }
+        const ctx = document.getElementById('chart-unified');
+        if (!ctx) return;
+
+        // Define all series with their properties
+        this.seriesConfig = {
+            heel:     { label: 'Heel (°)',      color: '#1d9bf0', yAxis: 'yDeg' },
+            pitch:    { label: 'Pitch (°)',     color: '#ffad1f', yAxis: 'yDeg' },
+            aws:      { label: 'AWS (kn)',      color: '#00ba7c', yAxis: 'ySpeed' },
+            awa:      { label: 'AWA (°)',       color: '#f4212e', yAxis: 'yAngle' },
+            sog:      { label: 'SOG (kn)',      color: '#e879f9', yAxis: 'ySpeed' },
+            heading:  { label: 'Heading (°)',   color: '#38bdf8', yAxis: 'yAngle' },
+            course:   { label: 'Course (°)',    color: '#fbbf24', yAxis: 'yAngle' },
+            accelX:   { label: 'Accel X (m/s²)',color: '#fb7185', yAxis: 'yAccel' },
+            accelY:   { label: 'Accel Y (m/s²)',color: '#4ade80', yAxis: 'yAccel' },
+            pressure: { label: 'Pressure (hPa)',color: '#a78bfa', yAxis: 'yPressure' }
         };
 
-        // Attitude chart (heel/pitch)
-        this.charts.attitude = new Chart(
-            document.getElementById('chart-attitude'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Heel',
-                            data: [],
-                            borderColor: '#1d9bf0',
-                            backgroundColor: 'rgba(29, 155, 240, 0.1)',
-                            fill: true
-                        },
-                        {
-                            label: 'Pitch',
-                            data: [],
-                            borderColor: '#ffad1f',
-                            backgroundColor: 'transparent'
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        ...chartOptions.scales,
-                        y: {
-                            ...chartOptions.scales.y,
-                            min: -30,
-                            max: 30
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
+        // Create datasets for each series
+        const datasets = Object.entries(this.seriesConfig).map(([key, config]) => ({
+            label: config.label,
+            data: [],
+            borderColor: config.color,
+            backgroundColor: 'transparent',
+            borderWidth: 1.5,
+            pointRadius: 0,
+            tension: 0.1,
+            hidden: !this.visibleSeries.has(key),
+            yAxisID: config.yAxis,
+            seriesKey: key
+        }));
 
-        // Wind chart
-        this.charts.wind = new Chart(
-            document.getElementById('chart-wind'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'AWS (kn)',
-                            data: [],
-                            borderColor: '#00ba7c',
-                            backgroundColor: 'rgba(0, 186, 124, 0.1)',
-                            fill: true,
-                            yAxisID: 'y'
-                        },
-                        {
-                            label: 'AWA',
-                            data: [],
-                            borderColor: '#f4212e',
-                            backgroundColor: 'transparent',
-                            yAxisID: 'y1'
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        x: { display: false },
-                        y: {
-                            position: 'left',
-                            ticks: { color: '#8b98a5', font: { size: 10 } },
-                            grid: { color: 'rgba(47, 51, 54, 0.5)' },
-                            min: 0,
-                            max: 30
-                        },
-                        y1: {
-                            position: 'right',
-                            ticks: { color: '#8b98a5', font: { size: 10 } },
-                            grid: { display: false },
-                            min: 0,
-                            max: 180
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Speed chart
-        this.charts.speed = new Chart(
-            document.getElementById('chart-speed'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'SOG (kn)',
-                            data: [],
-                            borderColor: '#1d9bf0',
-                            backgroundColor: 'rgba(29, 155, 240, 0.1)',
-                            fill: true
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        ...chartOptions.scales,
-                        y: {
-                            ...chartOptions.scales.y,
-                            min: 0
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Pressure chart
-        this.charts.pressure = new Chart(
-            document.getElementById('chart-pressure'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'hPa',
-                            data: [],
-                            borderColor: '#9333ea',
-                            backgroundColor: 'rgba(147, 51, 234, 0.1)',
-                            fill: true
-                        }
-                    ]
-                },
-                options: chartOptions,
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Heading chart (IMU + GPS)
-        this.charts.heading = new Chart(
-            document.getElementById('chart-heading'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'IMU Heading',
-                            data: [],
-                            borderColor: '#1d9bf0',
-                            backgroundColor: 'transparent'
-                        },
-                        {
-                            label: 'GPS Course',
-                            data: [],
-                            borderColor: '#ffad1f',
-                            backgroundColor: 'transparent'
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        ...chartOptions.scales,
-                        y: {
-                            ...chartOptions.scales.y,
-                            min: 0,
-                            max: 360
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Acceleration X/Y chart
-        this.charts.accelXY = new Chart(
-            document.getElementById('chart-accel-xy'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Accel X',
-                            data: [],
-                            borderColor: '#f4212e',
-                            backgroundColor: 'transparent'
-                        },
-                        {
-                            label: 'Accel Y',
-                            data: [],
-                            borderColor: '#00ba7c',
-                            backgroundColor: 'transparent'
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        ...chartOptions.scales,
-                        y: {
-                            ...chartOptions.scales.y,
-                            min: -5,
-                            max: 5
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Acceleration Z chart
-        this.charts.accelZ = new Chart(
-            document.getElementById('chart-accel-z'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Accel Z',
-                            data: [],
-                            borderColor: '#1d9bf0',
-                            backgroundColor: 'rgba(29, 155, 240, 0.1)',
-                            fill: true
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        ...chartOptions.scales,
-                        y: {
-                            ...chartOptions.scales.y,
-                            min: 5,
-                            max: 15
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Temperature chart (pressure sensor + wind sensor)
-        this.charts.temperature = new Chart(
-            document.getElementById('chart-temperature'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Pressure Sensor',
-                            data: [],
-                            borderColor: '#9333ea',
-                            backgroundColor: 'transparent'
-                        },
-                        {
-                            label: 'Wind Sensor',
-                            data: [],
-                            borderColor: '#00ba7c',
-                            backgroundColor: 'transparent'
-                        }
-                    ]
-                },
-                options: chartOptions,
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Wind compass chart
-        this.charts.windCompass = new Chart(
-            document.getElementById('chart-wind-compass'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Compass',
-                            data: [],
-                            borderColor: '#ffad1f',
-                            backgroundColor: 'rgba(255, 173, 31, 0.1)',
-                            fill: true
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        ...chartOptions.scales,
-                        y: {
-                            ...chartOptions.scales.y,
-                            min: 0,
-                            max: 360
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-
-        // Wind meta (temp & battery)
-        this.charts.windMeta = new Chart(
-            document.getElementById('chart-wind-meta'),
-            {
-                type: 'line',
-                data: {
-                    labels: [],
-                    datasets: [
-                        {
-                            label: 'Temp (°C)',
-                            data: [],
-                            borderColor: '#f4212e',
-                            backgroundColor: 'transparent',
-                            yAxisID: 'y'
-                        },
-                        {
-                            label: 'Battery (%)',
-                            data: [],
-                            borderColor: '#00ba7c',
-                            backgroundColor: 'transparent',
-                            yAxisID: 'y1'
-                        }
-                    ]
-                },
-                options: {
-                    ...chartOptions,
-                    scales: {
-                        x: { display: false },
-                        y: {
-                            position: 'left',
-                            ticks: { color: '#8b98a5', font: { size: 10 } },
-                            grid: { color: 'rgba(47, 51, 54, 0.5)' }
-                        },
-                        y1: {
-                            position: 'right',
-                            ticks: { color: '#8b98a5', font: { size: 10 } },
-                            grid: { display: false },
-                            min: 0,
-                            max: 100
-                        }
-                    }
-                },
-                plugins: [this.verticalLinePlugin]
-            }
-        );
-    }
-
-    _setupTimeSync() {
-        window.timeController.addEventListener('time-change', (e) => {
-            this.updateCursor(e.detail.time);
-            this._updateFullscreenStats(e.detail.time);
-        });
-    }
-
-    _setupFullscreen() {
-        // Chart metadata for fullscreen display
-        this.chartMeta = {
-            attitude: { title: 'Heel & Pitch', unit: '°', datasets: ['Heel', 'Pitch'] },
-            wind: { title: 'Wind Speed & Angle', unit: '', datasets: ['AWS (kn)', 'AWA (°)'] },
-            speed: { title: 'Speed Over Ground', unit: 'kn', datasets: ['SOG'] },
-            pressure: { title: 'Barometric Pressure', unit: 'hPa', datasets: ['Pressure'] },
-            heading: { title: 'Heading', unit: '°', datasets: ['IMU Heading', 'GPS Course'] },
-            accelXY: { title: 'Acceleration X/Y', unit: 'm/s²', datasets: ['Accel X', 'Accel Y'] },
-            accelZ: { title: 'Acceleration Z', unit: 'm/s²', datasets: ['Accel Z'] },
-            temperature: { title: 'Temperature', unit: '°C', datasets: ['Pressure Sensor', 'Wind Sensor'] },
-            windCompass: { title: 'Wind Compass Heading', unit: '°', datasets: ['Compass'] },
-            windMeta: { title: 'Wind Sensor Status', unit: '', datasets: ['Temp (°C)', 'Battery (%)'] }
-        };
-
-        // Add double-click handlers to all chart boxes for fullscreen
-        // (single click/drag is used for timeline scrubbing)
-        document.querySelectorAll('.chart-box').forEach(box => {
-            box.addEventListener('dblclick', (e) => {
-                const canvas = box.querySelector('canvas');
-                if (canvas) {
-                    const chartId = canvas.id.replace('chart-', '').replace(/-/g, '');
-                    // Map IDs to chart keys
-                    const idMap = {
-                        'attitude': 'attitude',
-                        'wind': 'wind',
-                        'speed': 'speed',
-                        'pressure': 'pressure',
-                        'heading': 'heading',
-                        'accelxy': 'accelXY',
-                        'accelz': 'accelZ',
-                        'temperature': 'temperature',
-                        'windcompass': 'windCompass',
-                        'windmeta': 'windMeta'
-                    };
-                    const key = idMap[chartId];
-                    if (key && this.charts[key]) {
-                        this._openFullscreen(key);
-                    }
-                }
-            });
-        });
-
-        // ESC to close
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && this.fullscreenOverlay) {
-                this._closeFullscreen();
-            }
-        });
-    }
-
-    _setupChartInteraction() {
-        // Add click/drag interaction to all charts
-        Object.entries(this.charts).forEach(([key, chart]) => {
-            const canvas = chart.canvas;
-            let isDragging = false;
-            let hasMoved = false;
-
-            const getTimeFromEvent = (e) => {
-                const rect = canvas.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-
-                // Get chart area
-                const chartArea = chart.chartArea;
-                if (!chartArea) return null;
-
-                // Check if within chart area
-                if (x < chartArea.left || x > chartArea.right) return null;
-
-                // Calculate position (0-1) within chart area
-                const position = (x - chartArea.left) / (chartArea.right - chartArea.left);
-
-                // Get corresponding data index
-                const dataLength = this.data.labels?.length || 0;
-                if (dataLength === 0) return null;
-
-                const index = Math.round(position * (dataLength - 1));
-                const clampedIndex = Math.max(0, Math.min(dataLength - 1, index));
-
-                // Get timestamp from label
-                const timestamp = this.data.labels[clampedIndex];
-                if (!timestamp) return null;
-
-                return new Date(timestamp);
-            };
-
-            const handleSeek = (e) => {
-                const time = getTimeFromEvent(e);
-                if (time) {
-                    window.timeController.seek(time);
-                }
-            };
-
-            canvas.addEventListener('mousedown', (e) => {
-                // Only handle left click
-                if (e.button !== 0) return;
-
-                isDragging = true;
-                hasMoved = false;
-                handleSeek(e);
-                e.preventDefault();
-            });
-
-            canvas.addEventListener('mousemove', (e) => {
-                if (!isDragging) return;
-                hasMoved = true;
-                handleSeek(e);
-            });
-
-            canvas.addEventListener('mouseup', (e) => {
-                isDragging = false;
-            });
-
-            canvas.addEventListener('mouseleave', () => {
-                isDragging = false;
-            });
-
-            // Touch support for mobile
-            canvas.addEventListener('touchstart', (e) => {
-                isDragging = true;
-                hasMoved = false;
-                const touch = e.touches[0];
-                const time = getTimeFromEvent(touch);
-                if (time) {
-                    window.timeController.seek(time);
-                }
-                e.preventDefault();
-            }, { passive: false });
-
-            canvas.addEventListener('touchmove', (e) => {
-                if (!isDragging) return;
-                hasMoved = true;
-                const touch = e.touches[0];
-                const time = getTimeFromEvent(touch);
-                if (time) {
-                    window.timeController.seek(time);
-                }
-                e.preventDefault();
-            }, { passive: false });
-
-            canvas.addEventListener('touchend', () => {
-                isDragging = false;
-            });
-
-            // Change cursor to indicate interactivity
-            canvas.style.cursor = 'crosshair';
-        });
-    }
-
-    _openFullscreen(chartKey) {
-        const chart = this.charts[chartKey];
-        const meta = this.chartMeta[chartKey];
-        if (!chart || !meta) return;
-
-        // Create overlay
-        const overlay = document.createElement('div');
-        overlay.className = 'chart-fullscreen-overlay';
-        overlay.innerHTML = `
-            <div class="chart-fullscreen-header">
-                <h2>${meta.title}</h2>
-                <button class="chart-fullscreen-close">✕ Close (ESC)</button>
-            </div>
-            <div class="chart-fullscreen-content">
-                <div class="chart-fullscreen-canvas">
-                    <canvas id="fullscreen-chart"></canvas>
-                </div>
-                <div class="chart-fullscreen-stats" id="fullscreen-stats"></div>
-            </div>
-        `;
-        document.body.appendChild(overlay);
-        this.fullscreenOverlay = overlay;
-
-        // Close button
-        overlay.querySelector('.chart-fullscreen-close').addEventListener('click', () => {
-            this._closeFullscreen();
-        });
-
-        // Click outside to close
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) {
-                this._closeFullscreen();
-            }
-        });
-
-        // Create fullscreen chart
-        const canvas = document.getElementById('fullscreen-chart');
-        const ctx = canvas.getContext('2d');
-
-        // Clone chart config but with larger display
-        const originalConfig = chart.config;
-        this.fullscreenChart = new Chart(ctx, {
+        this.chart = new Chart(ctx, {
             type: 'line',
-            data: JSON.parse(JSON.stringify(chart.data)),
+            data: {
+                labels: [],
+                datasets: datasets
+            },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 animation: false,
+                interaction: {
+                    mode: 'index',
+                    intersect: false
+                },
                 plugins: {
-                    legend: {
-                        display: true,
-                        position: 'top',
-                        labels: {
-                            color: '#e7e9ea',
-                            boxWidth: 16,
-                            padding: 16,
-                            font: { size: 14 }
-                        }
-                    },
+                    legend: { display: false },
                     tooltip: {
                         enabled: true,
                         mode: 'index',
-                        intersect: false
+                        intersect: false,
+                        callbacks: {
+                            title: (items) => {
+                                if (items.length > 0) {
+                                    const d = new Date(items[0].label);
+                                    return d.toLocaleTimeString();
+                                }
+                                return '';
+                            }
+                        }
                     }
                 },
                 scales: {
                     x: {
                         display: true,
+                        type: 'category',
                         ticks: {
                             color: '#8b98a5',
-                            font: { size: 11 },
-                            maxTicksLimit: 20,
+                            font: { size: 10 },
+                            maxTicksLimit: 12,
                             callback: function(value, index) {
                                 const label = this.getLabelForValue(value);
                                 if (label) {
                                     const d = new Date(label);
-                                    return d.toLocaleTimeString();
+                                    return d.toLocaleTimeString('en-US', {
+                                        hour: '2-digit',
+                                        minute: '2-digit',
+                                        second: '2-digit'
+                                    });
                                 }
                                 return '';
                             }
                         },
-                        grid: { color: 'rgba(47, 51, 54, 0.5)' }
+                        grid: { color: 'rgba(47, 51, 54, 0.3)' }
                     },
-                    y: {
-                        display: true,
-                        ticks: {
-                            color: '#8b98a5',
-                            font: { size: 12 }
-                        },
-                        grid: { color: 'rgba(47, 51, 54, 0.5)' }
+                    yDeg: {
+                        type: 'linear',
+                        display: 'auto',
+                        position: 'left',
+                        title: { display: true, text: 'Degrees', color: '#8b98a5' },
+                        ticks: { color: '#8b98a5', font: { size: 10 } },
+                        grid: { color: 'rgba(47, 51, 54, 0.3)' },
+                        min: -45,
+                        max: 45
+                    },
+                    ySpeed: {
+                        type: 'linear',
+                        display: 'auto',
+                        position: 'right',
+                        title: { display: true, text: 'Knots', color: '#8b98a5' },
+                        ticks: { color: '#8b98a5', font: { size: 10 } },
+                        grid: { display: false },
+                        min: 0,
+                        max: 30
+                    },
+                    yAngle: {
+                        type: 'linear',
+                        display: 'auto',
+                        position: 'right',
+                        title: { display: true, text: 'Angle (°)', color: '#8b98a5' },
+                        ticks: { color: '#8b98a5', font: { size: 10 } },
+                        grid: { display: false },
+                        min: 0,
+                        max: 360
+                    },
+                    yAccel: {
+                        type: 'linear',
+                        display: 'auto',
+                        position: 'left',
+                        title: { display: true, text: 'm/s²', color: '#8b98a5' },
+                        ticks: { color: '#8b98a5', font: { size: 10 } },
+                        grid: { display: false },
+                        min: -5,
+                        max: 5
+                    },
+                    yPressure: {
+                        type: 'linear',
+                        display: 'auto',
+                        position: 'right',
+                        title: { display: true, text: 'hPa', color: '#8b98a5' },
+                        ticks: { color: '#8b98a5', font: { size: 10 } },
+                        grid: { display: false }
                     }
-                },
-                elements: {
-                    point: { radius: 0 },
-                    line: { borderWidth: 2 }
                 }
             },
             plugins: [this.verticalLinePlugin]
         });
 
-        // Copy scales from original if they exist
-        if (originalConfig.options.scales.y1) {
-            this.fullscreenChart.options.scales.y1 = {
-                ...originalConfig.options.scales.y1,
-                display: true,
-                ticks: { color: '#8b98a5', font: { size: 12 } }
-            };
+        this._setupChartInteraction();
+    }
+
+    _setupTimeSync() {
+        window.timeController.addEventListener('time-change', (e) => {
+            this.updateCursor(e.detail.time);
+        });
+    }
+
+    _setupToggles() {
+        const container = document.getElementById('chart-toggles');
+        if (!container) return;
+
+        container.querySelectorAll('.toggle-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const series = btn.dataset.series;
+                btn.classList.toggle('active');
+
+                if (btn.classList.contains('active')) {
+                    this.visibleSeries.add(series);
+                } else {
+                    this.visibleSeries.delete(series);
+                }
+
+                this._updateSeriesVisibility();
+            });
+        });
+    }
+
+    _setupZoom() {
+        const zoomIn = document.getElementById('btn-zoom-in');
+        const zoomOut = document.getElementById('btn-zoom-out');
+        const zoomReset = document.getElementById('btn-zoom-reset');
+
+        if (zoomIn) {
+            zoomIn.addEventListener('click', () => this._zoom(1.5));
+        }
+        if (zoomOut) {
+            zoomOut.addEventListener('click', () => this._zoom(1 / 1.5));
+        }
+        if (zoomReset) {
+            zoomReset.addEventListener('click', () => this._resetZoom());
         }
 
-        this.fullscreenChartKey = chartKey;
-        this._renderFullscreenStats(chartKey);
+        // Mouse wheel zoom on chart
+        const canvas = document.getElementById('chart-unified');
+        if (canvas) {
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
 
-        // Add click/drag interaction to fullscreen chart
-        this._setupFullscreenChartInteraction(canvas);
+                // Get mouse position relative to chart for zoom center
+                const rect = canvas.getBoundingClientRect();
+                const chartArea = this.chart?.chartArea;
+                if (chartArea) {
+                    const x = e.clientX - rect.left;
+                    const relX = (x - chartArea.left) / (chartArea.right - chartArea.left);
+                    this.zoomCenter = Math.max(0, Math.min(1, relX));
+                }
 
-        // Sync cursor position
-        const currentTime = window.timeController.getCurrentTime();
-        if (currentTime) {
-            this._updateFullscreenCursor(currentTime);
+                this._zoom(factor);
+            }, { passive: false });
         }
     }
 
-    _setupFullscreenChartInteraction(canvas) {
+    _zoom(factor) {
+        const newZoom = Math.max(1, Math.min(50, this.zoomLevel * factor));
+        if (newZoom === this.zoomLevel) return;
+
+        this.zoomLevel = newZoom;
+        this._applyZoom();
+        this._updateZoomLabel();
+    }
+
+    _resetZoom() {
+        this.zoomLevel = 1;
+        this.zoomCenter = 0.5;
+        this._applyZoom();
+        this._updateZoomLabel();
+    }
+
+    _applyZoom() {
+        if (!this.chart || !this.fullLabels) return;
+
+        const totalPoints = this.fullLabels.length;
+        const visiblePoints = Math.max(10, Math.floor(totalPoints / this.zoomLevel));
+
+        // Calculate start/end based on zoom center
+        const halfVisible = visiblePoints / 2;
+        const centerIndex = Math.floor(this.zoomCenter * totalPoints);
+
+        let startIndex = Math.floor(centerIndex - halfVisible);
+        let endIndex = Math.floor(centerIndex + halfVisible);
+
+        // Clamp to bounds
+        if (startIndex < 0) {
+            startIndex = 0;
+            endIndex = Math.min(totalPoints, visiblePoints);
+        }
+        if (endIndex > totalPoints) {
+            endIndex = totalPoints;
+            startIndex = Math.max(0, totalPoints - visiblePoints);
+        }
+
+        // Slice data for visible range
+        const visibleLabels = this.fullLabels.slice(startIndex, endIndex);
+
+        this.chart.data.labels = visibleLabels;
+
+        // Update each dataset with sliced data
+        const seriesKeys = ['heel', 'pitch', 'aws', 'awa', 'sog', 'heading', 'course', 'accelX', 'accelY', 'pressure'];
+        this.chart.data.datasets.forEach((dataset, i) => {
+            const key = seriesKeys[i];
+            if (this.fullData[key]) {
+                dataset.data = this.fullData[key].slice(startIndex, endIndex);
+            }
+        });
+
+        // Store visible range for cursor mapping
+        this.visibleStartIndex = startIndex;
+        this.visibleEndIndex = endIndex;
+
+        this.chart.update('none');
+    }
+
+    _updateZoomLabel() {
+        const label = document.getElementById('zoom-label');
+        if (label) {
+            label.textContent = `${Math.round(this.zoomLevel * 100)}%`;
+        }
+    }
+
+    _updateSeriesVisibility() {
+        if (!this.chart) return;
+
+        this.chart.data.datasets.forEach(dataset => {
+            const key = dataset.seriesKey;
+            dataset.hidden = !this.visibleSeries.has(key);
+        });
+
+        this.chart.update('none');
+    }
+
+    _setupChartInteraction() {
+        if (!this.chart) return;
+
+        const canvas = this.chart.canvas;
         let isDragging = false;
 
         const getTimeFromEvent = (e) => {
             const rect = canvas.getBoundingClientRect();
             const x = e.clientX - rect.left;
 
-            const chart = this.fullscreenChart;
-            if (!chart) return null;
-
-            const chartArea = chart.chartArea;
+            const chartArea = this.chart.chartArea;
             if (!chartArea) return null;
 
             if (x < chartArea.left || x > chartArea.right) return null;
 
             const position = (x - chartArea.left) / (chartArea.right - chartArea.left);
-            const dataLength = this.data.labels?.length || 0;
-            if (dataLength === 0) return null;
+            const visibleLabels = this.chart.data.labels;
+            if (!visibleLabels || visibleLabels.length === 0) return null;
 
-            const index = Math.round(position * (dataLength - 1));
-            const clampedIndex = Math.max(0, Math.min(dataLength - 1, index));
+            const index = Math.round(position * (visibleLabels.length - 1));
+            const clampedIndex = Math.max(0, Math.min(visibleLabels.length - 1, index));
 
-            const timestamp = this.data.labels[clampedIndex];
+            const timestamp = visibleLabels[clampedIndex];
             if (!timestamp) return null;
 
             return new Date(timestamp);
@@ -761,121 +381,22 @@ class ChartPanel {
         canvas.style.cursor = 'crosshair';
     }
 
-    _closeFullscreen() {
-        if (this.fullscreenChart) {
-            this.fullscreenChart.destroy();
-            this.fullscreenChart = null;
-        }
-        if (this.fullscreenOverlay) {
-            this.fullscreenOverlay.remove();
-            this.fullscreenOverlay = null;
-        }
-        this.fullscreenChartKey = null;
-    }
-
-    _renderFullscreenStats(chartKey) {
-        const statsContainer = document.getElementById('fullscreen-stats');
-        if (!statsContainer || !this.rawData[chartKey]) return;
-
-        const data = this.rawData[chartKey];
-        const meta = this.chartMeta[chartKey];
-        let html = '';
-
-        data.forEach((dataset, i) => {
-            const values = dataset.filter(v => v !== null && !isNaN(v));
-            if (values.length === 0) return;
-
-            const min = Math.min(...values).toFixed(1);
-            const max = Math.max(...values).toFixed(1);
-            const avg = (values.reduce((a, b) => a + b, 0) / values.length).toFixed(1);
-            const label = meta.datasets[i] || `Dataset ${i + 1}`;
-
-            html += `
-                <div class="chart-stat-group">
-                    <span class="label">${label} Min</span>
-                    <span class="value min">${min}</span>
-                </div>
-                <div class="chart-stat-group">
-                    <span class="label">${label} Max</span>
-                    <span class="value max">${max}</span>
-                </div>
-                <div class="chart-stat-group">
-                    <span class="label">${label} Avg</span>
-                    <span class="value avg">${avg}</span>
-                </div>
-            `;
-        });
-
-        // Add current value placeholder
-        html += `
-            <div class="chart-stat-group" id="fullscreen-current">
-                <span class="label">Current</span>
-                <span class="value current">--</span>
-            </div>
-        `;
-
-        statsContainer.innerHTML = html;
-    }
-
-    _updateFullscreenStats(time) {
-        if (!this.fullscreenChart || !this.fullscreenChartKey) return;
-
-        const currentEl = document.getElementById('fullscreen-current');
-        if (!currentEl) return;
-
-        const timeStr = time.toISOString().substring(0, 19);
-        let index = this.dataIndex[timeStr];
-        if (index === undefined) {
-            index = this._findClosestIndex(time);
-        }
-
-        if (index !== undefined && this.rawData[this.fullscreenChartKey]) {
-            const data = this.rawData[this.fullscreenChartKey];
-            const values = data.map(d => d[index]).filter(v => v !== null && !isNaN(v));
-            if (values.length > 0) {
-                currentEl.querySelector('.value').textContent = values.map(v => v.toFixed(1)).join(' / ');
-            }
-        }
-
-        this._updateFullscreenCursor(time);
-    }
-
-    _updateFullscreenCursor(time) {
-        if (!this.fullscreenChart || !this.data.labels) return;
-
-        const timeStr = time.toISOString().substring(0, 19);
-        let index = this.dataIndex[timeStr];
-        if (index === undefined) {
-            index = this._findClosestIndex(time);
-        }
-
-        if (index !== undefined) {
-            const meta = this.fullscreenChart.getDatasetMeta(0);
-            if (meta.data[index]) {
-                this.fullscreenChart.verticalLineX = meta.data[index].x;
-                this.fullscreenChart.draw();
-            }
-        }
-    }
-
     /**
      * Load session data
      */
     setData(sessionData) {
         const data = sessionData.data || [];
 
-        // Reset
-        this.data = {};
-        this.dataIndex = {};
-
-        // Extract data arrays
+        // Extract all data arrays
         const labels = [];
-        const imuHeel = [], imuPitch = [], imuHeading = [];
-        const imuAccelX = [], imuAccelY = [], imuAccelZ = [];
-        const windAws = [], windAwa = [], windCompass = [];
-        const windTemp = [], windBattery = [];
-        const gpsSpeed = [], gpsCourse = [];
-        const pressure = [], pressureTemp = [];
+        const heel = [], pitch = [];
+        const aws = [], awa = [];
+        const sog = [], course = [];
+        const heading = [];
+        const accelX = [], accelY = [];
+        const pressure = [];
+
+        this.dataIndex = {};
 
         data.forEach((point, i) => {
             labels.push(point.t);
@@ -883,162 +404,95 @@ class ChartPanel {
 
             // IMU data
             if (point.imu) {
-                imuHeel.push(point.imu.heel);
-                imuPitch.push(point.imu.pitch);
-                imuHeading.push(point.imu.heading);
-                imuAccelX.push(point.imu.accel_x);
-                imuAccelY.push(point.imu.accel_y);
-                imuAccelZ.push(point.imu.accel_z);
+                heel.push(point.imu.heel);
+                pitch.push(point.imu.pitch);
+                heading.push(point.imu.heading);
+                accelX.push(point.imu.accel_x);
+                accelY.push(point.imu.accel_y);
             } else {
-                imuHeel.push(null);
-                imuPitch.push(null);
-                imuHeading.push(null);
-                imuAccelX.push(null);
-                imuAccelY.push(null);
-                imuAccelZ.push(null);
+                heel.push(null);
+                pitch.push(null);
+                heading.push(null);
+                accelX.push(null);
+                accelY.push(null);
             }
 
             // Wind data
             if (point.wind) {
-                windAws.push(point.wind.aws_kn);
-                windAwa.push(point.wind.awa);
-                windCompass.push(point.wind.compass);
-                windTemp.push(point.wind.temp_c);
-                windBattery.push(point.wind.battery);
+                aws.push(point.wind.aws_kn);
+                awa.push(point.wind.awa);
             } else {
-                windAws.push(null);
-                windAwa.push(null);
-                windCompass.push(null);
-                windTemp.push(null);
-                windBattery.push(null);
+                aws.push(null);
+                awa.push(null);
             }
 
             // GPS data
             if (point.gps) {
-                gpsSpeed.push(point.gps.speed_kn);
-                gpsCourse.push(point.gps.course);
+                sog.push(point.gps.speed_kn);
+                course.push(point.gps.course);
             } else {
-                gpsSpeed.push(null);
-                gpsCourse.push(null);
+                sog.push(null);
+                course.push(null);
             }
 
             // Pressure data
             if (point.pressure) {
                 pressure.push(point.pressure.hpa);
-                pressureTemp.push(point.pressure.temp_c);
             } else {
                 pressure.push(null);
-                pressureTemp.push(null);
             }
         });
 
+        // Store full data for zooming
+        this.fullLabels = labels;
+        this.fullData = { heel, pitch, aws, awa, sog, heading, course, accelX, accelY, pressure };
         this.data.labels = labels;
 
-        // Update basic charts
-        this.charts.attitude.data.labels = labels;
-        this.charts.attitude.data.datasets[0].data = imuHeel;
-        this.charts.attitude.data.datasets[1].data = imuPitch;
-        this.charts.attitude.update('none');
-
-        this.charts.wind.data.labels = labels;
-        this.charts.wind.data.datasets[0].data = windAws;
-        this.charts.wind.data.datasets[1].data = windAwa;
-        this.charts.wind.update('none');
-
-        this.charts.speed.data.labels = labels;
-        this.charts.speed.data.datasets[0].data = gpsSpeed;
-        this.charts.speed.update('none');
-
-        this.charts.pressure.data.labels = labels;
-        this.charts.pressure.data.datasets[0].data = pressure;
-        this.charts.pressure.update('none');
-
-        // Update new charts
-        this.charts.heading.data.labels = labels;
-        this.charts.heading.data.datasets[0].data = imuHeading;
-        this.charts.heading.data.datasets[1].data = gpsCourse;
-        this.charts.heading.update('none');
-
-        this.charts.accelXY.data.labels = labels;
-        this.charts.accelXY.data.datasets[0].data = imuAccelX;
-        this.charts.accelXY.data.datasets[1].data = imuAccelY;
-        this.charts.accelXY.update('none');
-
-        this.charts.accelZ.data.labels = labels;
-        this.charts.accelZ.data.datasets[0].data = imuAccelZ;
-        this.charts.accelZ.update('none');
-
-        this.charts.temperature.data.labels = labels;
-        this.charts.temperature.data.datasets[0].data = pressureTemp;
-        this.charts.temperature.data.datasets[1].data = windTemp;
-        this.charts.temperature.update('none');
-
-        this.charts.windCompass.data.labels = labels;
-        this.charts.windCompass.data.datasets[0].data = windCompass;
-        this.charts.windCompass.update('none');
-
-        this.charts.windMeta.data.labels = labels;
-        this.charts.windMeta.data.datasets[0].data = windTemp;
-        this.charts.windMeta.data.datasets[1].data = windBattery;
-        this.charts.windMeta.update('none');
-
-        // Store raw data for fullscreen stats
-        this.rawData = {
-            attitude: [imuHeel, imuPitch],
-            wind: [windAws, windAwa],
-            speed: [gpsSpeed],
-            pressure: [pressure],
-            heading: [imuHeading, gpsCourse],
-            accelXY: [imuAccelX, imuAccelY],
-            accelZ: [imuAccelZ],
-            temperature: [pressureTemp, windTemp],
-            windCompass: [windCompass],
-            windMeta: [windTemp, windBattery]
-        };
+        // Reset zoom and apply data
+        this.zoomLevel = 1;
+        this._updateZoomLabel();
+        this._applyZoom();
     }
 
     /**
-     * Update cursor position on all charts
+     * Update cursor position
      */
     updateCursor(time) {
-        if (!time || !this.data.labels) return;
+        if (!time || !this.chart || !this.chart.data.labels) return;
 
         const timeStr = time.toISOString().substring(0, 19);
-        let index = this.dataIndex[timeStr];
 
-        if (index === undefined) {
-            // Find closest
-            index = this._findClosestIndex(time);
+        // Find index in visible data
+        const visibleLabels = this.chart.data.labels;
+        let index = -1;
+
+        for (let i = 0; i < visibleLabels.length; i++) {
+            if (visibleLabels[i].substring(0, 19) === timeStr) {
+                index = i;
+                break;
+            }
         }
 
-        if (index === undefined) return;
+        if (index === -1) {
+            // Find closest
+            const targetMs = time.getTime();
+            let minDiff = Infinity;
+            visibleLabels.forEach((label, i) => {
+                const diff = Math.abs(new Date(label).getTime() - targetMs);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    index = i;
+                }
+            });
+        }
 
-        // Update vertical line on each chart
-        Object.values(this.charts).forEach(chart => {
-            const meta = chart.getDatasetMeta(0);
+        if (index >= 0) {
+            const meta = this.chart.getDatasetMeta(0);
             if (meta.data[index]) {
-                chart.verticalLineX = meta.data[index].x;
-                chart.draw();
+                this.chart.verticalLineX = meta.data[index].x;
+                this.chart.draw();
             }
-        });
-    }
-
-    _findClosestIndex(time) {
-        if (!this.data.labels || this.data.labels.length === 0) return undefined;
-
-        const targetMs = time.getTime();
-        let closest = 0;
-        let minDiff = Infinity;
-
-        this.data.labels.forEach((label, i) => {
-            const diff = Math.abs(new Date(label).getTime() - targetMs);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closest = i;
-            }
-        });
-
-        return closest;
+        }
     }
 }
 

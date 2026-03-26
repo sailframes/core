@@ -82,15 +82,25 @@ def process_file(bucket: str, key: str):
 
 def process_gps(csv_content: str) -> list:
     """Downsample GPS from 10Hz to 1Hz, keeping max speed per second."""
+    from datetime import timedelta
+
+    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
+    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
+
     reader = csv.DictReader(StringIO(csv_content))
 
-    # Group by second
+    # Group by second with time correction
     by_second = defaultdict(list)
     for row in reader:
         ts = row.get('utc_time', '')
         if not ts:
             continue
-        second = ts[:19]  # Truncate to second
+        try:
+            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+            second = dt_corrected.strftime('%Y-%m-%dT%H:%M:%S')
+        except ValueError:
+            second = ts[:19]
         by_second[second].append(row)
 
     # Take sample with max speed per second
@@ -112,15 +122,25 @@ def process_gps(csv_content: str) -> list:
 
 def process_imu(csv_content: str) -> list:
     """Downsample IMU from 50Hz to 1Hz, averaging values."""
+    from datetime import timedelta
+
+    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
+    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
+
     reader = csv.DictReader(StringIO(csv_content))
 
-    # Group by second
+    # Group by second with time correction
     by_second = defaultdict(list)
     for row in reader:
         ts = row.get('utc_time', '')
         if not ts:
             continue
-        second = ts[:19]
+        try:
+            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+            second = dt_corrected.strftime('%Y-%m-%dT%H:%M:%S')
+        except ValueError:
+            second = ts[:19]
         by_second[second].append(row)
 
     # Average values per second
@@ -129,11 +149,19 @@ def process_imu(csv_content: str) -> list:
         n = len(samples)
         avg = lambda field: sum(float(r.get(field, 0) or 0) for r in samples) / n
 
+        # Heading correction: IMU mounted 180° (X-axis toward stern)
+        raw_heading = avg('heading_deg')
+        corrected_heading = (raw_heading + 180) % 360
+
+        # Heel correction: IMU mounted 90° off
+        raw_heel = avg('heel_deg')
+        corrected_heel = raw_heel + 90
+
         result.append({
             't': second + 'Z',
-            'heel': round(avg('heel_deg'), 1),
+            'heel': round(corrected_heel, 1),
             'pitch': round(avg('pitch_deg'), 1),
-            'heading': round(avg('heading_deg'), 1),
+            'heading': round(corrected_heading, 1),
             'accel_x': round(avg('accel_x_mps2'), 2),
             'accel_y': round(avg('accel_y_mps2'), 2),
             'accel_z': round(avg('accel_z_mps2'), 2)
@@ -144,6 +172,11 @@ def process_imu(csv_content: str) -> list:
 
 def process_pressure(csv_content: str) -> list:
     """Process pressure data (already 1Hz, minimal transformation)."""
+    from datetime import timedelta
+
+    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
+    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
+
     reader = csv.DictReader(StringIO(csv_content))
 
     result = []
@@ -152,8 +185,16 @@ def process_pressure(csv_content: str) -> list:
         if not ts:
             continue
 
+        # Apply time correction
+        try:
+            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+            corrected_ts = dt_corrected.strftime('%Y-%m-%dT%H:%M:%SZ')
+        except ValueError:
+            corrected_ts = ts[:19] + 'Z'
+
         result.append({
-            't': ts[:19] + 'Z',
+            't': corrected_ts,
             'hpa': round(float(row.get('pressure_hpa', 0) or 0), 1),
             'temp_c': round(float(row.get('temperature_c', 0) or 0), 1),
             'trend': row.get('pressure_trend', '')
@@ -164,6 +205,11 @@ def process_pressure(csv_content: str) -> list:
 
 def process_wind(csv_content: str) -> list:
     """Process wind data (already 1Hz, minimal transformation)."""
+    from datetime import timedelta
+
+    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
+    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
+
     reader = csv.DictReader(StringIO(csv_content))
 
     result = []
@@ -172,11 +218,19 @@ def process_wind(csv_content: str) -> list:
         if not ts:
             continue
 
+        # Apply time correction
+        try:
+            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+            corrected_ts = dt_corrected.strftime('%Y-%m-%dT%H:%M:%SZ')
+        except ValueError:
+            corrected_ts = ts[:19] + 'Z'
+
         result.append({
-            't': ts[:19] + 'Z',
+            't': corrected_ts,
             'aws_kn': round(float(row.get('apparent_wind_speed_knots', 0) or 0), 1),
             'awa': round(float(row.get('apparent_wind_angle_deg', 0) or 0), 0),
-            'heading': round(float(row.get('compass_heading_deg', 0) or 0), 1)
+            'heading': round((float(row.get('compass_heading_deg', 0) or 0) + 180) % 360, 1)
         })
 
     return result

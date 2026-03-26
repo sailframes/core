@@ -5,16 +5,14 @@
 class VideoPlayer {
     constructor() {
         this.hlsInstances = {
-            cockpit: null,
-            sails: null
+            cockpit: null
         };
         this.videoElements = {
-            cockpit: document.getElementById('video-cockpit'),
-            sails: document.getElementById('video-sails')
+            cockpit: document.getElementById('video-cockpit')
         };
         this.videoContainer = document.getElementById('video-container');
         this.streamInfo = null;
-        this.videosReady = { cockpit: false, sails: false };
+        this.videosReady = { cockpit: false };
         this.syncInterval = null;
         this.isPlaying = false;
 
@@ -22,16 +20,13 @@ class VideoPlayer {
     }
 
     _setupControls() {
-        // Sync only on manual timeline scrub
-        const timeline = document.getElementById('timeline');
-        if (timeline) {
-            timeline.addEventListener('change', () => {
-                const currentTime = window.timeController.getCurrentTime();
-                if (currentTime) {
-                    this._seekVideos(currentTime);
-                }
-            });
-        }
+        // Sync video on any time change (scrubbing, chart clicks, etc.)
+        window.timeController.addEventListener('time-change', (e) => {
+            // Only seek when paused (during playback, drift correction handles it)
+            if (!this.isPlaying && e.detail.time) {
+                this._seekVideos(e.detail.time);
+            }
+        });
 
         // Play/pause with main controls
         const btnPlay = document.getElementById('btn-play');
@@ -93,7 +88,8 @@ class VideoPlayer {
                 return;
             }
 
-            this.videoContainer.style.display = 'flex';
+            // Use block for compact layout, flex for full layout
+            this.videoContainer.style.display = this.videoContainer.classList.contains('video-compact') ? 'block' : 'flex';
 
             // Initialize HLS for each stream
             for (const [camera, info] of Object.entries(this.streamInfo)) {
@@ -273,7 +269,7 @@ class VideoPlayer {
         Object.values(this.hlsInstances).forEach(hls => {
             if (hls) hls.destroy();
         });
-        this.hlsInstances = { cockpit: null, sails: null };
+        this.hlsInstances = { cockpit: null };
     }
 }
 
