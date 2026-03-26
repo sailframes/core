@@ -3442,20 +3442,30 @@ def api_camera_snapshot(camera_id):
             if not video_dir.exists():
                 return jsonify({'success': False, 'error': 'No video directory found'}), 404
 
-            # Get the most recent mp4 file (currently being recorded)
+            # Get completed mp4 files (not the one currently being recorded)
+            # MP4 files can't be read until recording completes (moov atom at end)
             video_files = sorted(video_dir.glob(f'{camera_id}_*.mp4'), key=lambda p: p.stat().st_mtime, reverse=True)
             if not video_files:
                 return jsonify({'success': False, 'error': 'No video files found'}), 404
 
-            current_video = video_files[0]
-            logger.info(f"Extracting frame from recording: {current_video}")
+            # Skip the newest file (currently recording), use the previous completed segment
+            if len(video_files) > 1:
+                completed_video = video_files[1]  # Second newest = most recent completed
+            else:
+                # Only one file exists and it's being recorded - can't preview yet
+                return jsonify({
+                    'success': False,
+                    'error': 'Recording in progress - preview available after first segment completes'
+                }), 503
 
-            # Extract the last frame using ffmpeg (sseof seeks from end)
+            logger.info(f"Extracting frame from completed segment: {completed_video}")
+
+            # Extract the last frame from completed video
             result = subprocess.run(
                 [
                     'ffmpeg', '-y',
                     '-sseof', '-1',  # Seek to 1 second before end
-                    '-i', str(current_video),
+                    '-i', str(completed_video),
                     '-frames:v', '1',
                     '-q:v', '2',  # High quality JPEG
                     str(snap_path)
@@ -3466,11 +3476,14 @@ def api_camera_snapshot(camera_id):
             )
 
             if result.returncode == 0 and snap_path.exists():
-                logger.info(f"Snapshot extracted from recording for {camera_id}")
+                logger.info(f"Snapshot extracted from completed segment for {camera_id}")
+                # Calculate age of the snapshot (time since segment ended)
+                segment_age = int(time.time() - completed_video.stat().st_mtime)
                 return jsonify({
                     'success': True,
                     'url': f'/api/camera/{camera_id}/snapshot.jpg',
-                    'source': 'recording'
+                    'source': 'completed_segment',
+                    'segment_age_sec': segment_age
                 })
             else:
                 error = result.stderr.split('\n')[-2] if result.stderr else 'Frame extraction failed'
