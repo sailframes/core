@@ -3409,45 +3409,101 @@ def api_recording_status():
 
 @app.route('/api/camera/<camera_id>/snapshot', methods=['POST'])
 def api_camera_snapshot(camera_id):
-    """Capture a single frame from the camera."""
+    """Capture a single frame from the camera.
+
+    If the camera is currently recording, extracts a frame from the latest
+    video file using ffmpeg. Otherwise, uses rpicam-still for direct capture.
+    """
     if camera_id not in ('cockpit', 'sails'):
         return jsonify({'success': False, 'error': 'Invalid camera'}), 400
 
     try:
-        # Camera index mapping: cockpit=0, sails=1
-        camera_index = 0 if camera_id == 'cockpit' else 1
-
         # Output path
         snap_dir = Path('/tmp/sailframes-snapshots')
         snap_dir.mkdir(exist_ok=True)
         snap_path = snap_dir / f'{camera_id}.jpg'
 
-        # Capture using rpicam-still
-        result = subprocess.run(
-            [
-                'rpicam-still',
-                '--camera', str(camera_index),
-                '-o', str(snap_path),
-                '--width', '1920',
-                '--height', '1080',
-                '--timeout', '1000',  # 1 second timeout
-                '--nopreview',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10
+        # Check if camera service is recording (camera would be busy)
+        service_name = f'sailframes-camera-{camera_id}'
+        service_check = subprocess.run(
+            ['systemctl', 'is-active', service_name],
+            capture_output=True, text=True
         )
+        camera_recording = service_check.stdout.strip() == 'active'
 
-        if result.returncode == 0 and snap_path.exists():
-            logger.info(f"Snapshot captured for {camera_id}")
-            return jsonify({
-                'success': True,
-                'url': f'/api/camera/{camera_id}/snapshot.jpg'
-            })
+        if camera_recording:
+            # Camera is busy recording - extract frame from current video
+            # Find the latest video file for this camera
+            today = datetime.now().strftime('%Y-%m-%d')
+            video_dir = Path(f'/home/paul/sailframes-data/{today}/video/{camera_id}')
+
+            if not video_dir.exists():
+                return jsonify({'success': False, 'error': 'No video directory found'}), 404
+
+            # Get the most recent mp4 file (currently being recorded)
+            video_files = sorted(video_dir.glob(f'{camera_id}_*.mp4'), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not video_files:
+                return jsonify({'success': False, 'error': 'No video files found'}), 404
+
+            current_video = video_files[0]
+            logger.info(f"Extracting frame from recording: {current_video}")
+
+            # Extract the last frame using ffmpeg (sseof seeks from end)
+            result = subprocess.run(
+                [
+                    'ffmpeg', '-y',
+                    '-sseof', '-1',  # Seek to 1 second before end
+                    '-i', str(current_video),
+                    '-frames:v', '1',
+                    '-q:v', '2',  # High quality JPEG
+                    str(snap_path)
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0 and snap_path.exists():
+                logger.info(f"Snapshot extracted from recording for {camera_id}")
+                return jsonify({
+                    'success': True,
+                    'url': f'/api/camera/{camera_id}/snapshot.jpg',
+                    'source': 'recording'
+                })
+            else:
+                error = result.stderr.split('\n')[-2] if result.stderr else 'Frame extraction failed'
+                logger.warning(f"Frame extraction failed for {camera_id}: {error}")
+                return jsonify({'success': False, 'error': error}), 500
         else:
-            error = result.stderr or 'Capture failed'
-            logger.warning(f"Snapshot failed for {camera_id}: {error}")
-            return jsonify({'success': False, 'error': error}), 500
+            # Camera not recording - use direct capture
+            camera_index = 0 if camera_id == 'cockpit' else 1
+
+            result = subprocess.run(
+                [
+                    'rpicam-still',
+                    '--camera', str(camera_index),
+                    '-o', str(snap_path),
+                    '--width', '1920',
+                    '--height', '1080',
+                    '--timeout', '1000',
+                    '--nopreview',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0 and snap_path.exists():
+                logger.info(f"Snapshot captured for {camera_id}")
+                return jsonify({
+                    'success': True,
+                    'url': f'/api/camera/{camera_id}/snapshot.jpg',
+                    'source': 'camera'
+                })
+            else:
+                error = result.stderr or 'Capture failed'
+                logger.warning(f"Snapshot failed for {camera_id}: {error}")
+                return jsonify({'success': False, 'error': error}), 500
 
     except subprocess.TimeoutExpired:
         return jsonify({'success': False, 'error': 'Camera timeout'}), 500
