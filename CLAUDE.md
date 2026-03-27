@@ -43,16 +43,20 @@ syncs to AWS after each session, and provides web-based race analysis and replay
 |---|---|---|
 | LCD Display | 0x27 | Active |
 | BNO085 IMU | 0x4A | Active |
-| DS3231 RTC | 0x68 | Planned (order Adafruit 3013) |
 | DPS310 Pressure | 0x77 | Active |
 
 Note: PiSugar battery hat (0x57, 0x68) was removed due to vibration issues.
 Now using USB-C power bank for power.
 
+**DS3231 RTC not needed:** The SparkFun ZED-F9P board has a rechargeable backup
+battery that enables warm-start GPS fix in 1-5 seconds. Combined with GPS time
+sync via chrony, the Pi clock syncs within seconds of boot. A separate RTC would
+only help during the brief window before GPS lock.
+
 Verify all devices after wiring:
 ```bash
 sudo i2cdetect -y 1
-# Expected: 0x27, 0x4a, 0x77 (add 0x68 when DS3231 installed)
+# Expected: 0x27, 0x4a, 0x77
 ```
 
 ---
@@ -201,6 +205,40 @@ BLE only — no wires. Pi 5 built-in Bluetooth.
 - Expected output: `imx708_wide [4608x2592]`
 - Config override if not autodetected: `dtoverlay=imx708,cam0` in config.txt
 
+### Autofocus Configuration
+
+Pi Camera Module 3 defaults to manual focus (AfMode=0), causing out-of-focus recordings.
+The camera service sets autofocus in the initial video configuration:
+
+```python
+video_config = picam2.create_video_configuration(
+    controls={
+        "AfMode": 2,      # 0=Manual, 1=Auto, 2=Continuous
+        "AfSpeed": 1,     # 0=Normal, 1=Fast
+        "AfRange": 0,     # 0=Normal, 1=Macro, 2=Full
+    }
+)
+# After start, trigger continuous AF:
+picam2.set_controls({"AfTrigger": 1})
+```
+
+**Verify autofocus is working:**
+```bash
+# Check camera metadata during recording
+rpicam-still --list-cameras
+# AfState=3 means "Focused", LensPosition should change as scene changes
+```
+
+### Camera Preview During Recording
+
+The dashboard camera preview extracts frames from **completed** video segments
+(not the currently recording file). This is because MP4 files can't be read
+until recording completes (moov atom is written at end of file).
+
+- Preview shows frame from most recent completed 5-minute segment
+- During first segment: "preview available after first segment completes"
+- When not recording: uses `rpicam-still` for live capture
+
 ---
 
 ## Power Budget (Approximate)
@@ -271,6 +309,14 @@ PiSugar 3 Plus with 21700 cells (~18.5Wh/cell):
 7. **LCD needs 5V** — unlike other sensors (3.3V), the 1602 LCD VCC must
    connect to 5V rail. I2C data lines are safe at 3.3V via PCF8574T.
 
+8. **Monitor service file descriptors** — excessive subprocess calls can exhaust
+   file descriptors (~1024 per process). Service status checks are limited to
+   every 60 seconds to prevent "Too many open files" crashes.
+
+9. **Camera busy during recording** — Pi Camera can only be accessed by one
+   process. Dashboard preview extracts frames from completed segments instead
+   of direct capture when camera service is recording.
+
 ---
 
 ## Project Branding History
@@ -299,4 +345,4 @@ PiSugar 3 Plus with 21700 cells (~18.5Wh/cell):
 
 ---
 
-*Last updated: March 2026 — generated from Claude.ai project conversations*
+*Last updated: March 27, 2026 — generated from Claude.ai project conversations*
