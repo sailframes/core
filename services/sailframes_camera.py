@@ -93,21 +93,19 @@ def run(config, camera_id):
         sys.exit(1)
 
     # Configure for video recording
-    # Set autofocus in the initial configuration for Pi Camera Module 3
-    af_mode = cam_config.get('autofocus', 'continuous')
-    af_mode_value = {"continuous": 2, "single": 1, "manual": 0}.get(af_mode, 2)
-
+    # Pi Camera Module 3 autofocus: use AfMode=1 (Auto single-shot) and trigger
+    # AfMode=2 (Continuous) doesn't work reliably with picamera2/libcamera
     video_config = picam2.create_video_configuration(
         main={"size": (width, height), "format": "RGB888"},
         controls={
             "FrameRate": fps,
-            "AfMode": af_mode_value,      # 0=Manual, 1=Auto, 2=Continuous
+            "AfMode": 1,                   # 1=Auto (single-shot), triggers focus on demand
             "AfSpeed": 1,                  # 0=Normal, 1=Fast
             "AfRange": 0,                  # 0=Normal, 1=Macro, 2=Full
         }
     )
     picam2.configure(video_config)
-    logger.info(f"Autofocus mode: {af_mode} (AfMode={af_mode_value}, AfSpeed=Fast)")
+    logger.info("Autofocus mode: Auto single-shot (AfMode=1, AfSpeed=Fast)")
 
     # Apply rotation if configured
     rotation = cam_config.get('rotation', 0)
@@ -120,10 +118,9 @@ def run(config, camera_id):
     picam2.start()
     logger.info(f"Camera {camera_id} started")
 
-    # Trigger autofocus after start for continuous mode
-    if af_mode == 'continuous':
-        picam2.set_controls({"AfTrigger": 1})  # Start continuous AF
-        logger.info("Continuous autofocus triggered")
+    # Trigger autofocus after start
+    picam2.set_controls({"AfTrigger": 0})  # 0=Start AF cycle
+    logger.info("Autofocus triggered")
 
     # Allow auto-exposure and autofocus to settle
     time.sleep(3)
@@ -133,6 +130,10 @@ def run(config, camera_id):
 
     try:
         while running:
+            # Trigger autofocus at start of each segment
+            picam2.set_controls({"AfTrigger": 0})  # 0=Start AF cycle
+            time.sleep(1)  # Allow focus to settle
+
             # Create new segment file (local time for readability)
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filepath = data_dir / f'{camera_id}_{timestamp}.mp4'
