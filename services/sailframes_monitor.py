@@ -715,6 +715,26 @@ DASHBOARD_HTML = """
                     <div style="font-size: 14px; font-weight: 600;"><span id="gps-altitude">{{ state.gps.altitude_m|round(1) if state.gps and state.gps.altitude_m else '—' }}</span> m</div>
                 </div>
             </div>
+            <!-- Constellation Info -->
+            <div id="gps-constellations" style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #37474f;">
+                <div style="font-size: 11px; color: #78909c; margin-bottom: 6px;">CONSTELLATIONS</div>
+                <div id="gps-constellation-grid" style="display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px;">
+                    {% if state.gps_status and state.gps_status.constellations %}
+                    {% for name, data in state.gps_status.constellations.items() %}
+                    <div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
+                        <span style="color: #4fc3f7; font-weight: 600;">{{ name }}</span>: {{ data.tracking }}/{{ data.in_view }}
+                        {% if data.signals %}<span style="color: #78909c; font-size: 10px; margin-left: 4px;">({{ data.signals|join(', ') }})</span>{% endif %}
+                    </div>
+                    {% endfor %}
+                    {% else %}
+                    <div style="color: #78909c;">—</div>
+                    {% endif %}
+                </div>
+                <div style="margin-top: 6px;">
+                    <span style="font-size: 11px; color: #78909c;">SIGNALS: </span>
+                    <span id="gps-signals" style="font-size: 12px; color: #81c784;">{{ state.gps_status.signals_in_use|join(', ') if state.gps_status and state.gps_status.signals_in_use else '—' }}</span>
+                </div>
+            </div>
             <div style="margin-top: 10px; display: flex; gap: 16px; font-size: 12px;">
                 <a href="/gps" style="color: #4fc3f7;">📊 GPS Details</a>
                 <a id="gps-map-link" href="https://www.google.com/maps?q={{ state.gps.latitude if state.gps else 0 }},{{ state.gps.longitude if state.gps else 0 }}" target="_blank" style="color: #4fc3f7;">🗺 Open Map ↗</a>
@@ -1802,6 +1822,23 @@ DASHBOARD_HTML = """
                     document.getElementById('gps-speed-mph').textContent = data.gps.speed_mph || 0;
                     document.getElementById('gps-altitude').textContent = data.gps.altitude_m ? data.gps.altitude_m.toFixed(1) : '—';
                     document.getElementById('gps-map-link').href = 'https://www.google.com/maps?q=' + data.gps.latitude + ',' + data.gps.longitude;
+
+                    // Update constellation info
+                    if (data.gps_status && data.gps_status.constellations) {
+                        let constHtml = '';
+                        for (const [name, cdata] of Object.entries(data.gps_status.constellations)) {
+                            const signals = cdata.signals ? cdata.signals.join(', ') : '';
+                            constHtml += `<div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
+                                <span style="color: #4fc3f7; font-weight: 600;">${name}</span>: ${cdata.tracking}/${cdata.in_view}
+                                ${signals ? `<span style="color: #78909c; font-size: 10px; margin-left: 4px;">(${signals})</span>` : ''}
+                            </div>`;
+                        }
+                        document.getElementById('gps-constellation-grid').innerHTML = constHtml || '<div style="color: #78909c;">—</div>';
+
+                        // Update signals
+                        const signals = data.gps_status.signals_in_use || [];
+                        document.getElementById('gps-signals').textContent = signals.length > 0 ? signals.join(', ') : '—';
+                    }
                 } else {
                     document.getElementById('gps-connected').style.display = 'none';
                     document.getElementById('gps-disconnected').style.display = 'block';
