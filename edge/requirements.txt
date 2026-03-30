@@ -1,0 +1,39 @@
+# SailFrames Dependencies
+# Install with: pip3 install -r requirements.txt --break-system-packages
+
+# Configuration
+pyyaml>=6.0
+
+# GPS
+pyserial>=3.5
+pynmea2>=1.19
+
+# IMU (BNO085)
+adafruit-circuitpython-bno08x>=1.3
+adafruit-blinka>=8.0
+
+# Pressure (DPS310)
+adafruit-circuitpython-dps310>=1.3
+
+# Humidity/Temp (BME280) - optional
+adafruit-circuitpython-bme280>=2.6
+
+# Wind (Calypso Mini BLE)
+bleak>=0.21
+
+# Camera
+picamera2>=0.3
+
+# Data handling
+numpy>=1.24
+pandas>=2.0
+
+# Web dashboard
+flask>=3.0
+
+# AWS sync
+boto3>=1.28
+
+# System monitoring
+psutil>=5.9
+smbus2>=0.4

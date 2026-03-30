@@ -1,0 +1,10 @@
+# SailFrames E1 Configuration
+# Place this file as config.txt in the root of the SD card
+#
+# Lines starting with # are ignored
+
+device_id=E1
+wifi_ssid=YachtClubWiFi
+wifi_pass=sailing2026
+upload_url=https://sailframes-fleet-data.s3.amazonaws.com
+api_key=your-api-key-here

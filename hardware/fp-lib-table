@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "Paul_Library") (type "KiCad") (uri "/Users/paul2/Documents/KiCad/Paul_Library.pretty") (options "") (descr ""))
+)

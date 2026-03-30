@@ -1,0 +1,15 @@
+[Unit]
+Description=SailFrames power manager - controls display based on USB-C power
+After=graphical.target sailframes-monitor.service
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=paul
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/python3 /home/paul/sailframes/scripts/power-manager.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

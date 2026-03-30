@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=SailFrames Dashboard
+Exec=/home/paul/sailframes-dashboard.sh
+Hidden=false
+NoDisplay=false
+X-GNOME-Autostart-enabled=true

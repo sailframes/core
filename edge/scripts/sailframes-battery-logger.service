@@ -1,0 +1,13 @@
+[Unit]
+Description=SailFrames battery logger - tracks battery usage and sessions
+After=network.target sailframes-monitor.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /home/paul/sailframes/services/sailframes_battery_logger.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

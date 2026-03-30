@@ -1,0 +1,12 @@
+[Unit]
+Description=SailFrames WiFi Mode Service
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/paul/sailframes/scripts/wifi-mode.sh boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

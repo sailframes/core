@@ -1,0 +1,83 @@
+# SailFrames Configuration
+# Copy this to /etc/sailframes/sailframes.yaml and edit for your device
+
+device:
+  id: "sailframes-01"          # Unique device ID (sailframes-01 through sailframes-06)
+  boat_name: "Unknown"
+  boat_class: "Sonar 23"    # Sonar 23, J/80, etc.
+  fleet: "boston-harbor"
+
+storage:
+  data_dir: "/mnt/sailframes-data"
+  ssd_device: "/dev/sda1"
+  ssd_mount: "/mnt/sailframes-data"
+  filesystem: "ext4"
+
+gps:
+  enabled: true
+  device: "/dev/ttyACM0"     # ZED-F9P USB serial
+  baud_rate: 115200
+  update_rate_hz: 10         # 1-20 Hz (10 recommended)
+  protocol: "ubx"            # ubx or nmea
+  log_format: "csv"          # csv or gpx
+  log_interval_sec: 0.1      # Match update_rate_hz
+
+imu:
+  enabled: true
+  i2c_bus: 1
+  i2c_address: 0x4B          # BNO085 (0x4B when ADO pin floating/high)
+  i2c_frequency: 400000      # 400kHz for BNO085
+  sample_rate_hz: 50         # 10-100 Hz (50 recommended for sailing)
+  reports:
+    - rotation_vector         # Quaternion (heel, pitch, heading)
+    - linear_acceleration     # Acceleration minus gravity
+    - gravity                 # Gravity vector
+  log_format: "csv"
+
+pressure:
+  enabled: true
+  i2c_bus: 1
+  i2c_address: 0x77          # DPS310 default
+  sample_rate_hz: 1           # 1 Hz sufficient for weather trends
+  oversampling: 7             # 0-7 (7 = highest precision, ~0.002 hPa)
+  log_format: "csv"
+
+wind:
+  enabled: true
+  sensor_type: "calypso_mini" # calypso_mini, calypso_solar, or openwind
+  ble_mac_address: ""         # Set after first scan, e.g. "AA:BB:CC:DD:EE:FF"
+  ble_scan_timeout_sec: 30
+  ble_reconnect_interval_sec: 5
+  sample_rate_hz: 1           # Calypso Mini outputs at 1 Hz
+  heading_offset_deg: 0       # Offset if sensor not aligned to bow
+  log_format: "csv"
+
+camera:
+  enabled: true
+  resolution: [1920, 1080]    # 1080p
+  framerate: 30
+  rotation: 0                 # 0, 90, 180, 270
+  hflip: false
+  vflip: false
+  autofocus: "continuous"     # continuous, manual, single
+  codec: "h264"
+  bitrate_mbps: 8             # ~3.6 GB/hour
+  segment_duration_min: 5     # Split into 5-min chunks (corruption safety)
+  overlay_timestamp: true     # Burn GPS timestamp into video
+
+sync:
+  enabled: false              # Enable for WiFi upload
+  method: "wifi"              # wifi or lte
+  wifi_ssid: "YachtClub-WiFi"
+  wifi_password: ""
+  aws_s3_bucket: "sailframes-data"  # sailframes.com
+  aws_region: "us-east-1"
+  upload_on_connect: true     # Auto-upload when WiFi detected
+  compress_before_upload: true
+
+monitor:
+  enabled: true
+  web_port: 8080              # Local dashboard at http://<pi-ip>:8080
+  log_system_stats: true      # CPU temp, disk usage, battery level
+  battery_shutdown_percent: 5 # Clean shutdown below this level
+  stats_interval_sec: 10

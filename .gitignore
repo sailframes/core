@@ -1,15 +1,21 @@
 # Data files (too large for git)
 data/
+export/
 
 # Python
 __pycache__/
-services/__pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
 *.egg
 venv/
+.venv/
 .env
+
+# Node.js
+node_modules/
+dist/
+*.tgz
 
 # OS
 .DS_Store
@@ -28,6 +34,10 @@ Thumbs.db
 # Temporary files
 *.tmp
 /tmp/
+
+# KiCad
+*.kicad_prl
+.history/
 
 # AWS credentials (never commit)
 .aws/
