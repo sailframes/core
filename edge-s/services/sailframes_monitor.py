@@ -588,7 +588,7 @@ DASHBOARD_HTML = """
         /* Recording control styles */
         .recording-card { background: #1a2a40; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
         .recording-card.recording { border: 2px solid #f44336; background: linear-gradient(135deg, #1a2a40 0%, #2d1a1a 100%); }
-        .recording-btn { padding: 14px 32px; font-size: 18px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+        .recording-btn { padding: 8px 16px; font-size: 13px; font-weight: 600; border: none; border-radius: 6px; cursor: pointer; transition: all 0.2s; }
         .recording-btn.start { background: #4caf50; color: white; }
         .recording-btn.start:hover { background: #66bb6a; }
         .recording-btn.stop { background: #f44336; color: white; }
@@ -628,7 +628,7 @@ DASHBOARD_HTML = """
             </div>
             <div style="display: flex; align-items: center; gap: 12px;">
                 <span id="rec-indicator" style="display: none;"><span class="rec-dot active"></span><span style="color: #f44336; font-weight: 600;">REC</span></span>
-                <button id="recording-btn" class="recording-btn start" onclick="toggleRecording()">START RECORDING</button>
+                <button id="recording-btn" class="recording-btn start" onclick="toggleRecording()">Start Recording</button>
             </div>
         </div>
         <div class="sensor-status-grid">
@@ -1186,10 +1186,11 @@ DASHBOARD_HTML = """
     </div>
 
     <div class="updated">Updated {{ state.last_update }}</div>
-    <div style="text-align: center; margin-top: 12px; display: flex; gap: 20px; justify-content: center;">
+    <div style="text-align: center; margin-top: 12px; display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;">
         <a href="/gps" style="color: #4fc3f7; font-size: 13px;">📍 GPS Details</a>
         <a href="/battery" style="color: #4fc3f7; font-size: 13px;">🔋 Battery History</a>
         <a href="/video" style="color: #4fc3f7; font-size: 13px;">🎬 Video Review</a>
+        <a href="/data" style="color: #4fc3f7; font-size: 13px;">🗂️ Data Management</a>
     </div>
 
     <script>
@@ -1300,9 +1301,14 @@ DASHBOARD_HTML = """
     let isRecording = false;
 
     function toggleRecording() {
+        // Confirm before stopping cameras
+        if (isRecording && !confirm('Stop camera recording?')) {
+            return;
+        }
+
         const btn = document.getElementById('recording-btn');
         btn.disabled = true;
-        btn.textContent = isRecording ? 'STOPPING...' : 'STARTING...';
+        btn.textContent = isRecording ? 'Stopping...' : 'Starting...';
 
         const endpoint = isRecording ? '/api/recording/stop' : '/api/recording/start';
         fetch(endpoint, { method: 'POST' })
@@ -1335,14 +1341,14 @@ DASHBOARD_HTML = """
                 if (isRecording) {
                     card.classList.add('recording');
                     btn.className = 'recording-btn stop';
-                    btn.textContent = 'STOP RECORDING';
+                    btn.textContent = 'Stop';
                     indicator.style.display = 'inline';
                     const recordingCount = Object.values(data.sensors).filter(s => s.recording).length;
                     statusText.textContent = recordingCount + ' sensor(s) recording';
                 } else {
                     card.classList.remove('recording');
                     btn.className = 'recording-btn start';
-                    btn.textContent = 'START RECORDING';
+                    btn.textContent = 'Start Recording';
                     indicator.style.display = 'none';
                     statusText.textContent = 'Sensors idle';
                 }
@@ -3306,6 +3312,382 @@ def api_video_delete_date():
     return jsonify({'success': True, 'deleted': deleted})
 
 
+# ── Data Management Page ──
+
+def get_data_by_date(data_dir):
+    """Get data statistics grouped by date."""
+    data_path = Path(data_dir)
+    dates = []
+
+    for date_dir in sorted(data_path.glob('20??-??-??'), reverse=True):
+        date_info = {
+            'date': date_dir.name,
+            'sensors': {},
+            'video': {'count': 0, 'size_bytes': 0},
+            'total_size_bytes': 0
+        }
+
+        # Sensor data directories
+        sensor_types = ['gps', 'imu', 'pressure', 'wind']
+        for sensor in sensor_types:
+            sensor_dir = date_dir / sensor
+            if sensor_dir.exists():
+                files = list(sensor_dir.glob('*.csv'))
+                size = sum(f.stat().st_size for f in files)
+                date_info['sensors'][sensor] = {
+                    'count': len(files),
+                    'size_bytes': size
+                }
+                date_info['total_size_bytes'] += size
+
+        # Video data
+        video_dir = date_dir / 'video'
+        if video_dir.exists():
+            # Count videos in root and subdirectories
+            videos = list(video_dir.glob('*.mp4')) + list(video_dir.glob('*/*.mp4'))
+            size = sum(v.stat().st_size for v in videos)
+            date_info['video'] = {
+                'count': len(videos),
+                'size_bytes': size
+            }
+            date_info['total_size_bytes'] += size
+
+        # Only include dates with data
+        if date_info['total_size_bytes'] > 0:
+            dates.append(date_info)
+
+    return dates
+
+
+def format_size(size_bytes):
+    """Format bytes to human readable string."""
+    if size_bytes >= 1024**3:
+        return f"{size_bytes / (1024**3):.1f} GB"
+    elif size_bytes >= 1024**2:
+        return f"{size_bytes / (1024**2):.1f} MB"
+    elif size_bytes >= 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes} B"
+
+
+DATA_MANAGEMENT_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Data Management - SailFrames</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, sans-serif; background: #0a1628; color: #e0e8f0; padding: 16px; }
+        h1 { color: #4fc3f7; margin-bottom: 8px; font-size: 24px; }
+        h2 { color: #78909c; font-size: 14px; text-transform: uppercase; margin: 16px 0 8px; }
+        a { color: #4fc3f7; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .nav { margin-bottom: 16px; font-size: 14px; }
+        .card { background: #1a2a40; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+        .summary { display: flex; gap: 24px; margin-bottom: 16px; font-size: 14px; flex-wrap: wrap; }
+        .summary-item { }
+        .summary-value { font-size: 20px; font-weight: 700; color: #fff; }
+        .summary-label { font-size: 11px; color: #78909c; }
+        .date-row { display: flex; justify-content: space-between; align-items: center; padding: 14px; border-bottom: 1px solid #233; }
+        .date-row:last-child { border-bottom: none; }
+        .date-row:hover { background: #233; }
+        .date-name { font-weight: 600; font-size: 16px; color: #4fc3f7; }
+        .date-meta { font-size: 12px; color: #78909c; margin-top: 6px; }
+        .sensor-tags { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+        .sensor-tag { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; background: #233; }
+        .sensor-tag.gps { background: #1976d2; color: white; }
+        .sensor-tag.imu { background: #7b1fa2; color: white; }
+        .sensor-tag.pressure { background: #00796b; color: white; }
+        .sensor-tag.wind { background: #c2185b; color: white; }
+        .sensor-tag.video { background: #e65100; color: white; }
+        .btn { padding: 8px 16px; border-radius: 4px; border: none; font-size: 13px; cursor: pointer; }
+        .btn-delete { background: #455a64; color: #e0e8f0; }
+        .btn-delete:hover { background: #c62828; }
+        .btn-delete:disabled { background: #333; color: #666; cursor: not-allowed; }
+        .no-data { color: #546e7a; font-style: italic; padding: 20px; text-align: center; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 100; }
+        .modal-content { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #1a2a40; padding: 24px; border-radius: 8px; text-align: center; max-width: 90%; }
+        .modal-buttons { margin-top: 16px; display: flex; gap: 12px; justify-content: center; }
+        .checkbox-group { margin-top: 12px; text-align: left; }
+        .checkbox-group label { display: block; padding: 8px; cursor: pointer; }
+        .checkbox-group label:hover { background: #233; border-radius: 4px; }
+        .checkbox-group input { margin-right: 8px; }
+        .warning { color: #ff9800; font-size: 12px; margin-top: 8px; }
+        .today-badge { display: inline-block; background: #4caf50; color: white; font-size: 10px; padding: 2px 6px; border-radius: 3px; margin-left: 8px; }
+    </style>
+</head>
+<body>
+    <div class="nav"><a href="/">&larr; Back to Dashboard</a></div>
+    <h1>Data Management</h1>
+
+    <div class="summary">
+        <div class="summary-item">
+            <div class="summary-value">{{ total_days }}</div>
+            <div class="summary-label">Days with Data</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-value">{{ total_size }}</div>
+            <div class="summary-label">Total Storage Used</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-value">{{ total_videos }}</div>
+            <div class="summary-label">Total Videos</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-value">{{ total_sensor_files }}</div>
+            <div class="summary-label">Sensor Files</div>
+        </div>
+    </div>
+
+    <div class="card">
+        {% if dates %}
+        {% for d in dates %}
+        <div class="date-row" id="date-{{ d.date }}">
+            <div>
+                <div class="date-name">
+                    {{ d.date }}
+                    {% if d.date == today %}<span class="today-badge">TODAY</span>{% endif %}
+                </div>
+                <div class="date-meta">{{ d.total_size_str }} total</div>
+                <div class="sensor-tags">
+                    {% if d.sensors.gps %}<span class="sensor-tag gps">GPS: {{ d.sensors.gps.count }} files ({{ d.sensors.gps.size_str }})</span>{% endif %}
+                    {% if d.sensors.imu %}<span class="sensor-tag imu">IMU: {{ d.sensors.imu.count }} files ({{ d.sensors.imu.size_str }})</span>{% endif %}
+                    {% if d.sensors.pressure %}<span class="sensor-tag pressure">Pressure: {{ d.sensors.pressure.count }} files ({{ d.sensors.pressure.size_str }})</span>{% endif %}
+                    {% if d.sensors.wind %}<span class="sensor-tag wind">Wind: {{ d.sensors.wind.count }} files ({{ d.sensors.wind.size_str }})</span>{% endif %}
+                    {% if d.video.count > 0 %}<span class="sensor-tag video">Video: {{ d.video.count }} files ({{ d.video.size_str }})</span>{% endif %}
+                </div>
+            </div>
+            <button class="btn btn-delete" onclick="showDeleteModal('{{ d.date }}', '{{ d.total_size_str }}', {% if d.date == today %}true{% else %}false{% endif %})" {% if d.date == today %}title="Cannot delete today's data"{% endif %}>Delete</button>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="no-data">No recorded data found.</div>
+        {% endif %}
+    </div>
+
+    <!-- Delete confirmation modal -->
+    <div id="delete-modal" class="modal">
+        <div class="modal-content">
+            <div style="font-size: 18px; margin-bottom: 8px;">Delete Data for <span id="modal-date"></span>?</div>
+            <div id="modal-size" style="color: #78909c; margin-bottom: 12px;"></div>
+
+            <div class="checkbox-group">
+                <label><input type="checkbox" id="del-sensors" checked> Sensor data (GPS, IMU, Pressure, Wind)</label>
+                <label><input type="checkbox" id="del-video" checked> Video recordings</label>
+            </div>
+
+            <div id="today-warning" class="warning" style="display: none;">
+                Cannot delete today's data while services may be writing to it.
+            </div>
+
+            <div class="modal-buttons">
+                <button class="btn" style="background: #455a64; color: white;" onclick="closeModal()">Cancel</button>
+                <button class="btn" id="confirm-delete-btn" style="background: #c62828; color: white;" onclick="doDelete()">Delete Selected</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let deleteDate = null;
+        let isToday = false;
+
+        function showDeleteModal(date, size, today) {
+            deleteDate = date;
+            isToday = today;
+            document.getElementById('modal-date').textContent = date;
+            document.getElementById('modal-size').textContent = 'Total size: ' + size;
+            document.getElementById('today-warning').style.display = today ? 'block' : 'none';
+            document.getElementById('confirm-delete-btn').disabled = today;
+            document.getElementById('del-sensors').disabled = today;
+            document.getElementById('del-video').disabled = today;
+            document.getElementById('delete-modal').style.display = 'block';
+        }
+
+        function closeModal() {
+            document.getElementById('delete-modal').style.display = 'none';
+            deleteDate = null;
+        }
+
+        function doDelete() {
+            if (!deleteDate || isToday) return;
+
+            const deleteSensors = document.getElementById('del-sensors').checked;
+            const deleteVideo = document.getElementById('del-video').checked;
+
+            if (!deleteSensors && !deleteVideo) {
+                alert('Please select at least one data type to delete.');
+                return;
+            }
+
+            document.getElementById('confirm-delete-btn').disabled = true;
+            document.getElementById('confirm-delete-btn').textContent = 'Deleting...';
+
+            fetch('/api/data/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    date: deleteDate,
+                    delete_sensors: deleteSensors,
+                    delete_video: deleteVideo
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Error: ' + (data.error || 'Delete failed'));
+                    document.getElementById('confirm-delete-btn').disabled = false;
+                    document.getElementById('confirm-delete-btn').textContent = 'Delete Selected';
+                }
+            })
+            .catch(e => {
+                alert('Error: ' + e);
+                document.getElementById('confirm-delete-btn').disabled = false;
+                document.getElementById('confirm-delete-btn').textContent = 'Delete Selected';
+            });
+        }
+    </script>
+</body>
+</html>
+"""
+
+
+@app.route('/data')
+def data_management_page():
+    """Data management page for viewing and deleting recorded data."""
+    global _config
+    if _config is None:
+        _config = load_config()
+
+    data_dir = _config['storage']['data_dir']
+    dates = get_data_by_date(data_dir)
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    # Add formatted sizes
+    for d in dates:
+        d['total_size_str'] = format_size(d['total_size_bytes'])
+        for sensor, info in d['sensors'].items():
+            info['size_str'] = format_size(info['size_bytes'])
+        d['video']['size_str'] = format_size(d['video']['size_bytes'])
+
+    # Calculate totals
+    total_size_bytes = sum(d['total_size_bytes'] for d in dates)
+    total_videos = sum(d['video']['count'] for d in dates)
+    total_sensor_files = sum(
+        sum(s['count'] for s in d['sensors'].values())
+        for d in dates
+    )
+
+    return render_template_string(
+        DATA_MANAGEMENT_HTML,
+        dates=dates,
+        today=today,
+        total_days=len(dates),
+        total_size=format_size(total_size_bytes),
+        total_videos=total_videos,
+        total_sensor_files=total_sensor_files
+    )
+
+
+@app.route('/api/data/delete', methods=['POST'])
+def api_data_delete():
+    """Delete sensor and/or video data for a specific date."""
+    global _config
+    if _config is None:
+        _config = load_config()
+
+    data = request.get_json()
+    date = data.get('date') if data else None
+    delete_sensors = data.get('delete_sensors', True) if data else True
+    delete_video = data.get('delete_video', True) if data else True
+
+    if not date:
+        return jsonify({'success': False, 'error': 'No date provided'}), 400
+
+    # Validate date format (YYYY-MM-DD)
+    import re
+    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date):
+        return jsonify({'success': False, 'error': 'Invalid date format'}), 400
+
+    # Prevent deleting today's data
+    today = datetime.now().strftime('%Y-%m-%d')
+    if date == today:
+        return jsonify({'success': False, 'error': 'Cannot delete today\'s data while services may be recording'}), 400
+
+    data_dir = Path(_config['storage']['data_dir'])
+    date_dir = data_dir / date
+
+    if not date_dir.exists():
+        return jsonify({'success': False, 'error': 'No data for this date'}), 404
+
+    deleted = {'sensors': 0, 'videos': 0}
+    errors = []
+
+    # Delete sensor data
+    if delete_sensors:
+        for sensor in ['gps', 'imu', 'pressure', 'wind']:
+            sensor_dir = date_dir / sensor
+            if sensor_dir.exists():
+                for f in sensor_dir.glob('*.csv'):
+                    try:
+                        f.unlink()
+                        deleted['sensors'] += 1
+                    except Exception as e:
+                        errors.append(f"{sensor}/{f.name}: {e}")
+                # Remove empty directory
+                try:
+                    if sensor_dir.exists() and not list(sensor_dir.iterdir()):
+                        sensor_dir.rmdir()
+                except Exception:
+                    pass
+
+    # Delete video data
+    if delete_video:
+        video_dir = date_dir / 'video'
+        if video_dir.exists():
+            # Delete videos in root and subdirectories
+            for v in list(video_dir.glob('*.mp4')) + list(video_dir.glob('*/*.mp4')):
+                try:
+                    v.unlink()
+                    deleted['videos'] += 1
+                except Exception as e:
+                    errors.append(f"video/{v.name}: {e}")
+            # Remove empty subdirectories
+            for subdir in video_dir.iterdir():
+                if subdir.is_dir():
+                    try:
+                        if not list(subdir.iterdir()):
+                            subdir.rmdir()
+                    except Exception:
+                        pass
+            # Remove video directory if empty
+            try:
+                if video_dir.exists() and not list(video_dir.iterdir()):
+                    video_dir.rmdir()
+            except Exception:
+                pass
+
+    # Remove date directory if empty
+    try:
+        if date_dir.exists() and not list(date_dir.iterdir()):
+            date_dir.rmdir()
+    except Exception:
+        pass
+
+    logger.info(f"Deleted data for {date}: {deleted['sensors']} sensor files, {deleted['videos']} videos")
+
+    if errors:
+        return jsonify({
+            'success': True,
+            'deleted': deleted,
+            'errors': errors
+        })
+
+    return jsonify({'success': True, 'deleted': deleted})
+
+
 @app.route('/api/camera/<camera_id>/start', methods=['POST'])
 def api_camera_start(camera_id):
     """Start camera recording service."""
@@ -3382,10 +3764,10 @@ def api_recording_start():
 
 @app.route('/api/recording/stop', methods=['POST'])
 def api_recording_stop():
-    """Stop recording on all sensor services."""
+    """Stop camera recording only. Sensor services keep running for live dashboard data."""
     results = {}
-    services = ['sailframes-gps', 'sailframes-imu', 'sailframes-pressure', 'sailframes-wind',
-                'sailframes-camera-cockpit', 'sailframes-camera-sails']
+    # Only stop cameras - sensor services continue running for live data display
+    services = ['sailframes-camera-cockpit', 'sailframes-camera-sails']
 
     for service in services:
         try:
@@ -3400,10 +3782,10 @@ def api_recording_stop():
 
     success = all(results.values())
     if success:
-        logger.info("All recording services stopped via API")
+        logger.info("Camera recording stopped via API (sensors still running)")
     else:
         failed = [s for s, ok in results.items() if not ok]
-        logger.warning(f"Some services failed to stop: {failed}")
+        logger.warning(f"Some cameras failed to stop: {failed}")
 
     return jsonify({'success': success, 'results': results})
 
