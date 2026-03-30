@@ -750,7 +750,8 @@ DASHBOARD_HTML = """
                         <div style="color: #78909c; font-size: 11px; margin-top: 2px;">Service running but no data received</div>
                         {% elif state.gps_status.connected and not state.gps_status.has_fix and state.services.gps %}
                         <span style="color: #ff9800; font-weight: 600;">⚠️ NO FIX — Check antenna!</span>
-                        <div style="color: #78909c; font-size: 11px; margin-top: 2px;">Receiving data but no satellite fix ({{ state.gps_status.satellites or 0 }} sats)</div>
+                        {% set total_in_view = state.gps_status.constellations.values() | map(attribute='in_view') | sum if state.gps_status.constellations else 0 %}
+                        <div style="color: #78909c; font-size: 11px; margin-top: 2px;">{{ total_in_view }} satellites in view, {{ state.gps_status.satellites or 0 }} tracking</div>
                         {% elif state.services.gps %}
                         <span style="color: #4caf50;">{{ state.gps_status.fix_type or 'Connected' }}</span>
                         {% else %}
@@ -1849,8 +1850,14 @@ DASHBOARD_HTML = """
                     if (data.gps_status && !data.gps_status.connected && data.services && data.services.gps) {
                         gpsMsg = '<span style="color: #f44336; font-weight: 600;">⚠️ DISCONNECTED — Check USB cable!</span><div style="color: #78909c; font-size: 11px; margin-top: 2px;">Service running but no data received</div>';
                     } else if (data.gps_status && data.gps_status.connected && !data.gps_status.has_fix && data.services && data.services.gps) {
-                        const sats = data.gps_status.satellites || 0;
-                        gpsMsg = '<span style="color: #ff9800; font-weight: 600;">⚠️ NO FIX — Check antenna!</span><div style="color: #78909c; font-size: 11px; margin-top: 2px;">Receiving data but no satellite fix (' + sats + ' sats)</div>';
+                        const tracking = data.gps_status.satellites || 0;
+                        let inView = 0;
+                        if (data.gps_status.constellations) {
+                            for (const c of Object.values(data.gps_status.constellations)) {
+                                inView += c.in_view || 0;
+                            }
+                        }
+                        gpsMsg = '<span style="color: #ff9800; font-weight: 600;">⚠️ NO FIX — Check antenna!</span><div style="color: #78909c; font-size: 11px; margin-top: 2px;">' + inView + ' satellites in view, ' + tracking + ' tracking</div>';
                     } else if (data.services && data.services.gps) {
                         gpsMsg = '<span style="color: #ff9800;">Waiting for GPS data...</span>';
                     } else {

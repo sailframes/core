@@ -259,26 +259,68 @@ def update_gps_status(current, constellation_data=None, usb_connected=True, rece
         logger.warning(f"Failed to update GPS status file: {e}")
 
 
+def find_gps_device(preferred_device, baud_rate):
+    """
+    Find GPS device, checking preferred device first then scanning USB ports.
+    Returns (device_path, serial_connection) or (None, None) if not found.
+    """
+    import glob
+
+    # Try preferred device first
+    if os.path.exists(preferred_device):
+        try:
+            ser = serial.Serial(preferred_device, baud_rate, timeout=1)
+            # Check if it's actually a GPS by reading a line
+            line = ser.readline().decode('ascii', errors='replace')
+            if line.startswith('$G'):
+                logger.info(f"GPS found on preferred device {preferred_device}")
+                return preferred_device, ser
+            ser.close()
+        except Exception as e:
+            logger.debug(f"Preferred device {preferred_device} failed: {e}")
+
+    # Scan all USB serial ports
+    patterns = ['/dev/ttyACM*', '/dev/ttyUSB*']
+    for pattern in patterns:
+        for port in sorted(glob.glob(pattern)):
+            if port == preferred_device:
+                continue  # Already tried
+            try:
+                ser = serial.Serial(port, baud_rate, timeout=1)
+                line = ser.readline().decode('ascii', errors='replace')
+                if line.startswith('$G'):
+                    logger.info(f"GPS found on {port} (scanned)")
+                    return port, ser
+                ser.close()
+            except Exception as e:
+                logger.debug(f"Port {port} failed: {e}")
+
+    return None, None
+
+
 def run(config):
     """Main GPS acquisition loop."""
     gps_config = config['gps']
-    device = gps_config['device']
+    preferred_device = gps_config['device']
     baud = gps_config['baud_rate']
 
-    logger.info(f"Connecting to GPS on {device} at {baud} baud")
+    logger.info(f"Looking for GPS (preferred: {preferred_device}, baud: {baud})")
 
-    # Wait for GPS device to appear
+    # Try to find GPS device, with retries
+    device = None
+    ser = None
     retries = 0
-    while not os.path.exists(device) and running:
-        retries += 1
-        if retries % 10 == 0:
-            logger.warning(f"GPS device {device} not found, waiting...")
-        time.sleep(1)
+    while device is None and running:
+        device, ser = find_gps_device(preferred_device, baud)
+        if device is None:
+            retries += 1
+            if retries % 10 == 0:
+                logger.warning(f"GPS not found on any port, retrying...")
+            time.sleep(1)
 
     if not running:
         return
 
-    ser = serial.Serial(device, baud, timeout=1)
     logger.info(f"GPS connected on {device}")
 
     data_dir = get_data_dir(config)
