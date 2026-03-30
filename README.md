@@ -1,79 +1,68 @@
-# SailFrames 🚤
+# SailFrames
 
-Open-source sailboat racing data logger with AI vision analysis.
+Open-source sailboat racing data logger and analytics platform.
 
-🌐 [sailframes.com](https://sailframes.com) · 📦 [github.com/sailframes](https://github.com/sailframes) · **Apache 2.0 License**
+[sailframes.com](https://sailframes.com) | [github.com/sailframes](https://github.com/sailframes) | Apache 2.0 License
 
 ## What is SailFrames?
 
-SailFrames is a self-contained, waterproof data acquisition device for competitive sailboat racing. It captures high-precision GPS tracks, wind speed and direction, boat motion (heel/pitch/heading), barometric pressure, and cockpit video — all synchronized with GPS timestamps. Post-race, AI vision processing analyzes crew positions and sail trim from the video.
+SailFrames is a self-contained, waterproof data acquisition device for competitive sailboat racing. It captures high-precision GPS tracks, wind speed and direction, boat motion (heel/pitch/heading), barometric pressure, and cockpit video — all synchronized with GPS timestamps. Data syncs to AWS after each session for web-based race analysis and replay.
+
+## Repository Structure
+
+```
+sailframes/core/
+├── edge/              # Raspberry Pi edge device
+│   ├── services/      # Sensor data acquisition (GPS, IMU, wind, pressure, camera)
+│   ├── scripts/       # Install, start, stop, Wi-Fi mode scripts
+│   ├── config/        # Device configuration (sailframes.yaml)
+│   └── tests/         # Sensor connectivity tests
+├── hardware/          # KiCad PCB designs
+├── firmware/          # Pi boot config, Arduino sketches
+├── web/               # Dashboard web application
+│   ├── api/           # Backend API
+│   └── frontend/      # React frontend
+├── lambda/            # AWS Lambda functions
+├── processing/        # Post-race data processing
+├── infrastructure/    # AWS CDK/Terraform
+├── scripts/           # Utility scripts
+├── services/          # Systemd service definitions
+├── config/            # Shared configuration
+└── tests/             # Integration tests
+```
 
 ## Hardware
 
-- **Compute:** Raspberry Pi 4 (8GB recommended)
-- **GPS:** u-blox ZED-F9P (dual-band GNSS, RTK-capable)
-- **Wind:** Calypso Mini CMI1022 (BLE ultrasonic anemometer)
-- **IMU:** BNO085 (9DOF with on-chip sensor fusion)
-- **Pressure:** DPS310 (precision barometric sensor)
-- **Camera:** Raspberry Pi Camera Module 3 Wide (120° FoV)
-- **Storage:** USB 3.0 SSD
-- **Power:** UPS HAT with 21700 Li-ion cells
-- **Enclosure:** IP67 150×100×70mm with clear lid
+| Component | Part | Interface |
+|-----------|------|-----------|
+| Compute | Raspberry Pi 5 | — |
+| GPS | u-blox ZED-F9P | USB |
+| Wind | Calypso Ultrasonic Mini | BLE 5.1 |
+| IMU | BNO085 (GY-BNO08X) | I2C @ 0x4A |
+| Pressure | DPS310 | I2C @ 0x77 |
+| Camera | Pi Camera 3 Wide | CSI |
+| Display | 1602 LCD + PCF8574T | I2C @ 0x27 |
+| Enclosure | IP67 sealed | Gore-Tex vent |
 
-## Software Architecture
-
-```
-sailframes/
-├── services/
-│   ├── sailframes_gps.py        # GPS data acquisition (ZED-F9P via USB/UART)
-│   ├── sailframes_imu.py        # IMU data acquisition (BNO085 via I2C)
-│   ├── sailframes_pressure.py   # Barometric pressure (DPS310 via I2C)
-│   ├── sailframes_wind.py       # Wind sensor (Calypso Mini via BLE)
-│   ├── sailframes_camera.py     # Video capture (Pi Camera 3 Wide via CSI)
-│   ├── sailframes_sync.py       # Data upload to AWS S3
-│   └── sailframes_monitor.py    # System health monitoring & local dashboard
-├── config/
-│   └── sailframes.yaml          # Central configuration
-├── scripts/
-│   ├── install.sh            # One-shot setup script
-│   ├── start.sh              # Start all services
-│   └── stop.sh               # Stop all services
-├── tests/
-│   ├── test_gps.py           # GPS connectivity test
-│   ├── test_imu.py           # IMU connectivity test
-│   ├── test_pressure.py      # Pressure sensor test
-│   ├── test_wind.py          # BLE wind sensor test
-│   └── test_camera.py        # Camera capture test
-├── systemd/
-│   ├── sailframes-gps.service
-│   ├── sailframes-imu.service
-│   ├── sailframes-pressure.service
-│   ├── sailframes-wind.service
-│   ├── sailframes-camera.service
-│   └── sailframes-monitor.service
-├── requirements.txt
-└── README.md
-```
-
-## Quick Start
+## Quick Start (Edge Device)
 
 ```bash
 # Clone the repo
-git clone https://github.com/sailframes/sailframes.git
-cd sailframes
+git clone https://github.com/sailframes/core.git
+cd core
 
-# Run the installer (sets up OS, dependencies, services)
-sudo bash scripts/install.sh
+# Run the installer on Raspberry Pi
+sudo bash edge/scripts/install.sh
 
 # Test all sensors
-python3 tests/test_gps.py
-python3 tests/test_imu.py
-python3 tests/test_pressure.py
-python3 tests/test_wind.py
-python3 tests/test_camera.py
+python3 edge/tests/test_gps.py
+python3 edge/tests/test_imu.py
+python3 edge/tests/test_pressure.py
+python3 edge/tests/test_wind.py
+python3 edge/tests/test_camera.py
 
 # Start all services
-sudo bash scripts/start.sh
+sudo bash edge/scripts/start.sh
 
 # Check status
 sudo systemctl status sailframes-*
@@ -81,7 +70,7 @@ sudo systemctl status sailframes-*
 
 ## Data Format
 
-All sensor data is timestamped with GPS time (UTC) and stored on the USB SSD:
+All sensor data is timestamped with GPS time (UTC):
 
 ```
 /mnt/sailframes-data/
@@ -98,15 +87,11 @@ All sensor data is timestamped with GPS time (UTC) and stored on the USB SSD:
 │       └── cockpit_20260315_140000.mp4
 ```
 
-## Target Boats
+## Fleet
 
-- Sonar 23
-- J/80
-- Similar one-design keelboats
-
-## Operating Area
-
-Boston Harbor, Massachusetts
+- 6 devices deployed
+- Sonar 23 and J/80 class boats
+- Boston Harbor, Massachusetts
 
 ## License
 
