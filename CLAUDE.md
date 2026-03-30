@@ -22,14 +22,14 @@ syncs to AWS after each session, and provides web-based race analysis and replay
 
 ```
 sailframes/core/
-├── edge-s/            # Edge software (Raspberry Pi)
+├── edge-s/            # Raspberry Pi edge device (S1 = first gen)
 │   ├── services/      # Sensor acquisition (GPS, IMU, wind, pressure, camera)
 │   ├── scripts/       # Install, start, stop, Wi-Fi mode
 │   ├── config/        # Device config (sailframes.yaml)
 │   └── tests/         # Sensor connectivity tests
-├── edge-e/            # Edge electronics
-│   ├── hardware/      # KiCad PCB designs (sailframes-e1 board)
-│   └── firmware/      # Pi boot config, Arduino sketches
+├── edge-e/            # ESP32 edge device (E1 = first gen)
+│   ├── hardware/      # KiCad PCB designs
+│   └── firmware/      # ESP32 Arduino firmware
 ├── web/               # Dashboard web application
 │   ├── api/           # FastAPI backend
 │   └── frontend/      # React frontend

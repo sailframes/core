@@ -12,14 +12,14 @@ SailFrames is a self-contained, waterproof data acquisition device for competiti
 
 ```
 sailframes/core/
-├── edge-s/            # Edge software (Raspberry Pi)
+├── edge-s/            # Raspberry Pi edge device
 │   ├── services/      # Sensor acquisition (GPS, IMU, wind, pressure, camera)
 │   ├── scripts/       # Install, start, stop, Wi-Fi mode
 │   ├── config/        # Device configuration
 │   └── tests/         # Sensor connectivity tests
-├── edge-e/            # Edge electronics
+├── edge-e/            # ESP32 edge device
 │   ├── hardware/      # KiCad PCB designs
-│   └── firmware/      # Pi boot config, Arduino sketches
+│   └── firmware/      # ESP32 Arduino firmware
 ├── web/               # Dashboard web application
 │   ├── api/           # Backend API
 │   └── frontend/      # React frontend

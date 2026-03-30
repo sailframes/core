@@ -1,8 +1,24 @@
-# SailFrames Edge Software
+# SailFrames Edge-S
 
-Raspberry Pi software for sailboat racing data acquisition.
+Raspberry Pi-based edge device for sailboat racing data acquisition.
 
-Part of [sailframes/core](https://github.com/sailframes/core). See [edge-e](../edge-e) for hardware/firmware.
+Part of [sailframes/core](https://github.com/sailframes/core). See [edge-e](../edge-e) for ESP32-based device.
+
+## Variants
+
+- **S1** - First generation Raspberry Pi 5 device (current)
+
+## Hardware (S1)
+
+| Component | Part | Interface |
+|-----------|------|-----------|
+| Compute | Raspberry Pi 5 | — |
+| GPS | u-blox ZED-F9P | USB |
+| Wind | Calypso Ultrasonic Mini | BLE 5.1 |
+| IMU | BNO085 (GY-BNO08X) | I2C @ 0x4A |
+| Pressure | DPS310 | I2C @ 0x77 |
+| Camera | Pi Camera 3 Wide | CSI |
+| Display | 1602 LCD + PCF8574T | I2C @ 0x27 |
 
 ## Directory Structure
 
