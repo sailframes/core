@@ -722,7 +722,7 @@ DASHBOARD_HTML = """
                     {% if state.gps_status and state.gps_status.constellations %}
                     {% for name, data in state.gps_status.constellations.items() %}
                     <div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
-                        <span style="color: #4fc3f7; font-weight: 600;">{{ name }}</span>: {{ data.tracking }}/{{ data.in_view }}
+                        <span style="color: #4fc3f7; font-weight: 600;">{{ name }}</span>: {{ data.in_view }} sats
                         {% if data.signals %}<span style="color: #78909c; font-size: 10px; margin-left: 4px;">({{ data.signals|join(', ') }})</span>{% endif %}
                     </div>
                     {% endfor %}
@@ -1833,7 +1833,7 @@ DASHBOARD_HTML = """
                         for (const [name, cdata] of Object.entries(data.gps_status.constellations)) {
                             const signals = cdata.signals ? cdata.signals.join(', ') : '';
                             constHtml += `<div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
-                                <span style="color: #4fc3f7; font-weight: 600;">${name}</span>: ${cdata.tracking}/${cdata.in_view}
+                                <span style="color: #4fc3f7; font-weight: 600;">${name}</span>: ${cdata.in_view} sats
                                 ${signals ? `<span style="color: #78909c; font-size: 10px; margin-left: 4px;">(${signals})</span>` : ''}
                             </div>`;
                         }
