@@ -193,14 +193,15 @@ def parse_gsv(line, constellation_data):
 def parse_gsa(line, sats_used_by_constellation):
     """
     Parse GSA sentence to track which satellites are used for fix per constellation.
-    GSA format: $xxGSA,mode,fix,prn1,prn2,...,prn12,pdop,hdop,vdop*cs
+    GSA format: $xxGSA,mode,fix,prn1-prn12,pdop,hdop,vdop[,systemId]*cs
 
-    Updates sats_used_by_constellation dict: {'GPS': 3, 'Galileo': 2, ...}
+    For GNGSA (multi-GNSS), system ID is the last field:
+    1=GPS, 2=GLONASS, 3=Galileo, 4=BeiDou, 5=QZSS
+
+    Updates sats_used_by_constellation dict: {'GPS': 10, 'Galileo': 7, ...}
     """
     try:
         talker = line[1:3]
-        # Map talker ID to constellation name
-        # Note: GNGSA uses system ID in last field
         talker_map = {
             'GP': 'GPS',
             'GL': 'GLONASS',
@@ -214,24 +215,30 @@ def parse_gsa(line, sats_used_by_constellation):
             return
 
         fix_type = int(parts[2]) if parts[2] else 0
-        if fix_type < 2:  # No fix
+        if fix_type < 2:  # No fix (1=no fix, 2=2D, 3=3D)
             return
 
-        # For GNGSA, system ID is in field 18 (index 17)
-        if talker == 'GN' and len(parts) > 17:
-            system_id = parts[17]
+        # Determine constellation
+        if talker == 'GN':
+            # GNGSA: system ID is last field (index 18 for standard GSA with 12 PRN slots)
+            # Fields: msg,mode,fix,prn*12,pdop,hdop,vdop,sysid
+            system_id = parts[-1] if len(parts) > 18 else parts[17] if len(parts) > 17 else ''
             system_map = {'1': 'GPS', '2': 'GLONASS', '3': 'Galileo', '4': 'BeiDou', '5': 'QZSS'}
-            constellation = system_map.get(system_id, 'Unknown')
+            constellation = system_map.get(system_id, None)
+            if not constellation:
+                return
         else:
-            constellation = talker_map.get(talker, 'Unknown')
+            constellation = talker_map.get(talker)
+            if not constellation:
+                return
 
-        # Count PRNs used (fields 3-14, indices 3-14)
+        # Count PRNs used (fields 3-14, indices 3 to 14 inclusive)
         prn_count = 0
         for i in range(3, 15):
-            if i < len(parts) and parts[i]:
+            if i < len(parts) and parts[i] and parts[i].isdigit():
                 prn_count += 1
 
-        if prn_count > 0 and constellation != 'Unknown':
+        if prn_count > 0:
             sats_used_by_constellation[constellation] = prn_count
 
     except (ValueError, IndexError):
