@@ -344,8 +344,13 @@ def run(config):
                 if current['speed_knots'] is not None:
                     current['speed_mps'] = round(current['speed_knots'] * 0.514444, 3)
 
-            # Write at configured rate
+            # Update status periodically even without fix (for dashboard)
             now = time.monotonic()
+            if now - last_status_update >= 1.0:
+                update_gps_status(current, constellation_data, usb_connected=True, receiving_nmea=True)
+                last_status_update = now
+
+            # Write at configured rate (only if we have a position fix)
             if now - last_write >= write_interval and current['latitude'] is not None:
                 utc_now = datetime.now(timezone.utc).isoformat()
                 writer.writerow([
