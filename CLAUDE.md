@@ -211,8 +211,16 @@ SCL  → SCL1 (shared bus)
 ```
 
 ### ZED-F9P GPS
-Preferred: USB → any Pi 5 USB port → `/dev/ttyACM0`
+Preferred: USB → any Pi 5 USB port → `/dev/ttyACM0` or `/dev/sailframes-gps` symlink
 Fallback UART: TX→GPIO15(RX), RX→GPIO14(TX)
+
+**USB auto-detection:** The GPS service automatically scans `/dev/ttyACM*` and `/dev/ttyUSB*`
+if the preferred device is not found.
+
+**Udev rule for persistent symlink** (`/etc/udev/rules.d/99-sailframes-gps.rules`):
+```
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", SYMLINK+="sailframes-gps"
+```
 
 ### Calypso Wind Sensor
 BLE only — no wires. Pi 5 built-in Bluetooth.
@@ -220,6 +228,65 @@ BLE only — no wires. Pi 5 built-in Bluetooth.
 - Hardware open source: contact info@calypsoinstruments.com
 - 1Hz sample rate, apparent wind direction + speed
 - Must orient bow-mark toward bow when installing
+
+---
+
+## ZED-F9P Configuration
+
+### Message Configuration (via u-center or script)
+
+The GPS outputs NMEA sentences for position and UBX binary for raw measurements:
+
+| Message | Purpose | Required For |
+|---------|---------|--------------|
+| NMEA GGA | Position, fix quality, satellites | Dashboard, CSV logging |
+| NMEA RMC | Speed, course, date/time | Dashboard, CSV logging |
+| NMEA GSV | Satellites in view per constellation | Dashboard constellation display |
+| NMEA GSA | Satellites used for fix per constellation | Dashboard "in use" count |
+| UBX-RXM-RAWX | Raw measurements (pseudorange, carrier phase) | RTKLib post-processing |
+| UBX-RXM-SFRBX | Navigation message subframes | RTKLib (ephemeris data) |
+
+**Configure via u-center:**
+1. Connect to GPS via USB
+2. Go to UBX → CFG → MSG
+3. Enable messages for USB port (rate = 1)
+4. Go to UBX → CFG → PRT → ensure USB has UBX protocol output enabled
+5. Go to UBX → CFG → CFG → Save to Flash
+
+**Or run configuration script:**
+```bash
+python3 edge-s/scripts/configure_gps.py /dev/sailframes-gps
+```
+
+### Raw UBX Logging for RTKLib
+
+The GPS service automatically logs raw UBX data for post-processed kinematic (PPK) positioning:
+- **Location:** `/mnt/sailframes-data/YYYY-MM-DD/ubx/raw_*.ubx`
+- **Contains:** All serial data (NMEA + UBX binary messages)
+- **Rotation:** Hourly file rotation
+- **Usage with RTKLib:**
+  ```bash
+  # Convert to RINEX
+  convbin raw_20260330_140000.ubx -r ubx -o sail.obs
+  # Or load .ubx directly in RTKPOST
+  ```
+
+### GPS Warm/Hot Start
+
+The ZED-F9P has a rechargeable backup battery that preserves satellite data:
+
+| Start Type | Conditions | Time to Fix |
+|------------|------------|-------------|
+| Hot start | Power off < 4 hours, same location | 1-2 sec |
+| Warm start | Power off < 2-4 days | 25-30 sec |
+| Cold start | Power off > 2-4 days, or moved >100km | 30-60 sec |
+
+### Dashboard GPS Display
+
+The dashboard shows:
+- **Satellites in use for fix:** From GSA sentences (actually contributing to position)
+- **Satellites in view:** From GSV sentences (visible but may not be used)
+- **Per-constellation breakdown:** GPS, GLONASS, Galileo, BeiDou with color coding
 
 ---
 
@@ -295,10 +362,57 @@ PiSugar 3 Plus with 21700 cells (~18.5Wh/cell):
 ## Networking & Dashboard
 
 - Pi 5 runs as **Wi-Fi Access Point** (hostapd) during races
-- Dashboard served as lightweight web app (FastAPI or Flask + WebSocket)
+- Dashboard served on port 8080 (Flask + Jinja2 templates)
 - Crew connects via browser — no app install required
 - Each boat = isolated network, no inter-boat interference
 - Post-race: sync to AWS S3
+
+### Dashboard Pages
+
+| Page | URL | Purpose |
+|------|-----|---------|
+| Main | `/` | Live sensor data, recording controls, system status |
+| GPS Details | `/gps` | Detailed GPS info, constellation tracking |
+| Battery History | `/battery` | Battery logging sessions |
+| Video Review | `/video` | Browse and play recorded videos |
+| Data Management | `/data` | View storage usage, delete old data by date |
+
+### Recording Controls
+
+- **Start Recording:** Starts all sensor services and cameras
+- **Stop Recording:** Stops cameras only; sensors keep running for live dashboard data
+- Confirmation dialog before stopping to prevent accidental data loss
+- Sensors continue logging CSV data; only video recording stops
+
+### Data Management Page (`/data`)
+
+- Lists all dates with recorded data
+- Shows storage breakdown: GPS, IMU, Pressure, Wind (CSV) + Video (MP4)
+- Color-coded sensor tags with file counts and sizes
+- Delete button per date with confirmation
+- Cannot delete today's data (services may be writing)
+
+### Data Directory Structure
+
+```
+/mnt/sailframes-data/
+├── 2026-03-30/
+│   ├── gps/
+│   │   └── track_20260330_140000.csv    # Parsed position data
+│   ├── ubx/
+│   │   └── raw_20260330_140000.ubx      # Raw UBX for RTKLib
+│   ├── imu/
+│   │   └── imu_20260330_140000.csv
+│   ├── pressure/
+│   │   └── pressure_20260330_140000.csv
+│   ├── wind/
+│   │   └── wind_20260330_140000.csv
+│   └── video/
+│       ├── cockpit/
+│       │   └── cockpit_20260330_140000.mp4
+│       └── sails/
+│           └── sails_20260330_140000.mp4
+```
 
 ---
 
@@ -349,9 +463,12 @@ PiSugar 3 Plus with 21700 cells (~18.5Wh/cell):
 - Originally named **TrimLog** (trimlog.com taken)
 - Renamed to **SailFrames** — global find-and-replace done across all 18 files
 - March 2026: Reorganized as monorepo `sailframes/core`
-  - Edge device code moved to `edge/`
-  - PCB designs moved to `hardware/`
+  - `edge-s/` — Raspberry Pi software (S1 = first generation device)
+  - `edge-e/` — ESP32 hardware/firmware (E1 = first generation device)
   - Added `web/`, `lambda/`, `infrastructure/`, `processing/`
+- March 30, 2026: Added raw UBX logging for RTKLib post-processing
+- March 30, 2026: Added data management page for storage cleanup
+- March 30, 2026: GPS constellation tracking with GSV/GSA parsing
 
 ---
 
@@ -374,4 +491,4 @@ PiSugar 3 Plus with 21700 cells (~18.5Wh/cell):
 
 ---
 
-*Last updated: March 30, 2026*
+*Last updated: March 30, 2026 — Added UBX logging, data management, GPS constellation tracking*
