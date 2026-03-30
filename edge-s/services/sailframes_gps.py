@@ -2,6 +2,7 @@
 """
 SailFrames GPS Service
 Reads u-blox ZED-F9P via USB serial, logs position/speed/heading at 10Hz.
+Also logs raw UBX data for RTKLib post-processing.
 """
 
 import os
@@ -59,6 +60,41 @@ def get_data_dir(config):
     data_dir = Path(base) / today / 'gps'
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
+
+
+def get_ubx_dir(config):
+    """Create today's UBX data directory."""
+    base = config['storage']['data_dir']
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    ubx_dir = Path(base) / today / 'ubx'
+    ubx_dir.mkdir(parents=True, exist_ok=True)
+    return ubx_dir
+
+
+def create_ubx_file(ubx_dir):
+    """Create a new UBX raw data file."""
+    timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+    filepath = ubx_dir / f'raw_{timestamp}.ubx'
+    f = open(filepath, 'wb')
+    logger.info(f"Logging raw UBX to {filepath}")
+    return f, filepath
+
+
+def extract_nmea_lines(buffer):
+    """Extract complete NMEA sentences from buffer.
+    Returns (list of lines, remaining buffer)."""
+    lines = []
+    while b'\r\n' in buffer:
+        idx = buffer.index(b'\r\n')
+        line_bytes = buffer[:idx]
+        buffer = buffer[idx + 2:]
+        try:
+            line = line_bytes.decode('ascii', errors='replace').strip()
+            if line.startswith('$'):
+                lines.append(line)
+        except:
+            pass
+    return lines, buffer
 
 
 def create_csv_writer(data_dir):
@@ -383,6 +419,11 @@ def run(config):
     data_dir = get_data_dir(config)
     csv_file, writer = create_csv_writer(data_dir)
 
+    # Create UBX raw data file for RTKLib post-processing
+    ubx_dir = get_ubx_dir(config)
+    ubx_file, ubx_filepath = create_ubx_file(ubx_dir)
+    ubx_bytes_written = 0
+
     # Current state - merge GGA and RMC data
     current = {
         'latitude': None, 'longitude': None, 'altitude_m': None,
@@ -397,61 +438,87 @@ def run(config):
 
     last_write = 0
     last_status_update = 0
+    last_ubx_rotate = time.time()
+    ubx_rotate_interval = 3600  # Rotate UBX file hourly
     write_interval = 1.0 / gps_config['update_rate_hz']
     rows_written = 0
     nmea_received = False  # Track if we're receiving any NMEA data
+    nmea_buffer = b''  # Buffer for extracting NMEA lines from raw data
 
     try:
         while running:
+            # Read raw bytes from serial
             try:
-                line = ser.readline().decode('ascii', errors='replace').strip()
+                if ser.in_waiting > 0:
+                    raw_data = ser.read(ser.in_waiting)
+                else:
+                    raw_data = ser.read(256)  # Blocking read with timeout
             except (serial.SerialException, OSError) as e:
                 logger.error(f"Serial read error: {e}")
+                update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=False, receiving_nmea=False)
                 time.sleep(1)
                 continue
 
-            if not line.startswith('$'):
-                # Still update status periodically even without valid NMEA
+            if not raw_data:
+                # Timeout - update status periodically
                 now = time.monotonic()
                 if now - last_status_update >= 1.0:
                     update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=True, receiving_nmea=nmea_received)
                     last_status_update = now
                 continue
 
-            nmea_received = True
+            # Write raw data to UBX file (includes NMEA + UBX binary)
+            ubx_file.write(raw_data)
+            ubx_bytes_written += len(raw_data)
 
-            # Parse GSV sentences for constellation info (before pynmea2 parsing)
-            if 'GSV' in line:
-                parse_gsv(line, constellation_data)
-                continue  # GSV sentences don't need further processing
+            # Flush UBX file periodically
+            if ubx_bytes_written % 10000 < len(raw_data):
+                ubx_file.flush()
 
-            # Parse GSA sentences for satellites used per constellation
-            if 'GSA' in line:
-                parse_gsa(line, sats_used_by_constellation)
-                continue
+            # Extract NMEA lines from buffer
+            nmea_buffer += raw_data
+            lines, nmea_buffer = extract_nmea_lines(nmea_buffer)
 
-            try:
-                msg = pynmea2.parse(line)
-            except pynmea2.ParseError:
-                continue
+            # Prevent buffer from growing too large
+            if len(nmea_buffer) > 4096:
+                nmea_buffer = nmea_buffer[-2048:]
 
-            # Update current state from parsed sentence
-            if isinstance(msg, pynmea2.types.talker.GGA):
-                gga = parse_gga(msg)
-                current.update({k: v for k, v in gga.items() if v is not None})
+            # Process each NMEA line
+            for line in lines:
+                nmea_received = True
 
-            elif isinstance(msg, pynmea2.types.talker.RMC):
-                rmc = parse_rmc(msg)
-                current.update({k: v for k, v in rmc.items() if v is not None})
+                # Parse GSV sentences for constellation info (before pynmea2 parsing)
+                if 'GSV' in line:
+                    parse_gsv(line, constellation_data)
+                    continue  # GSV sentences don't need further processing
 
-                # Compute m/s from knots
-                if current['speed_knots'] is not None:
-                    current['speed_mps'] = round(current['speed_knots'] * 0.514444, 3)
+                # Parse GSA sentences for satellites used per constellation
+                if 'GSA' in line:
+                    parse_gsa(line, sats_used_by_constellation)
+                    continue
+
+                try:
+                    msg = pynmea2.parse(line)
+                except pynmea2.ParseError:
+                    continue
+
+                # Update current state from parsed sentence
+                if isinstance(msg, pynmea2.types.talker.GGA):
+                    gga = parse_gga(msg)
+                    current.update({k: v for k, v in gga.items() if v is not None})
+
+                elif isinstance(msg, pynmea2.types.talker.RMC):
+                    rmc = parse_rmc(msg)
+                    current.update({k: v for k, v in rmc.items() if v is not None})
+
+                    # Compute m/s from knots
+                    if current['speed_knots'] is not None:
+                        current['speed_mps'] = round(current['speed_knots'] * 0.514444, 3)
 
             # Update status periodically even without fix (for dashboard)
             now = time.monotonic()
             if now - last_status_update >= 1.0:
-                update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=True, receiving_nmea=True)
+                update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=True, receiving_nmea=nmea_received)
                 last_status_update = now
 
             # Write at configured rate (only if we have a position fix)
@@ -481,24 +548,37 @@ def run(config):
                     constellation_data = {}
                     sats_used_by_constellation = {}
 
-                # Flush periodically
+                # Flush CSV periodically
                 if rows_written % 100 == 0:
                     csv_file.flush()
 
-                # Rotate file at midnight UTC
-                current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-                if data_dir.parent.name != current_date:
-                    csv_file.close()
-                    data_dir = get_data_dir(config)
-                    csv_file, writer = create_csv_writer(data_dir)
-                    rows_written = 0
+            # Rotate files at midnight UTC or UBX hourly
+            current_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+            now_time = time.time()
+
+            # Rotate CSV at midnight
+            if data_dir.parent.name != current_date:
+                csv_file.close()
+                data_dir = get_data_dir(config)
+                csv_file, writer = create_csv_writer(data_dir)
+                rows_written = 0
+
+            # Rotate UBX hourly or at midnight
+            if now_time - last_ubx_rotate >= ubx_rotate_interval or ubx_dir.parent.name != current_date:
+                ubx_file.close()
+                ubx_dir = get_ubx_dir(config)
+                ubx_file, ubx_filepath = create_ubx_file(ubx_dir)
+                last_ubx_rotate = now_time
+                logger.info(f"UBX logged {ubx_bytes_written / (1024*1024):.1f} MB, rotated to new file")
+                ubx_bytes_written = 0
 
     except Exception as e:
         logger.error(f"Unexpected error: {e}", exc_info=True)
     finally:
         csv_file.close()
+        ubx_file.close()
         ser.close()
-        logger.info(f"GPS service stopped. {rows_written} rows written.")
+        logger.info(f"GPS service stopped. {rows_written} CSV rows, {ubx_bytes_written / (1024*1024):.1f} MB UBX data.")
 
 
 if __name__ == '__main__':
