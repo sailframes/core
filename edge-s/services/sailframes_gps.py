@@ -108,7 +108,89 @@ def parse_rmc(msg):
     }
 
 
-def update_gps_status(current):
+# Constellation and signal band tracking
+CONSTELLATION_NAMES = {
+    'GP': 'GPS',
+    'GL': 'GLONASS',
+    'GA': 'Galileo',
+    'GB': 'BeiDou',
+    'GQ': 'QZSS',
+    'GI': 'NavIC',
+}
+
+# Signal IDs per constellation (from NMEA 4.11)
+SIGNAL_BANDS = {
+    'GP': {0: 'L1', 1: 'L1', 6: 'L2', 7: 'L2'},  # GPS: 1=L1 C/A, 6=L2 CL, 7=L2 CM
+    'GL': {0: 'L1', 1: 'L1', 3: 'L2'},            # GLONASS: 1=L1 OF, 3=L2 OF
+    'GA': {0: 'E1', 2: 'E1', 3: 'E5a', 4: 'E5b', 7: 'E5'},  # Galileo
+    'GB': {0: 'B1', 1: 'B1', 2: 'B1C', 5: 'B2a'}, # BeiDou
+    'GQ': {0: 'L1', 1: 'L1', 5: 'L5'},            # QZSS
+}
+
+
+def parse_gsv(line, constellation_data):
+    """
+    Parse GSV sentence for satellite constellation and signal info.
+    Updates constellation_data dict in place.
+
+    GSV format: $xxGSV,numMsg,msgNum,numSV,{prn,elev,azim,snr}*4,signalId*checksum
+    """
+    try:
+        # Extract constellation from talker ID (first 2 chars after $)
+        talker = line[1:3]
+        if talker not in CONSTELLATION_NAMES:
+            return
+
+        constellation = CONSTELLATION_NAMES[talker]
+
+        # Parse the sentence
+        parts = line.split('*')[0].split(',')
+        if len(parts) < 4:
+            return
+
+        num_sv = int(parts[3]) if parts[3] else 0
+
+        # Get signal ID (last field before checksum, if present)
+        signal_id = 0
+        if len(parts) > 4:
+            # Check if last field is a signal ID (single digit)
+            last_field = parts[-1]
+            if last_field.isdigit() and len(last_field) == 1:
+                signal_id = int(last_field)
+
+        # Determine signal band
+        signal_band = SIGNAL_BANDS.get(talker, {}).get(signal_id, f'L{signal_id}')
+
+        # Count satellites with SNR (actually tracking)
+        sats_tracking = 0
+        for i in range(4, len(parts) - 1, 4):
+            if i + 3 < len(parts):
+                snr = parts[i + 3]
+                if snr and snr.isdigit() and int(snr) > 0:
+                    sats_tracking += 1
+
+        # Update constellation data
+        if constellation not in constellation_data:
+            constellation_data[constellation] = {
+                'total': 0,
+                'tracking': 0,
+                'signals': set()
+            }
+
+        # Only update total from first message in sequence
+        msg_num = int(parts[2]) if parts[2] else 1
+        if msg_num == 1:
+            constellation_data[constellation]['total'] = num_sv
+            constellation_data[constellation]['tracking'] = 0
+
+        constellation_data[constellation]['tracking'] += sats_tracking
+        constellation_data[constellation]['signals'].add(signal_band)
+
+    except (ValueError, IndexError) as e:
+        pass  # Ignore malformed GSV sentences
+
+
+def update_gps_status(current, constellation_data=None):
     """Write current GPS state to status file for dashboard."""
     try:
         fix_quality = current.get('fix_quality', 0)
@@ -137,6 +219,18 @@ def update_gps_status(current):
         speed_knots = current.get('speed_knots')
         speed_mph = round(speed_knots * 1.15078, 1) if speed_knots else None
 
+        # Build constellation summary
+        constellations = {}
+        all_signals = set()
+        if constellation_data:
+            for name, data in constellation_data.items():
+                constellations[name] = {
+                    'in_view': data.get('total', 0),
+                    'tracking': data.get('tracking', 0),
+                    'signals': sorted(list(data.get('signals', set())))
+                }
+                all_signals.update(data.get('signals', set()))
+
         status = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'latitude': current.get('latitude'),
@@ -151,6 +245,8 @@ def update_gps_status(current):
             'hdop': hdop,
             'hdop_rating': hdop_rating,
             'accuracy_cm': accuracy_cm,
+            'constellations': constellations,
+            'signals_in_use': sorted(list(all_signals)),
         }
 
         with open(GPS_STATUS_FILE, 'w') as f:
@@ -192,6 +288,10 @@ def run(config):
         'gps_timestamp': '',
     }
 
+    # Constellation tracking (reset every second)
+    constellation_data = {}
+    last_constellation_reset = 0
+
     last_write = 0
     write_interval = 1.0 / gps_config['update_rate_hz']
     rows_written = 0
@@ -207,6 +307,11 @@ def run(config):
 
             if not line.startswith('$'):
                 continue
+
+            # Parse GSV sentences for constellation info (before pynmea2 parsing)
+            if 'GSV' in line:
+                parse_gsv(line, constellation_data)
+                continue  # GSV sentences don't need further processing
 
             try:
                 msg = pynmea2.parse(line)
@@ -248,7 +353,9 @@ def run(config):
 
                 # Update status file for dashboard (every 10th write to reduce I/O)
                 if rows_written % 10 == 0:
-                    update_gps_status(current)
+                    update_gps_status(current, constellation_data)
+                    # Reset constellation data periodically to get fresh counts
+                    constellation_data = {}
 
                 # Flush periodically
                 if rows_written % 100 == 0:

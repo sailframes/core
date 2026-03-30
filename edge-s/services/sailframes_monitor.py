@@ -64,7 +64,8 @@ def get_cpu_temp():
 
 def get_battery_info():
     """
-    Read battery status from Waveshare UPS HAT (D) via I2C.
+    Read battery status from Waveshare UPS HAT (D) via I2C, or return external
+    power bank status if no HAT is detected.
     - INA219 at 0x43: voltage/current monitoring
     - Battery percentage calculated from output voltage:
       - Full (charging): ~4.2V output
@@ -83,8 +84,23 @@ def get_battery_info():
         import smbus2
         bus = smbus2.SMBus(1)
 
+        # Try to read from INA219 - will fail if no HAT present
+        try:
+            raw_bus = bus.read_word_data(INA219_ADDR, REG_BUS_VOLTAGE)
+        except OSError:
+            bus.close()
+            # No HAT detected - using external USB power bank
+            return {
+                'type': 'external',
+                'name': 'USB Power Bank',
+                'capacity': '50Ah',
+                'voltage': None,
+                'percent': None,
+                'current_ma': None,
+                'charging': None,
+            }
+
         # Read output voltage from INA219
-        raw_bus = bus.read_word_data(INA219_ADDR, REG_BUS_VOLTAGE)
         raw_bus = ((raw_bus & 0xFF) << 8) | ((raw_bus >> 8) & 0xFF)
         voltage = (raw_bus >> 3) * 0.004
 
@@ -149,6 +165,7 @@ def get_battery_info():
             full_time = full_dt.strftime('%I:%M %p')
 
         return {
+            'type': 'hat',
             'voltage': round(voltage, 2),
             'percent': round(percent, 1),
             'current_ma': round(current_ma, 0),
@@ -162,7 +179,16 @@ def get_battery_info():
         }
     except Exception as e:
         logger.debug(f"Battery read error: {e}")
-        return {'voltage': None, 'percent': None, 'current_ma': None, 'charging': None}
+        # Assume external power bank if we can't read battery
+        return {
+            'type': 'external',
+            'name': 'USB Power Bank',
+            'capacity': '50Ah',
+            'voltage': None,
+            'percent': None,
+            'current_ma': None,
+            'charging': None,
+        }
 
 
 def get_disk_usage(mount_point):
@@ -463,6 +489,10 @@ def monitor_loop(config):
 
     system_state['device_id'] = config['device']['id']
 
+    # Service status check interval (less frequent to avoid file descriptor exhaustion)
+    SERVICE_CHECK_INTERVAL = 60  # seconds
+    last_service_check = 0
+
     while running:
         system_state['cpu_temp_c'] = get_cpu_temp()
         system_state['cpu_percent'] = psutil.cpu_percent(interval=1)
@@ -477,26 +507,31 @@ def monitor_loop(config):
         system_state['uptime_sec'] = int(time.monotonic())
         system_state['last_update'] = datetime.now(timezone.utc).isoformat()
 
-        # Check service status
-        system_state['services'] = {
-            'gps': check_service_status('sailframes-gps'),
-            'imu': check_service_status('sailframes-imu'),
-            'pressure': check_service_status('sailframes-pressure'),
-            'wind': check_service_status('sailframes-wind'),
-        }
-        # Track cameras separately for individual control
-        system_state['cameras'] = {
-            'cockpit': check_service_status('sailframes-camera-cockpit'),
-            'sails': check_service_status('sailframes-camera-sails'),
-        }
-        # Netdata monitoring (optional, can be toggled)
-        system_state['netdata'] = check_service_status('netdata')
+        # Check service status less frequently (every 60s instead of every 10s)
+        # This reduces subprocess calls from 60k/day to 10k/day, preventing fd exhaustion
+        now = time.monotonic()
+        if now - last_service_check >= SERVICE_CHECK_INTERVAL:
+            last_service_check = now
+            system_state['services'] = {
+                'gps': check_service_status('sailframes-gps'),
+                'imu': check_service_status('sailframes-imu'),
+                'pressure': check_service_status('sailframes-pressure'),
+                'wind': check_service_status('sailframes-wind'),
+            }
+            # Track cameras separately for individual control
+            system_state['cameras'] = {
+                'cockpit': check_service_status('sailframes-camera-cockpit'),
+                'sails': check_service_status('sailframes-camera-sails'),
+            }
+            # Netdata monitoring (optional, can be toggled)
+            system_state['netdata'] = check_service_status('netdata')
 
-        # Low battery shutdown - only if batteries are actually present
+        # Low battery shutdown - only if HAT battery is present (not external power bank)
         # (voltage > 5V means batteries installed, not just HAT with no/dead batteries)
+        battery_type = system_state['battery'].get('type')
         battery_pct = system_state['battery'].get('percent')
         battery_voltage = system_state['battery'].get('voltage')
-        if (battery_pct is not None and battery_voltage is not None
+        if (battery_type != 'external' and battery_pct is not None and battery_voltage is not None
             and battery_voltage > 5.0 and battery_pct < shutdown_percent):
             logger.warning(f"Battery at {battery_pct}% ({battery_voltage}V)! Initiating clean shutdown.")
             subprocess.run(['sudo', 'shutdown', '-h', 'now'])
@@ -550,6 +585,26 @@ DASHBOARD_HTML = """
         .conn-ok { background: #1b5e20; color: #a5d6a7; }
         .conn-warn { background: #e65100; color: #ffcc80; }
         .conn-off { background: #37474f; color: #78909c; }
+        /* Recording control styles */
+        .recording-card { background: #1a2a40; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+        .recording-card.recording { border: 2px solid #f44336; background: linear-gradient(135deg, #1a2a40 0%, #2d1a1a 100%); }
+        .recording-btn { padding: 14px 32px; font-size: 18px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+        .recording-btn.start { background: #4caf50; color: white; }
+        .recording-btn.start:hover { background: #66bb6a; }
+        .recording-btn.stop { background: #f44336; color: white; }
+        .recording-btn.stop:hover { background: #ef5350; }
+        .recording-btn:disabled { background: #455a64; cursor: wait; }
+        .sensor-status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+        .sensor-status { padding: 8px 12px; border-radius: 6px; background: #0d1929; text-align: center; }
+        .sensor-status .name { font-size: 11px; color: #78909c; text-transform: uppercase; margin-bottom: 4px; }
+        .sensor-status .indicator { font-size: 12px; font-weight: 600; }
+        .sensor-status.recording .indicator { color: #4caf50; }
+        .sensor-status.not-recording .indicator { color: #78909c; }
+        .sensor-status.error .indicator { color: #f44336; }
+        .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+        .rec-dot.active { background: #f44336; animation: pulse 1s infinite; }
+        .rec-dot.inactive { background: #455a64; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body>
@@ -563,15 +618,62 @@ DASHBOARD_HTML = """
             <div class="clock" id="clock"></div>
         </div>
     </div>
+
+    <!-- Recording Control -->
+    <div id="recording-card" class="recording-card">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+            <div>
+                <h2 style="margin: 0; font-size: 16px; color: #fff;">Recording Control</h2>
+                <div id="recording-status-text" style="font-size: 13px; color: #78909c; margin-top: 4px;">Sensors idle</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <span id="rec-indicator" style="display: none;"><span class="rec-dot active"></span><span style="color: #f44336; font-weight: 600;">REC</span></span>
+                <button id="recording-btn" class="recording-btn start" onclick="toggleRecording()">START RECORDING</button>
+            </div>
+        </div>
+        <div class="sensor-status-grid">
+            <div id="sensor-gps" class="sensor-status not-recording">
+                <div class="name">GPS</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-imu" class="sensor-status not-recording">
+                <div class="name">IMU</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-wind" class="sensor-status not-recording">
+                <div class="name">Wind</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-pressure" class="sensor-status not-recording">
+                <div class="name">Pressure</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-camera-cockpit" class="sensor-status not-recording">
+                <div class="name">Cam Cockpit</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+            <div id="sensor-camera-sails" class="sensor-status not-recording">
+                <div class="name">Cam Sails</div>
+                <div class="indicator"><span class="rec-dot inactive"></span>Off</div>
+            </div>
+        </div>
+    </div>
+
     <div class="grid">
         <div class="card">
             <h2>CPU Temp</h2>
             <div class="value"><span id="cpu-temp">{{ state.cpu_temp_c or '—' }}</span><span class="unit">°C</span></div>
         </div>
         <div class="card">
+            {% if state.battery.type == 'external' %}
+            <h2>Power</h2>
+            <div class="value"><span id="battery-percent">50</span><span class="unit">Ah</span></div>
+            <div class="sub" id="battery-details">USB Power Bank · Check display for level</div>
+            <div id="battery-estimate" class="sub" style="margin-top: 4px; display: none;"></div>
+            {% else %}
             <h2>Battery <span id="battery-charging-icon" style="display: {{ 'inline' if state.battery.charging else 'none' }};" class="charging">⚡</span></h2>
             <div class="value"><span id="battery-percent">{{ state.battery.percent or '—' }}</span><span class="unit">%</span></div>
-            <div class="sub"><span id="battery-voltage">{{ state.battery.voltage or '—' }}</span>V · <span id="battery-current">{{ state.battery.current_ma or '—' }}</span>mA · <span id="battery-status">{% if state.battery.charging %}<span class="charging">Charging</span>{% else %}<span class="discharging">On Battery</span>{% endif %}</span></div>
+            <div class="sub" id="battery-details"><span id="battery-voltage">{{ state.battery.voltage or '—' }}</span>V · <span id="battery-current">{{ state.battery.current_ma or '—' }}</span>mA · <span id="battery-status">{% if state.battery.charging %}<span class="charging">Charging</span>{% else %}<span class="discharging">On Battery</span>{% endif %}</span></div>
             <div id="battery-estimate" class="sub" style="margin-top: 4px;">
             {% if state.battery.remaining_str and not state.battery.charging %}
             <span style="color: #ff9800;">~{{ state.battery.remaining_str }} remaining · empty ~{{ state.battery.empty_time }}</span>
@@ -579,6 +681,7 @@ DASHBOARD_HTML = """
             <span style="color: #1976d2;">~{{ state.battery.charge_str }} to full · ready ~{{ state.battery.full_time }}</span>
             {% endif %}
             </div>
+            {% endif %}
         </div>
         <div class="card">
             <h2>Disk Free</h2>
@@ -612,6 +715,26 @@ DASHBOARD_HTML = """
                     <div style="font-size: 14px; font-weight: 600;"><span id="gps-altitude">{{ state.gps.altitude_m|round(1) if state.gps and state.gps.altitude_m else '—' }}</span> m</div>
                 </div>
             </div>
+            <!-- Constellation Info -->
+            <div id="gps-constellations" style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #37474f;">
+                <div style="font-size: 11px; color: #78909c; margin-bottom: 6px;">CONSTELLATIONS</div>
+                <div id="gps-constellation-grid" style="display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px;">
+                    {% if state.gps_status and state.gps_status.constellations %}
+                    {% for name, data in state.gps_status.constellations.items() %}
+                    <div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
+                        <span style="color: #4fc3f7; font-weight: 600;">{{ name }}</span>: {{ data.tracking }}/{{ data.in_view }}
+                        {% if data.signals %}<span style="color: #78909c; font-size: 10px; margin-left: 4px;">({{ data.signals|join(', ') }})</span>{% endif %}
+                    </div>
+                    {% endfor %}
+                    {% else %}
+                    <div style="color: #78909c;">—</div>
+                    {% endif %}
+                </div>
+                <div style="margin-top: 6px;">
+                    <span style="font-size: 11px; color: #78909c;">SIGNALS: </span>
+                    <span id="gps-signals" style="font-size: 12px; color: #81c784;">{{ state.gps_status.signals_in_use|join(', ') if state.gps_status and state.gps_status.signals_in_use else '—' }}</span>
+                </div>
+            </div>
             <div style="margin-top: 10px; display: flex; gap: 16px; font-size: 12px;">
                 <a href="/gps" style="color: #4fc3f7;">📊 GPS Details</a>
                 <a id="gps-map-link" href="https://www.google.com/maps?q={{ state.gps.latitude if state.gps else 0 }},{{ state.gps.longitude if state.gps else 0 }}" target="_blank" style="color: #4fc3f7;">🗺 Open Map ↗</a>
@@ -641,7 +764,10 @@ DASHBOARD_HTML = """
     <!-- Wind Section -->
     <div id="wind-section" class="card" style="margin-top: 12px;">
         <div id="wind-connected" style="display: {{ 'block' if state.wind and state.wind.connected else 'none' }};">
-            <h2>💨 Wind — <span id="wind-device-name">{{ state.wind.device_name if state.wind else 'Connected' }}</span></h2>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0;">💨 Wind — <span id="wind-device-name">{{ state.wind.device_name if state.wind else 'Connected' }}</span></h2>
+                <button id="btn-wind-restart" onclick="restartWind()" style="background: #455a64; color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer;">🔄 Restart</button>
+            </div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;">
                 <div>
                     <div style="font-size: 11px; color: #78909c;">APPARENT WIND SPEED</div>
@@ -681,7 +807,10 @@ DASHBOARD_HTML = """
                     <div style="color: #78909c; font-style: italic;">Wind service not running</div>
                     {% endif %}
                 </div>
-                <button onclick="scanBluetooth()" style="background: #1976d2; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Scan Bluetooth</button>
+                <div style="display: flex; gap: 8px;">
+                    <button onclick="restartWind()" style="background: #455a64; color: white; border: none; padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer;">🔄 Restart</button>
+                    <button onclick="scanBluetooth()" style="background: #1976d2; color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 13px; cursor: pointer;">Scan Bluetooth</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1151,6 +1280,99 @@ DASHBOARD_HTML = """
             });
     }
 
+    // Recording Control Functions
+    let isRecording = false;
+
+    function toggleRecording() {
+        const btn = document.getElementById('recording-btn');
+        btn.disabled = true;
+        btn.textContent = isRecording ? 'STOPPING...' : 'STARTING...';
+
+        const endpoint = isRecording ? '/api/recording/stop' : '/api/recording/start';
+        fetch(endpoint, { method: 'POST' })
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false;
+                if (data.success) {
+                    isRecording = !isRecording;
+                }
+                updateRecordingUI();
+            })
+            .catch(e => {
+                console.error('Recording toggle error:', e);
+                btn.disabled = false;
+                updateRecordingUI();
+            });
+    }
+
+    function updateRecordingUI() {
+        fetch('/api/recording/status')
+            .then(r => r.json())
+            .then(data => {
+                const card = document.getElementById('recording-card');
+                const btn = document.getElementById('recording-btn');
+                const indicator = document.getElementById('rec-indicator');
+                const statusText = document.getElementById('recording-status-text');
+
+                isRecording = data.any_recording;
+
+                if (isRecording) {
+                    card.classList.add('recording');
+                    btn.className = 'recording-btn stop';
+                    btn.textContent = 'STOP RECORDING';
+                    indicator.style.display = 'inline';
+                    const recordingCount = Object.values(data.sensors).filter(s => s.recording).length;
+                    statusText.textContent = recordingCount + ' sensor(s) recording';
+                } else {
+                    card.classList.remove('recording');
+                    btn.className = 'recording-btn start';
+                    btn.textContent = 'START RECORDING';
+                    indicator.style.display = 'none';
+                    statusText.textContent = 'Sensors idle';
+                }
+
+                // Update individual sensor statuses
+                updateSensorStatus('sensor-gps', data.sensors.gps);
+                updateSensorStatus('sensor-imu', data.sensors.imu);
+                updateSensorStatus('sensor-wind', data.sensors.wind);
+                updateSensorStatus('sensor-pressure', data.sensors.pressure);
+                updateSensorStatus('sensor-camera-cockpit', data.sensors.camera_cockpit);
+                updateSensorStatus('sensor-camera-sails', data.sensors.camera_sails);
+            })
+            .catch(e => console.log('Recording status error:', e));
+    }
+
+    function updateSensorStatus(elementId, sensor) {
+        const el = document.getElementById(elementId);
+        if (!el) return;
+
+        const indicator = el.querySelector('.indicator');
+        const dot = indicator.querySelector('.rec-dot');
+
+        if (sensor.recording) {
+            el.className = 'sensor-status recording';
+            dot.className = 'rec-dot active';
+            indicator.innerHTML = '<span class="rec-dot active"></span>Recording';
+        } else if (sensor.service_running && !sensor.connected) {
+            el.className = 'sensor-status error';
+            dot.className = 'rec-dot inactive';
+            indicator.innerHTML = '<span class="rec-dot inactive"></span>No Signal';
+        } else if (sensor.service_running) {
+            el.className = 'sensor-status not-recording';
+            dot.className = 'rec-dot inactive';
+            indicator.innerHTML = '<span class="rec-dot inactive"></span>Waiting';
+        } else {
+            el.className = 'sensor-status not-recording';
+            dot.className = 'rec-dot inactive';
+            indicator.innerHTML = '<span class="rec-dot inactive"></span>Off';
+        }
+    }
+
+    // Update recording status periodically
+    setInterval(updateRecordingUI, 2000);
+    // Initial load
+    updateRecordingUI();
+
     function scanBluetooth() {
         document.getElementById('bt-modal').style.display = 'block';
         document.getElementById('bt-status').textContent = 'Scanning for devices (30s)...';
@@ -1302,6 +1524,36 @@ DASHBOARD_HTML = """
             alert('Error: ' + e);
             btn.disabled = false;
             btn.textContent = '🔄 Restart';
+        });
+    }
+
+    function restartWind() {
+        const btn = document.getElementById('btn-wind-restart');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '⏳ Restarting...';
+        }
+
+        fetch('/api/wind/restart', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                alert('Wind service restarted. Reconnecting to sensor...');
+                location.reload();
+            } else {
+                alert('Error: ' + (data.error || 'Failed to restart wind service'));
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = '🔄 Restart';
+                }
+            }
+        })
+        .catch(e => {
+            alert('Error: ' + e);
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '🔄 Restart';
+            }
         });
     }
 
@@ -1496,21 +1748,38 @@ DASHBOARD_HTML = """
 
                 // Battery
                 if (data.battery) {
-                    document.getElementById('battery-percent').textContent = data.battery.percent || '—';
-                    document.getElementById('battery-voltage').textContent = data.battery.voltage || '—';
-                    document.getElementById('battery-current').textContent = data.battery.current_ma || '—';
-                    document.getElementById('battery-charging-icon').style.display = data.battery.charging ? 'inline' : 'none';
-                    document.getElementById('battery-status').innerHTML = data.battery.charging
-                        ? '<span class="charging">Charging</span>'
-                        : '<span class="discharging">On Battery</span>';
+                    if (data.battery.type === 'external') {
+                        // External USB power bank - no live data
+                        document.getElementById('battery-percent').textContent = '50';
+                        const details = document.getElementById('battery-details');
+                        if (details) details.textContent = 'USB Power Bank · Check display for level';
+                        const estimate = document.getElementById('battery-estimate');
+                        if (estimate) estimate.style.display = 'none';
+                        const icon = document.getElementById('battery-charging-icon');
+                        if (icon) icon.style.display = 'none';
+                    } else {
+                        // HAT battery with live data
+                        document.getElementById('battery-percent').textContent = data.battery.percent || '—';
+                        const voltageEl = document.getElementById('battery-voltage');
+                        const currentEl = document.getElementById('battery-current');
+                        const statusEl = document.getElementById('battery-status');
+                        if (voltageEl) voltageEl.textContent = data.battery.voltage || '—';
+                        if (currentEl) currentEl.textContent = data.battery.current_ma || '—';
+                        const icon = document.getElementById('battery-charging-icon');
+                        if (icon) icon.style.display = data.battery.charging ? 'inline' : 'none';
+                        if (statusEl) statusEl.innerHTML = data.battery.charging
+                            ? '<span class="charging">Charging</span>'
+                            : '<span class="discharging">On Battery</span>';
 
-                    let estimate = '';
-                    if (data.battery.remaining_str && !data.battery.charging) {
-                        estimate = '<span style="color: #ff9800;">~' + data.battery.remaining_str + ' remaining · empty ~' + data.battery.empty_time + '</span>';
-                    } else if (data.battery.charge_str && data.battery.charging) {
-                        estimate = '<span style="color: #1976d2;">~' + data.battery.charge_str + ' to full · ready ~' + data.battery.full_time + '</span>';
+                        let estimate = '';
+                        if (data.battery.remaining_str && !data.battery.charging) {
+                            estimate = '<span style="color: #ff9800;">~' + data.battery.remaining_str + ' remaining · empty ~' + data.battery.empty_time + '</span>';
+                        } else if (data.battery.charge_str && data.battery.charging) {
+                            estimate = '<span style="color: #1976d2;">~' + data.battery.charge_str + ' to full · ready ~' + data.battery.full_time + '</span>';
+                        }
+                        const estimateEl = document.getElementById('battery-estimate');
+                        if (estimateEl) estimateEl.innerHTML = estimate;
                     }
-                    document.getElementById('battery-estimate').innerHTML = estimate;
                 }
 
                 // GPS indicator
@@ -1553,6 +1822,23 @@ DASHBOARD_HTML = """
                     document.getElementById('gps-speed-mph').textContent = data.gps.speed_mph || 0;
                     document.getElementById('gps-altitude').textContent = data.gps.altitude_m ? data.gps.altitude_m.toFixed(1) : '—';
                     document.getElementById('gps-map-link').href = 'https://www.google.com/maps?q=' + data.gps.latitude + ',' + data.gps.longitude;
+
+                    // Update constellation info
+                    if (data.gps_status && data.gps_status.constellations) {
+                        let constHtml = '';
+                        for (const [name, cdata] of Object.entries(data.gps_status.constellations)) {
+                            const signals = cdata.signals ? cdata.signals.join(', ') : '';
+                            constHtml += `<div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
+                                <span style="color: #4fc3f7; font-weight: 600;">${name}</span>: ${cdata.tracking}/${cdata.in_view}
+                                ${signals ? `<span style="color: #78909c; font-size: 10px; margin-left: 4px;">(${signals})</span>` : ''}
+                            </div>`;
+                        }
+                        document.getElementById('gps-constellation-grid').innerHTML = constHtml || '<div style="color: #78909c;">—</div>';
+
+                        // Update signals
+                        const signals = data.gps_status.signals_in_use || [];
+                        document.getElementById('gps-signals').textContent = signals.length > 0 ? signals.join(', ') : '—';
+                    }
                 } else {
                     document.getElementById('gps-connected').style.display = 'none';
                     document.getElementById('gps-disconnected').style.display = 'block';
@@ -3030,47 +3316,246 @@ def api_camera_stop(camera_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/recording/start', methods=['POST'])
+def api_recording_start():
+    """Start recording on all sensor services."""
+    results = {}
+    services = ['sailframes-gps', 'sailframes-imu', 'sailframes-pressure', 'sailframes-wind',
+                'sailframes-camera-cockpit', 'sailframes-camera-sails']
+
+    for service in services:
+        try:
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'start', service],
+                capture_output=True, text=True, timeout=10
+            )
+            results[service] = result.returncode == 0
+        except Exception as e:
+            results[service] = False
+            logger.error(f"Failed to start {service}: {e}")
+
+    success = all(results.values())
+    if success:
+        logger.info("All recording services started via API")
+    else:
+        failed = [s for s, ok in results.items() if not ok]
+        logger.warning(f"Some services failed to start: {failed}")
+
+    return jsonify({'success': success, 'results': results})
+
+
+@app.route('/api/recording/stop', methods=['POST'])
+def api_recording_stop():
+    """Stop recording on all sensor services."""
+    results = {}
+    services = ['sailframes-gps', 'sailframes-imu', 'sailframes-pressure', 'sailframes-wind',
+                'sailframes-camera-cockpit', 'sailframes-camera-sails']
+
+    for service in services:
+        try:
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'stop', service],
+                capture_output=True, text=True, timeout=10
+            )
+            results[service] = result.returncode == 0
+        except Exception as e:
+            results[service] = False
+            logger.error(f"Failed to stop {service}: {e}")
+
+    success = all(results.values())
+    if success:
+        logger.info("All recording services stopped via API")
+    else:
+        failed = [s for s, ok in results.items() if not ok]
+        logger.warning(f"Some services failed to stop: {failed}")
+
+    return jsonify({'success': success, 'results': results})
+
+
+@app.route('/api/recording/status')
+def api_recording_status():
+    """Get recording status for all sensors."""
+    status = {
+        'gps': {
+            'service_running': check_service_status('sailframes-gps'),
+            'connected': False,
+            'recording': False,
+        },
+        'imu': {
+            'service_running': check_service_status('sailframes-imu'),
+            'connected': False,
+            'recording': False,
+        },
+        'pressure': {
+            'service_running': check_service_status('sailframes-pressure'),
+            'connected': False,
+            'recording': False,
+        },
+        'wind': {
+            'service_running': check_service_status('sailframes-wind'),
+            'connected': False,
+            'recording': False,
+        },
+        'camera_cockpit': {
+            'service_running': check_service_status('sailframes-camera-cockpit'),
+            'connected': True,  # Camera assumed connected if service runs
+            'recording': False,
+        },
+        'camera_sails': {
+            'service_running': check_service_status('sailframes-camera-sails'),
+            'connected': True,
+            'recording': False,
+        },
+    }
+
+    # Check actual sensor connections from status files
+    gps_status = get_gps_status()
+    if gps_status and gps_status.get('connected'):
+        status['gps']['connected'] = True
+        status['gps']['recording'] = status['gps']['service_running']
+
+    imu_status = get_imu_status()
+    if imu_status and imu_status.get('connected'):
+        status['imu']['connected'] = True
+        status['imu']['recording'] = status['imu']['service_running']
+
+    pressure_status = get_pressure_status()
+    if pressure_status and pressure_status.get('connected'):
+        status['pressure']['connected'] = True
+        status['pressure']['recording'] = status['pressure']['service_running']
+
+    wind_status = get_wind_status()
+    if wind_status and wind_status.get('connected'):
+        status['wind']['connected'] = True
+        status['wind']['recording'] = status['wind']['service_running']
+
+    # Cameras record if service is running
+    status['camera_cockpit']['recording'] = status['camera_cockpit']['service_running']
+    status['camera_sails']['recording'] = status['camera_sails']['service_running']
+
+    # Overall recording state
+    any_recording = any(s['recording'] for s in status.values())
+    all_recording = all(s['recording'] for s in status.values())
+
+    return jsonify({
+        'sensors': status,
+        'any_recording': any_recording,
+        'all_recording': all_recording,
+    })
+
+
 @app.route('/api/camera/<camera_id>/snapshot', methods=['POST'])
 def api_camera_snapshot(camera_id):
-    """Capture a single frame from the camera."""
+    """Capture a single frame from the camera.
+
+    If the camera is currently recording, extracts a frame from the latest
+    video file using ffmpeg. Otherwise, uses rpicam-still for direct capture.
+    """
     if camera_id not in ('cockpit', 'sails'):
         return jsonify({'success': False, 'error': 'Invalid camera'}), 400
 
     try:
-        # Camera index mapping: cockpit=0, sails=1
-        camera_index = 0 if camera_id == 'cockpit' else 1
-
         # Output path
         snap_dir = Path('/tmp/sailframes-snapshots')
         snap_dir.mkdir(exist_ok=True)
         snap_path = snap_dir / f'{camera_id}.jpg'
 
-        # Capture using rpicam-still
-        result = subprocess.run(
-            [
-                'rpicam-still',
-                '--camera', str(camera_index),
-                '-o', str(snap_path),
-                '--width', '1920',
-                '--height', '1080',
-                '--timeout', '1000',  # 1 second timeout
-                '--nopreview',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10
+        # Check if camera service is recording (camera would be busy)
+        service_name = f'sailframes-camera-{camera_id}'
+        service_check = subprocess.run(
+            ['systemctl', 'is-active', service_name],
+            capture_output=True, text=True
         )
+        camera_recording = service_check.stdout.strip() == 'active'
 
-        if result.returncode == 0 and snap_path.exists():
-            logger.info(f"Snapshot captured for {camera_id}")
-            return jsonify({
-                'success': True,
-                'url': f'/api/camera/{camera_id}/snapshot.jpg'
-            })
+        if camera_recording:
+            # Camera is busy recording - extract frame from current video
+            # Find the latest video file for this camera
+            today = datetime.now().strftime('%Y-%m-%d')
+            _config = load_config()
+            data_dir = _config['storage']['data_dir']
+            video_dir = Path(f'{data_dir}/{today}/video/{camera_id}')
+
+            if not video_dir.exists():
+                return jsonify({'success': False, 'error': 'No video directory found'}), 404
+
+            # Get completed mp4 files (not the one currently being recorded)
+            # MP4 files can't be read until recording completes (moov atom at end)
+            video_files = sorted(video_dir.glob(f'{camera_id}_*.mp4'), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not video_files:
+                return jsonify({'success': False, 'error': 'No video files found'}), 404
+
+            # Skip the newest file (currently recording), use the previous completed segment
+            if len(video_files) > 1:
+                completed_video = video_files[1]  # Second newest = most recent completed
+            else:
+                # Only one file exists and it's being recorded - can't preview yet
+                return jsonify({
+                    'success': False,
+                    'error': 'Recording in progress - preview available after first segment completes'
+                }), 503
+
+            logger.info(f"Extracting frame from completed segment: {completed_video}")
+
+            # Extract the last frame from completed video
+            result = subprocess.run(
+                [
+                    'ffmpeg', '-y',
+                    '-sseof', '-1',  # Seek to 1 second before end
+                    '-i', str(completed_video),
+                    '-frames:v', '1',
+                    '-q:v', '2',  # High quality JPEG
+                    str(snap_path)
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0 and snap_path.exists():
+                logger.info(f"Snapshot extracted from completed segment for {camera_id}")
+                # Calculate age of the snapshot (time since segment ended)
+                segment_age = int(time.time() - completed_video.stat().st_mtime)
+                return jsonify({
+                    'success': True,
+                    'url': f'/api/camera/{camera_id}/snapshot.jpg',
+                    'source': 'completed_segment',
+                    'segment_age_sec': segment_age
+                })
+            else:
+                error = result.stderr.split('\n')[-2] if result.stderr else 'Frame extraction failed'
+                logger.warning(f"Frame extraction failed for {camera_id}: {error}")
+                return jsonify({'success': False, 'error': error}), 500
         else:
-            error = result.stderr or 'Capture failed'
-            logger.warning(f"Snapshot failed for {camera_id}: {error}")
-            return jsonify({'success': False, 'error': error}), 500
+            # Camera not recording - use direct capture
+            camera_index = 0 if camera_id == 'cockpit' else 1
+
+            result = subprocess.run(
+                [
+                    'rpicam-still',
+                    '--camera', str(camera_index),
+                    '-o', str(snap_path),
+                    '--width', '1920',
+                    '--height', '1080',
+                    '--timeout', '1000',
+                    '--nopreview',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0 and snap_path.exists():
+                logger.info(f"Snapshot captured for {camera_id}")
+                return jsonify({
+                    'success': True,
+                    'url': f'/api/camera/{camera_id}/snapshot.jpg',
+                    'source': 'camera'
+                })
+            else:
+                error = result.stderr or 'Capture failed'
+                logger.warning(f"Snapshot failed for {camera_id}: {error}")
+                return jsonify({'success': False, 'error': error}), 500
 
     except subprocess.TimeoutExpired:
         return jsonify({'success': False, 'error': 'Camera timeout'}), 500
@@ -3212,6 +3697,31 @@ def api_bluetooth_set_wind():
 def api_wind_status():
     """Get current wind sensor status."""
     return jsonify(get_wind_status() or {'connected': False})
+
+
+@app.route('/api/wind/restart', methods=['POST'])
+def api_wind_restart():
+    """Restart wind sensor service."""
+    try:
+        # Kill first (faster than stop), then start
+        subprocess.run(
+            ['sudo', 'systemctl', 'kill', 'sailframes-wind'],
+            capture_output=True, text=True, timeout=5
+        )
+        time.sleep(1)
+        result = subprocess.run(
+            ['sudo', 'systemctl', 'start', 'sailframes-wind'],
+            capture_output=True, text=True, timeout=10
+        )
+        success = result.returncode == 0
+        if success:
+            logger.info("Wind service restarted via API")
+        else:
+            logger.warning(f"Failed to restart wind service: {result.stderr}")
+        return jsonify({'success': success, 'error': result.stderr if not success else None})
+    except Exception as e:
+        logger.error(f"Wind restart error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/imu/status')
