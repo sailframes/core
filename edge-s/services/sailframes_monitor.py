@@ -695,7 +695,7 @@ DASHBOARD_HTML = """
 
     <!-- GPS Section -->
     <div id="gps-section" class="card" style="margin-top: 12px;">
-        <div id="gps-connected" style="display: {{ 'block' if state.gps else 'none' }};">
+        <div id="gps-connected" style="display: {{ 'block' if state.gps_status and state.gps_status.connected else 'none' }};">
             <h2>📍 GPS — <span id="gps-fix-type">{{ state.gps.fix_type if state.gps else '' }}</span> (<span id="gps-sats">{{ state.gps.satellites if state.gps else 0 }}</span> sats) · ±<span id="gps-accuracy">{{ state.gps.accuracy_cm if state.gps else '?' }}</span>cm</h2>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;">
                 <div>
@@ -752,7 +752,7 @@ DASHBOARD_HTML = """
                 <a id="gps-map-link" href="https://www.google.com/maps?q={{ state.gps.latitude if state.gps else 0 }},{{ state.gps.longitude if state.gps else 0 }}" target="_blank" style="color: #4fc3f7;">🗺 Open Map ↗</a>
             </div>
         </div>
-        <div id="gps-disconnected" style="display: {{ 'none' if state.gps else 'block' }};">
+        <div id="gps-disconnected" style="display: {{ 'none' if state.gps_status and state.gps_status.connected else 'block' }};">
             <div style="display: flex; justify-content: space-between; align-items: center;">
                 <div>
                     <h2 style="margin: 0;">📍 GPS</h2>
@@ -1831,7 +1831,7 @@ DASHBOARD_HTML = """
                 }
 
                 // GPS data
-                if (data.gps && data.gps.latitude) {
+                if (data.gps_status && data.gps_status.connected && data.gps && data.gps.latitude) {
                     document.getElementById('gps-connected').style.display = 'block';
                     document.getElementById('gps-disconnected').style.display = 'none';
                     document.getElementById('gps-fix-type').textContent = data.gps.fix_type || '';
