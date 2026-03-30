@@ -190,7 +190,55 @@ def parse_gsv(line, constellation_data):
         pass  # Ignore malformed GSV sentences
 
 
-def update_gps_status(current, constellation_data=None, usb_connected=True, receiving_nmea=True):
+def parse_gsa(line, sats_used_by_constellation):
+    """
+    Parse GSA sentence to track which satellites are used for fix per constellation.
+    GSA format: $xxGSA,mode,fix,prn1,prn2,...,prn12,pdop,hdop,vdop*cs
+
+    Updates sats_used_by_constellation dict: {'GPS': 3, 'Galileo': 2, ...}
+    """
+    try:
+        talker = line[1:3]
+        # Map talker ID to constellation name
+        # Note: GNGSA uses system ID in last field
+        talker_map = {
+            'GP': 'GPS',
+            'GL': 'GLONASS',
+            'GA': 'Galileo',
+            'GB': 'BeiDou',
+            'GQ': 'QZSS',
+        }
+
+        parts = line.split('*')[0].split(',')
+        if len(parts) < 18:
+            return
+
+        fix_type = int(parts[2]) if parts[2] else 0
+        if fix_type < 2:  # No fix
+            return
+
+        # For GNGSA, system ID is in field 18 (index 17)
+        if talker == 'GN' and len(parts) > 17:
+            system_id = parts[17]
+            system_map = {'1': 'GPS', '2': 'GLONASS', '3': 'Galileo', '4': 'BeiDou', '5': 'QZSS'}
+            constellation = system_map.get(system_id, 'Unknown')
+        else:
+            constellation = talker_map.get(talker, 'Unknown')
+
+        # Count PRNs used (fields 3-14, indices 3-14)
+        prn_count = 0
+        for i in range(3, 15):
+            if i < len(parts) and parts[i]:
+                prn_count += 1
+
+        if prn_count > 0 and constellation != 'Unknown':
+            sats_used_by_constellation[constellation] = prn_count
+
+    except (ValueError, IndexError):
+        pass
+
+
+def update_gps_status(current, constellation_data=None, sats_used_by_constellation=None, usb_connected=True, receiving_nmea=True):
     """Write current GPS state to status file for dashboard."""
     try:
         fix_quality = current.get('fix_quality', 0)
@@ -223,10 +271,12 @@ def update_gps_status(current, constellation_data=None, usb_connected=True, rece
         # Build constellation summary
         constellations = {}
         all_signals = set()
+        sats_used = sats_used_by_constellation or {}
         if constellation_data:
             for name, data in constellation_data.items():
                 constellations[name] = {
                     'in_view': data.get('total', 0),
+                    'in_use': sats_used.get(name, 0),
                     'tracking': data.get('tracking', 0),
                     'signals': sorted(list(data.get('signals', set())))
                 }
@@ -336,7 +386,7 @@ def run(config):
 
     # Constellation tracking (reset every second)
     constellation_data = {}
-    last_constellation_reset = 0
+    sats_used_by_constellation = {}  # Track which constellations are used for fix
 
     last_write = 0
     last_status_update = 0
@@ -357,7 +407,7 @@ def run(config):
                 # Still update status periodically even without valid NMEA
                 now = time.monotonic()
                 if now - last_status_update >= 1.0:
-                    update_gps_status(current, constellation_data, usb_connected=True, receiving_nmea=nmea_received)
+                    update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=True, receiving_nmea=nmea_received)
                     last_status_update = now
                 continue
 
@@ -367,6 +417,11 @@ def run(config):
             if 'GSV' in line:
                 parse_gsv(line, constellation_data)
                 continue  # GSV sentences don't need further processing
+
+            # Parse GSA sentences for satellites used per constellation
+            if 'GSA' in line:
+                parse_gsa(line, sats_used_by_constellation)
+                continue
 
             try:
                 msg = pynmea2.parse(line)
@@ -389,7 +444,7 @@ def run(config):
             # Update status periodically even without fix (for dashboard)
             now = time.monotonic()
             if now - last_status_update >= 1.0:
-                update_gps_status(current, constellation_data, usb_connected=True, receiving_nmea=True)
+                update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=True, receiving_nmea=True)
                 last_status_update = now
 
             # Write at configured rate (only if we have a position fix)
@@ -413,10 +468,11 @@ def run(config):
 
                 # Update status file for dashboard (every 10th write to reduce I/O)
                 if rows_written % 10 == 0:
-                    update_gps_status(current, constellation_data, usb_connected=True, receiving_nmea=True)
+                    update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=True, receiving_nmea=True)
                     last_status_update = time.monotonic()
                     # Reset constellation data periodically to get fresh counts
                     constellation_data = {}
+                    sats_used_by_constellation = {}
 
                 # Flush periodically
                 if rows_written % 100 == 0:

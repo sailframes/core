@@ -728,12 +728,13 @@ DASHBOARD_HTML = """
                         <span style="font-size: 11px; color: #78909c;"> in view</span>
                     </div>
                 </div>
-                <div style="font-size: 10px; color: #78909c; margin-bottom: 4px;">IN VIEW BY CONSTELLATION</div>
+                <div style="font-size: 10px; color: #78909c; margin-bottom: 4px;">CONSTELLATIONS <span style="color: #4caf50;">● in use</span> / <span style="color: #4fc3f7;">in view</span></div>
                 <div id="gps-constellation-grid" style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px;">
                     {% if state.gps_status and state.gps_status.constellations %}
                     {% for name, data in state.gps_status.constellations.items() %}
-                    <div style="background: #263238; padding: 3px 6px; border-radius: 4px;">
-                        <span style="color: #4fc3f7;">{{ name }}</span>: {{ data.in_view }}
+                    <div style="background: #263238; padding: 3px 6px; border-radius: 4px; {% if data.in_use %}border-left: 2px solid #4caf50;{% endif %}">
+                        <span style="color: {% if data.in_use %}#4caf50{% else %}#4fc3f7{% endif %}; font-weight: {% if data.in_use %}600{% else %}400{% endif %};">{{ name }}</span>:
+                        {% if data.in_use %}<span style="color: #4caf50;">{{ data.in_use }}</span>/{% endif %}<span style="color: #4fc3f7;">{{ data.in_view }}</span>
                         {% if data.signals %}<span style="color: #546e7a; font-size: 9px;">({{ data.signals|join(', ') }})</span>{% endif %}
                     </div>
                     {% endfor %}
@@ -1847,8 +1848,13 @@ DASHBOARD_HTML = """
                         for (const [name, cdata] of Object.entries(data.gps_status.constellations)) {
                             inView += cdata.in_view || 0;
                             const signals = cdata.signals ? cdata.signals.join(', ') : '';
-                            constHtml += `<div style="background: #263238; padding: 3px 6px; border-radius: 4px;">
-                                <span style="color: #4fc3f7;">${name}</span>: ${cdata.in_view}
+                            const inUseCount = cdata.in_use || 0;
+                            const borderStyle = inUseCount ? 'border-left: 2px solid #4caf50;' : '';
+                            const nameColor = inUseCount ? '#4caf50' : '#4fc3f7';
+                            const nameWeight = inUseCount ? '600' : '400';
+                            const countDisplay = inUseCount ? `<span style="color: #4caf50;">${inUseCount}</span>/<span style="color: #4fc3f7;">${cdata.in_view}</span>` : `<span style="color: #4fc3f7;">${cdata.in_view}</span>`;
+                            constHtml += `<div style="background: #263238; padding: 3px 6px; border-radius: 4px; ${borderStyle}">
+                                <span style="color: ${nameColor}; font-weight: ${nameWeight};">${name}</span>: ${countDisplay}
                                 ${signals ? `<span style="color: #546e7a; font-size: 9px;">(${signals})</span>` : ''}
                             </div>`;
                         }
