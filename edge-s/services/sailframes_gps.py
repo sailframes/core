@@ -190,10 +190,11 @@ def parse_gsv(line, constellation_data):
         pass  # Ignore malformed GSV sentences
 
 
-def update_gps_status(current, constellation_data=None):
+def update_gps_status(current, constellation_data=None, usb_connected=True, receiving_nmea=True):
     """Write current GPS state to status file for dashboard."""
     try:
         fix_quality = current.get('fix_quality', 0)
+        has_fix = fix_quality > 0 and current.get('latitude') is not None
         fix_types = {0: 'No Fix', 1: 'GPS', 2: 'DGPS', 4: 'RTK Fixed', 5: 'RTK Float'}
         fix_type = fix_types.get(fix_quality, f'Unknown ({fix_quality})')
 
@@ -233,6 +234,9 @@ def update_gps_status(current, constellation_data=None):
 
         status = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
+            'usb_connected': usb_connected,
+            'receiving_nmea': receiving_nmea,
+            'has_fix': has_fix,
             'latitude': current.get('latitude'),
             'longitude': current.get('longitude'),
             'altitude_m': current.get('altitude_m'),
@@ -293,8 +297,10 @@ def run(config):
     last_constellation_reset = 0
 
     last_write = 0
+    last_status_update = 0
     write_interval = 1.0 / gps_config['update_rate_hz']
     rows_written = 0
+    nmea_received = False  # Track if we're receiving any NMEA data
 
     try:
         while running:
@@ -306,7 +312,14 @@ def run(config):
                 continue
 
             if not line.startswith('$'):
+                # Still update status periodically even without valid NMEA
+                now = time.monotonic()
+                if now - last_status_update >= 1.0:
+                    update_gps_status(current, constellation_data, usb_connected=True, receiving_nmea=nmea_received)
+                    last_status_update = now
                 continue
+
+            nmea_received = True
 
             # Parse GSV sentences for constellation info (before pynmea2 parsing)
             if 'GSV' in line:
@@ -353,7 +366,8 @@ def run(config):
 
                 # Update status file for dashboard (every 10th write to reduce I/O)
                 if rows_written % 10 == 0:
-                    update_gps_status(current, constellation_data)
+                    update_gps_status(current, constellation_data, usb_connected=True, receiving_nmea=True)
+                    last_status_update = time.monotonic()
                     # Reset constellation data periodically to get fresh counts
                     constellation_data = {}
 

@@ -748,8 +748,11 @@ DASHBOARD_HTML = """
                         {% if not state.gps_status.connected and state.services.gps %}
                         <span style="color: #f44336; font-weight: 600;">⚠️ DISCONNECTED — Check USB cable!</span>
                         <div style="color: #78909c; font-size: 11px; margin-top: 2px;">Service running but no data received</div>
+                        {% elif state.gps_status.connected and not state.gps_status.has_fix and state.services.gps %}
+                        <span style="color: #ff9800; font-weight: 600;">⚠️ NO FIX — Check antenna!</span>
+                        <div style="color: #78909c; font-size: 11px; margin-top: 2px;">Receiving data but no satellite fix ({{ state.gps_status.satellites or 0 }} sats)</div>
                         {% elif state.services.gps %}
-                        <span style="color: #ff9800;">No fix — waiting for satellites...</span>
+                        <span style="color: #4caf50;">{{ state.gps_status.fix_type or 'Connected' }}</span>
                         {% else %}
                         <span style="color: #78909c;">GPS service not running</span>
                         {% endif %}
@@ -1845,8 +1848,11 @@ DASHBOARD_HTML = """
                     let gpsMsg = '';
                     if (data.gps_status && !data.gps_status.connected && data.services && data.services.gps) {
                         gpsMsg = '<span style="color: #f44336; font-weight: 600;">⚠️ DISCONNECTED — Check USB cable!</span><div style="color: #78909c; font-size: 11px; margin-top: 2px;">Service running but no data received</div>';
+                    } else if (data.gps_status && data.gps_status.connected && !data.gps_status.has_fix && data.services && data.services.gps) {
+                        const sats = data.gps_status.satellites || 0;
+                        gpsMsg = '<span style="color: #ff9800; font-weight: 600;">⚠️ NO FIX — Check antenna!</span><div style="color: #78909c; font-size: 11px; margin-top: 2px;">Receiving data but no satellite fix (' + sats + ' sats)</div>';
                     } else if (data.services && data.services.gps) {
-                        gpsMsg = '<span style="color: #ff9800;">No fix — waiting for satellites...</span>';
+                        gpsMsg = '<span style="color: #ff9800;">Waiting for GPS data...</span>';
                     } else {
                         gpsMsg = '<span style="color: #78909c;">GPS service not running</span>';
                     }
