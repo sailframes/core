@@ -59,22 +59,31 @@ def cfg_save():
     payload = clear_mask + save_mask + load_mask + device_mask
     return ubx_message(0x06, 0x09, payload)
 
-def send_and_wait(ser, msg, description, wait=0.1):
+def send_and_wait(ser, msg, description, wait=0.2):
     """Send UBX message and wait for processing."""
     print(f"  Configuring: {description}...", end=" ", flush=True)
-    ser.write(msg)
-    time.sleep(wait)
-    # Read any response (ACK/NAK)
-    response = ser.read(ser.in_waiting or 1)
-    if b'\xb5\x62\x05\x01' in response:
-        print("OK (ACK)")
+    try:
+        ser.write(msg)
+        ser.flush()
+        time.sleep(wait)
+        # Read any response (ACK/NAK)
+        try:
+            waiting = ser.in_waiting
+        except OSError:
+            waiting = 0
+        if waiting > 0:
+            response = ser.read(waiting)
+            if b'\xb5\x62\x05\x01' in response:
+                print("OK (ACK)")
+                return True
+            elif b'\xb5\x62\x05\x00' in response:
+                print("FAILED (NAK)")
+                return False
+        print("OK")
         return True
-    elif b'\xb5\x62\x05\x00' in response:
-        print("FAILED (NAK)")
+    except Exception as e:
+        print(f"ERROR: {e}")
         return False
-    else:
-        print("OK (no response)")
-        return True
 
 def main():
     device = sys.argv[1] if len(sys.argv) > 1 else '/dev/sailframes-gps'
