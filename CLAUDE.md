@@ -8,13 +8,38 @@
 **SailFrames** is an open-source sailboat racing data logger and analytics platform.
 - **License:** Apache 2.0
 - **GitHub org:** github.com/sailframes
-- **Main repo:** github.com/sailframes/sailframes
+- **Main repo:** github.com/sailframes/core
 - **Domain:** sailframes.com (registered via AWS)
 - **Cloud:** AWS
 - **Fleet:** 6 devices — Sonar 23 and J/80 class boats, Boston Harbor
 
 The system captures GPS, IMU, wind, pressure, and camera data during races,
 syncs to AWS after each session, and provides web-based race analysis and replay.
+
+---
+
+## Repository Structure (Monorepo)
+
+```
+sailframes/core/
+├── edge/              # Raspberry Pi edge device code
+│   ├── services/      # Sensor acquisition (GPS, IMU, wind, pressure, camera)
+│   ├── scripts/       # Install, start, stop, Wi-Fi mode
+│   ├── config/        # Device config (sailframes.yaml)
+│   └── tests/         # Sensor connectivity tests
+├── hardware/          # KiCad PCB designs (sailframes-e1 board)
+├── firmware/          # Pi boot config, Arduino sketches
+├── web/               # Dashboard web application
+│   ├── api/           # FastAPI backend
+│   └── frontend/      # React frontend
+├── lambda/            # AWS Lambda functions (post-race processing)
+├── processing/        # Data processing scripts
+├── infrastructure/    # AWS CDK/Terraform
+├── scripts/           # Utility scripts
+├── services/          # Systemd service definitions
+├── config/            # Shared configuration
+└── tests/             # Integration tests
+```
 
 ---
 
@@ -319,10 +344,13 @@ PiSugar 3 Plus with 21700 cells (~18.5Wh/cell):
 
 ---
 
-## Project Branding History
+## Project History
 - Originally named **TrimLog** (trimlog.com taken)
 - Renamed to **SailFrames** — global find-and-replace done across all 18 files
-- Package: sailframes-v1.tar.gz
+- March 2026: Reorganized as monorepo `sailframes/core`
+  - Edge device code moved to `edge/`
+  - PCB designs moved to `hardware/`
+  - Added `web/`, `lambda/`, `infrastructure/`, `processing/`
 
 ---
 
@@ -345,4 +373,4 @@ PiSugar 3 Plus with 21700 cells (~18.5Wh/cell):
 
 ---
 
-*Last updated: March 27, 2026 — generated from Claude.ai project conversations*
+*Last updated: March 30, 2026*
