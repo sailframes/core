@@ -717,13 +717,24 @@ DASHBOARD_HTML = """
             </div>
             <!-- Constellation Info -->
             <div id="gps-constellations" style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #37474f;">
-                <div style="font-size: 11px; color: #78909c; margin-bottom: 6px;">CONSTELLATIONS</div>
-                <div id="gps-constellation-grid" style="display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px;">
+                {% set total_in_view = state.gps_status.constellations.values() | map(attribute='in_view') | sum if state.gps_status and state.gps_status.constellations else 0 %}
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <div>
+                        <span style="font-size: 13px; color: #4caf50; font-weight: 600;" id="gps-sats-in-use">{{ state.gps_status.satellites or 0 }}</span>
+                        <span style="font-size: 11px; color: #78909c;"> in use for fix</span>
+                    </div>
+                    <div>
+                        <span style="font-size: 13px; color: #4fc3f7; font-weight: 600;" id="gps-sats-in-view">{{ total_in_view }}</span>
+                        <span style="font-size: 11px; color: #78909c;"> in view</span>
+                    </div>
+                </div>
+                <div style="font-size: 10px; color: #78909c; margin-bottom: 4px;">IN VIEW BY CONSTELLATION</div>
+                <div id="gps-constellation-grid" style="display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px;">
                     {% if state.gps_status and state.gps_status.constellations %}
                     {% for name, data in state.gps_status.constellations.items() %}
-                    <div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
-                        <span style="color: #4fc3f7; font-weight: 600;">{{ name }}</span>: {{ data.in_view }} sats
-                        {% if data.signals %}<span style="color: #78909c; font-size: 10px; margin-left: 4px;">({{ data.signals|join(', ') }})</span>{% endif %}
+                    <div style="background: #263238; padding: 3px 6px; border-radius: 4px;">
+                        <span style="color: #4fc3f7;">{{ name }}</span>: {{ data.in_view }}
+                        {% if data.signals %}<span style="color: #546e7a; font-size: 9px;">({{ data.signals|join(', ') }})</span>{% endif %}
                     </div>
                     {% endfor %}
                     {% else %}
@@ -731,8 +742,8 @@ DASHBOARD_HTML = """
                     {% endif %}
                 </div>
                 <div style="margin-top: 6px;">
-                    <span style="font-size: 11px; color: #78909c;">SIGNALS: </span>
-                    <span id="gps-signals" style="font-size: 12px; color: #81c784;">{{ state.gps_status.signals_in_use|join(', ') if state.gps_status and state.gps_status.signals_in_use else '—' }}</span>
+                    <span style="font-size: 10px; color: #78909c;">SIGNAL BANDS: </span>
+                    <span id="gps-signals" style="font-size: 11px; color: #81c784;">{{ state.gps_status.signals_in_use|join(', ') if state.gps_status and state.gps_status.signals_in_use else '—' }}</span>
                 </div>
             </div>
             <div style="margin-top: 10px; display: flex; gap: 16px; font-size: 12px;">
@@ -1829,14 +1840,20 @@ DASHBOARD_HTML = """
 
                     // Update constellation info
                     if (data.gps_status && data.gps_status.constellations) {
+                        // Update in use / in view counts
+                        const inUse = data.gps_status.satellites || 0;
+                        let inView = 0;
                         let constHtml = '';
                         for (const [name, cdata] of Object.entries(data.gps_status.constellations)) {
+                            inView += cdata.in_view || 0;
                             const signals = cdata.signals ? cdata.signals.join(', ') : '';
-                            constHtml += `<div style="background: #263238; padding: 4px 8px; border-radius: 4px;">
-                                <span style="color: #4fc3f7; font-weight: 600;">${name}</span>: ${cdata.in_view} sats
-                                ${signals ? `<span style="color: #78909c; font-size: 10px; margin-left: 4px;">(${signals})</span>` : ''}
+                            constHtml += `<div style="background: #263238; padding: 3px 6px; border-radius: 4px;">
+                                <span style="color: #4fc3f7;">${name}</span>: ${cdata.in_view}
+                                ${signals ? `<span style="color: #546e7a; font-size: 9px;">(${signals})</span>` : ''}
                             </div>`;
                         }
+                        document.getElementById('gps-sats-in-use').textContent = inUse;
+                        document.getElementById('gps-sats-in-view').textContent = inView;
                         document.getElementById('gps-constellation-grid').innerHTML = constHtml || '<div style="color: #78909c;">—</div>';
 
                         // Update signals
