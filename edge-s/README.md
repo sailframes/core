@@ -1,25 +1,13 @@
-# SailFrames Edge Device
+# SailFrames Edge Software
 
-Raspberry Pi-based data acquisition system for sailboat racing.
+Raspberry Pi software for sailboat racing data acquisition.
 
-This is the edge device component of [sailframes/core](https://github.com/sailframes/core).
-
-## Hardware
-
-| Component | Part | Interface |
-|-----------|------|-----------|
-| Compute | Raspberry Pi 5 | — |
-| GPS | u-blox ZED-F9P | USB |
-| Wind | Calypso Ultrasonic Mini | BLE 5.1 |
-| IMU | BNO085 (GY-BNO08X) | I2C @ 0x4A |
-| Pressure | DPS310 | I2C @ 0x77 |
-| Camera | Pi Camera 3 Wide | CSI |
-| Display | 1602 LCD + PCF8574T | I2C @ 0x27 |
+Part of [sailframes/core](https://github.com/sailframes/core). See [edge-e](../edge-e) for hardware/firmware.
 
 ## Directory Structure
 
 ```
-edge/
+edge-s/
 ├── services/
 │   ├── sailframes_gps.py        # GPS acquisition (ZED-F9P via USB)
 │   ├── sailframes_imu.py        # IMU acquisition (BNO085 via I2C)
@@ -47,7 +35,7 @@ edge/
 ```bash
 # Clone the monorepo
 git clone https://github.com/sailframes/core.git
-cd core/edge
+cd core/edge-s
 
 # Run the installer
 sudo bash scripts/install.sh

@@ -12,13 +12,14 @@ SailFrames is a self-contained, waterproof data acquisition device for competiti
 
 ```
 sailframes/core/
-├── edge/              # Raspberry Pi edge device
-│   ├── services/      # Sensor data acquisition (GPS, IMU, wind, pressure, camera)
-│   ├── scripts/       # Install, start, stop, Wi-Fi mode scripts
-│   ├── config/        # Device configuration (sailframes.yaml)
+├── edge-s/            # Edge software (Raspberry Pi)
+│   ├── services/      # Sensor acquisition (GPS, IMU, wind, pressure, camera)
+│   ├── scripts/       # Install, start, stop, Wi-Fi mode
+│   ├── config/        # Device configuration
 │   └── tests/         # Sensor connectivity tests
-├── hardware/          # KiCad PCB designs
-├── firmware/          # Pi boot config, Arduino sketches
+├── edge-e/            # Edge electronics
+│   ├── hardware/      # KiCad PCB designs
+│   └── firmware/      # Pi boot config, Arduino sketches
 ├── web/               # Dashboard web application
 │   ├── api/           # Backend API
 │   └── frontend/      # React frontend
@@ -52,17 +53,17 @@ git clone https://github.com/sailframes/core.git
 cd core
 
 # Run the installer on Raspberry Pi
-sudo bash edge/scripts/install.sh
+sudo bash edge-s/scripts/install.sh
 
 # Test all sensors
-python3 edge/tests/test_gps.py
-python3 edge/tests/test_imu.py
-python3 edge/tests/test_pressure.py
-python3 edge/tests/test_wind.py
-python3 edge/tests/test_camera.py
+python3 edge-s/tests/test_gps.py
+python3 edge-s/tests/test_imu.py
+python3 edge-s/tests/test_pressure.py
+python3 edge-s/tests/test_wind.py
+python3 edge-s/tests/test_camera.py
 
 # Start all services
-sudo bash edge/scripts/start.sh
+sudo bash edge-s/scripts/start.sh
 
 # Check status
 sudo systemctl status sailframes-*
