@@ -3553,25 +3553,30 @@ SAILING_DASHBOARD_HTML = """
         .data-panel {
             background: #1a2a40;
             border-radius: 8px;
-            padding: 8px;
+            padding: 4px 8px;
             display: flex;
-            flex-direction: column;
-            justify-content: center;
+            flex-direction: row;
+            justify-content: flex-start;
             align-items: center;
             border: 1px solid #2a3a50;
         }
         .data-label {
-            font-size: 14px;
+            font-size: 12px;
             color: #7a8a9a;
             text-transform: uppercase;
             letter-spacing: 1px;
-            margin-bottom: 4px;
+            writing-mode: vertical-rl;
+            transform: rotate(180deg);
+            margin-right: 4px;
+            min-width: 18px;
         }
         .data-value {
-            font-size: 80px;
+            font-size: 72px;
             font-weight: bold;
             color: #00e0ff;
             line-height: 1;
+            flex: 1;
+            text-align: center;
         }
         .data-value.wind {
             color: #ff6b6b;
@@ -3584,7 +3589,7 @@ SAILING_DASHBOARD_HTML = """
         }
         .data-value.sat {
             color: #95e1d3;
-            font-size: 60px;
+            font-size: 36px;
         }
         .data-unit {
             font-size: 12px;
@@ -3821,8 +3826,17 @@ SAILING_DASHBOARD_HTML = """
                 const gps = status.gps || {};
                 const sog = gps.speed_knots;
                 const hdg = gps.course_deg;
-                const sats = gpsLive.satellites || gps.satellites || 0;
+                const satsInUse = gpsLive.satellites || gps.satellites || 0;
                 const hdop = gpsLive.hdop || gps.hdop;
+
+                // Calculate total satellites in view from constellations
+                let satsInView = 0;
+                if (gpsLive.constellations) {
+                    for (const c of Object.values(gpsLive.constellations)) {
+                        satsInView += c.in_view || 0;
+                    }
+                }
+                if (satsInView === 0) satsInView = satsInUse;
 
                 // Wind data (live)
                 const aws = wind.speed_knots;
@@ -3840,9 +3854,9 @@ SAILING_DASHBOARD_HTML = """
                 updatePanel('hdg', hdg !== undefined && hdg !== null ? Math.round(hdg) + '°' : '--', hdg !== null);
                 updatePanel('heel', heel !== undefined && heel !== null ? Math.round(heel) + '°' : '--', heel !== null);
 
-                // SAT panel: show sats and HDOP together
+                // SAT panel: show fix/view and HDOP
                 const hdopStr = hdop !== undefined && hdop !== null ? hdop.toFixed(1) : '--';
-                updatePanel('sat', sats + ' H' + hdopStr, sats > 0);
+                updatePanel('sat', satsInUse + '/' + satsInView + ' H' + hdopStr, satsInUse > 0);
 
                 // Update compass heading text
                 document.getElementById('heading-text').textContent =
