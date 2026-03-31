@@ -11,6 +11,7 @@ import csv
 import time
 import signal
 import logging
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -142,6 +143,63 @@ def parse_rmc(msg):
         'course_deg': float(msg.true_course) if msg.true_course else None,
         'gps_timestamp': str(msg.timestamp) if msg.timestamp else '',
     }
+
+
+# Track last time sync
+_last_time_sync = 0
+TIME_SYNC_INTERVAL = 300  # Sync every 5 minutes
+
+
+def sync_system_clock_from_gps(msg):
+    """
+    Sync system clock from GPS RMC message.
+    Only syncs if we have valid date/time and it's been > 5 minutes since last sync.
+    """
+    global _last_time_sync
+
+    now = time.monotonic()
+    if now - _last_time_sync < TIME_SYNC_INTERVAL:
+        return False
+
+    # RMC must have both date and time, and be a valid fix (status 'A')
+    if not msg.datestamp or not msg.timestamp:
+        return False
+    if msg.status != 'A':  # A=Active/valid, V=Void
+        return False
+
+    try:
+        # Combine date and time from RMC
+        gps_datetime = datetime.combine(msg.datestamp, msg.timestamp, tzinfo=timezone.utc)
+        system_datetime = datetime.now(timezone.utc)
+
+        # Calculate drift
+        drift_seconds = abs((gps_datetime - system_datetime).total_seconds())
+
+        # Only sync if drift > 0.5 seconds (avoid unnecessary syncs)
+        if drift_seconds < 0.5:
+            _last_time_sync = now
+            return False
+
+        # Format for date command: "YYYY-MM-DD HH:MM:SS"
+        time_str = gps_datetime.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Set system clock (requires root, but service runs as root via sudo)
+        result = subprocess.run(
+            ['sudo', 'date', '-u', '-s', time_str],
+            capture_output=True, text=True, timeout=5
+        )
+
+        if result.returncode == 0:
+            logger.info(f"System clock synced from GPS (drift was {drift_seconds:.1f}s)")
+            _last_time_sync = now
+            return True
+        else:
+            logger.warning(f"Failed to sync clock: {result.stderr}")
+            return False
+
+    except Exception as e:
+        logger.debug(f"Time sync error: {e}")
+        return False
 
 
 # Constellation and signal band tracking
@@ -515,6 +573,9 @@ def run(config):
                     # Compute m/s from knots
                     if current['speed_knots'] is not None:
                         current['speed_mps'] = round(current['speed_knots'] * 0.514444, 3)
+
+                    # Sync system clock from GPS time (every 5 min)
+                    sync_system_clock_from_gps(msg)
 
             # Update status periodically even without fix (for dashboard)
             now = time.monotonic()
