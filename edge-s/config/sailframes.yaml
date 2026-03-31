@@ -54,16 +54,30 @@ wind:
 
 camera:
   enabled: true
+  mode: "smart"               # "smart" | "continuous" | "photo_only"
   resolution: [1920, 1080]    # 1080p
   framerate: 30
   rotation: 0                 # 0, 90, 180, 270
   hflip: false
   vflip: false
-  autofocus: "continuous"     # continuous, manual, single
+  autofocus: "infinity"       # infinity (best for sailing), auto, continuous
   codec: "h264"
-  bitrate_mbps: 8             # ~3.6 GB/hour
-  segment_duration_min: 5     # Split into 5-min chunks (corruption safety)
-  overlay_timestamp: true     # Burn GPS timestamp into video
+  bitrate_mbps: 8             # For continuous mode: ~3.6 GB/hour
+  segment_duration_min: 5     # For continuous mode: split into 5-min chunks
+
+  # Photo mode settings (used in smart and photo_only modes)
+  photo_interval_sec: 5       # Capture photo every N seconds
+  photo_resolution: [1920, 1080]  # Can be higher: [4608, 2592] for full sensor
+  photo_quality: 90           # JPEG quality (1-100)
+
+  # Maneuver detection settings (smart mode only)
+  maneuver_prebuffer_sec: 2   # Seconds of video before maneuver trigger
+  maneuver_postbuffer_sec: 2  # Seconds of video after maneuver ends
+  maneuver_bitrate_mbps: 4    # Lower bitrate for maneuver clips
+  maneuver_heading_rate_threshold: 15   # deg/sec to trigger recording
+  maneuver_accel_threshold: 0.5         # m/s² lateral accel change
+  maneuver_heel_rate_threshold: 5       # deg/sec heel change
+  maneuver_calm_duration_sec: 5         # Seconds of calm before ending recording
 
 sync:
   enabled: false              # Enable for WiFi upload

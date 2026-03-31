@@ -3537,6 +3537,8 @@ def get_data_by_date(data_dir):
             'date': date_dir.name,
             'sensors': {},
             'video': {'count': 0, 'size_bytes': 0},
+            'photos': {'count': 0, 'size_bytes': 0},
+            'maneuvers': {'count': 0, 'size_bytes': 0},
             'total_size_bytes': 0
         }
 
@@ -3553,7 +3555,7 @@ def get_data_by_date(data_dir):
                 }
                 date_info['total_size_bytes'] += size
 
-        # Video data
+        # Video data (continuous mode)
         video_dir = date_dir / 'video'
         if video_dir.exists():
             # Count videos in root and subdirectories
@@ -3561,6 +3563,28 @@ def get_data_by_date(data_dir):
             size = sum(v.stat().st_size for v in videos)
             date_info['video'] = {
                 'count': len(videos),
+                'size_bytes': size
+            }
+            date_info['total_size_bytes'] += size
+
+        # Photos (smart mode timelapse)
+        photos_dir = date_dir / 'photos'
+        if photos_dir.exists():
+            photos = list(photos_dir.glob('*.jpg')) + list(photos_dir.glob('*/*.jpg'))
+            size = sum(p.stat().st_size for p in photos)
+            date_info['photos'] = {
+                'count': len(photos),
+                'size_bytes': size
+            }
+            date_info['total_size_bytes'] += size
+
+        # Maneuver clips (smart mode)
+        maneuvers_dir = date_dir / 'maneuvers'
+        if maneuvers_dir.exists():
+            maneuvers = list(maneuvers_dir.glob('*.mp4')) + list(maneuvers_dir.glob('*/*.mp4'))
+            size = sum(m.stat().st_size for m in maneuvers)
+            date_info['maneuvers'] = {
+                'count': len(maneuvers),
                 'size_bytes': size
             }
             date_info['total_size_bytes'] += size
@@ -3614,6 +3638,8 @@ DATA_MANAGEMENT_HTML = """
         .sensor-tag.pressure { background: #00796b; color: white; }
         .sensor-tag.wind { background: #c2185b; color: white; }
         .sensor-tag.video { background: #e65100; color: white; }
+        .sensor-tag.photos { background: #8e24aa; color: white; }
+        .sensor-tag.maneuvers { background: #d84315; color: white; }
         .btn { padding: 8px 16px; border-radius: 4px; border: none; font-size: 13px; cursor: pointer; }
         .btn-delete { background: #455a64; color: #e0e8f0; }
         .btn-delete:hover { background: #c62828; }
@@ -3644,8 +3670,16 @@ DATA_MANAGEMENT_HTML = """
             <div class="summary-label">Total Storage Used</div>
         </div>
         <div class="summary-item">
+            <div class="summary-value">{{ total_photos }}</div>
+            <div class="summary-label">Total Photos</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-value">{{ total_maneuvers }}</div>
+            <div class="summary-label">Maneuver Clips</div>
+        </div>
+        <div class="summary-item">
             <div class="summary-value">{{ total_videos }}</div>
-            <div class="summary-label">Total Videos</div>
+            <div class="summary-label">Continuous Videos</div>
         </div>
         <div class="summary-item">
             <div class="summary-value">{{ total_sensor_files }}</div>
@@ -3669,6 +3703,8 @@ DATA_MANAGEMENT_HTML = """
                     {% if d.sensors.pressure %}<span class="sensor-tag pressure">Pressure: {{ d.sensors.pressure.count }} files ({{ d.sensors.pressure.size_str }})</span>{% endif %}
                     {% if d.sensors.wind %}<span class="sensor-tag wind">Wind: {{ d.sensors.wind.count }} files ({{ d.sensors.wind.size_str }})</span>{% endif %}
                     {% if d.video.count > 0 %}<span class="sensor-tag video">Video: {{ d.video.count }} files ({{ d.video.size_str }})</span>{% endif %}
+                    {% if d.photos.count > 0 %}<span class="sensor-tag photos">Photos: {{ d.photos.count }} ({{ d.photos.size_str }})</span>{% endif %}
+                    {% if d.maneuvers.count > 0 %}<span class="sensor-tag maneuvers">Maneuvers: {{ d.maneuvers.count }} clips ({{ d.maneuvers.size_str }})</span>{% endif %}
                 </div>
             </div>
             <button class="btn btn-delete" onclick="showDeleteModal('{{ d.date }}', '{{ d.total_size_str }}', {% if d.date == today %}true{% else %}false{% endif %})" {% if d.date == today %}title="Cannot delete today's data"{% endif %}>Delete</button>
@@ -3687,7 +3723,9 @@ DATA_MANAGEMENT_HTML = """
 
             <div class="checkbox-group">
                 <label><input type="checkbox" id="del-sensors" checked> Sensor data (GPS, IMU, Pressure, Wind)</label>
-                <label><input type="checkbox" id="del-video" checked> Video recordings</label>
+                <label><input type="checkbox" id="del-video" checked> Video recordings (continuous mode)</label>
+                <label><input type="checkbox" id="del-photos" checked> Timelapse photos</label>
+                <label><input type="checkbox" id="del-maneuvers" checked> Maneuver clips</label>
             </div>
 
             <div id="today-warning" class="warning" style="display: none;">
@@ -3714,6 +3752,8 @@ DATA_MANAGEMENT_HTML = """
             document.getElementById('confirm-delete-btn').disabled = today;
             document.getElementById('del-sensors').disabled = today;
             document.getElementById('del-video').disabled = today;
+            document.getElementById('del-photos').disabled = today;
+            document.getElementById('del-maneuvers').disabled = today;
             document.getElementById('delete-modal').style.display = 'block';
         }
 
@@ -3727,8 +3767,10 @@ DATA_MANAGEMENT_HTML = """
 
             const deleteSensors = document.getElementById('del-sensors').checked;
             const deleteVideo = document.getElementById('del-video').checked;
+            const deletePhotos = document.getElementById('del-photos').checked;
+            const deleteManeuvers = document.getElementById('del-maneuvers').checked;
 
-            if (!deleteSensors && !deleteVideo) {
+            if (!deleteSensors && !deleteVideo && !deletePhotos && !deleteManeuvers) {
                 alert('Please select at least one data type to delete.');
                 return;
             }
@@ -3742,7 +3784,9 @@ DATA_MANAGEMENT_HTML = """
                 body: JSON.stringify({
                     date: deleteDate,
                     delete_sensors: deleteSensors,
-                    delete_video: deleteVideo
+                    delete_video: deleteVideo,
+                    delete_photos: deletePhotos,
+                    delete_maneuvers: deleteManeuvers
                 })
             })
             .then(r => r.json())
@@ -4219,10 +4263,14 @@ def data_management_page():
         for sensor, info in d['sensors'].items():
             info['size_str'] = format_size(info['size_bytes'])
         d['video']['size_str'] = format_size(d['video']['size_bytes'])
+        d['photos']['size_str'] = format_size(d['photos']['size_bytes'])
+        d['maneuvers']['size_str'] = format_size(d['maneuvers']['size_bytes'])
 
     # Calculate totals
     total_size_bytes = sum(d['total_size_bytes'] for d in dates)
     total_videos = sum(d['video']['count'] for d in dates)
+    total_photos = sum(d['photos']['count'] for d in dates)
+    total_maneuvers = sum(d['maneuvers']['count'] for d in dates)
     total_sensor_files = sum(
         sum(s['count'] for s in d['sensors'].values())
         for d in dates
@@ -4235,6 +4283,8 @@ def data_management_page():
         total_days=len(dates),
         total_size=format_size(total_size_bytes),
         total_videos=total_videos,
+        total_photos=total_photos,
+        total_maneuvers=total_maneuvers,
         total_sensor_files=total_sensor_files
     )
 
@@ -4250,6 +4300,8 @@ def api_data_delete():
     date = data.get('date') if data else None
     delete_sensors = data.get('delete_sensors', True) if data else True
     delete_video = data.get('delete_video', True) if data else True
+    delete_photos = data.get('delete_photos', True) if data else True
+    delete_maneuvers = data.get('delete_maneuvers', True) if data else True
 
     if not date:
         return jsonify({'success': False, 'error': 'No date provided'}), 400
@@ -4270,7 +4322,7 @@ def api_data_delete():
     if not date_dir.exists():
         return jsonify({'success': False, 'error': 'No data for this date'}), 404
 
-    deleted = {'sensors': 0, 'videos': 0}
+    deleted = {'sensors': 0, 'videos': 0, 'photos': 0, 'maneuvers': 0}
     errors = []
 
     # Delete sensor data
@@ -4317,6 +4369,61 @@ def api_data_delete():
             except Exception:
                 pass
 
+    # Delete photos (smart mode timelapse)
+    if delete_photos:
+        photos_dir = date_dir / 'photos'
+        if photos_dir.exists():
+            for p in list(photos_dir.glob('*.jpg')) + list(photos_dir.glob('*/*.jpg')):
+                try:
+                    p.unlink()
+                    deleted['photos'] += 1
+                except Exception as e:
+                    errors.append(f"photos/{p.name}: {e}")
+            # Remove empty subdirectories
+            for subdir in photos_dir.iterdir():
+                if subdir.is_dir():
+                    try:
+                        if not list(subdir.iterdir()):
+                            subdir.rmdir()
+                    except Exception:
+                        pass
+            # Remove photos directory if empty
+            try:
+                if photos_dir.exists() and not list(photos_dir.iterdir()):
+                    photos_dir.rmdir()
+            except Exception:
+                pass
+
+    # Delete maneuver clips (smart mode)
+    if delete_maneuvers:
+        maneuvers_dir = date_dir / 'maneuvers'
+        if maneuvers_dir.exists():
+            # Delete videos and JSON metadata
+            for m in list(maneuvers_dir.glob('*.mp4')) + list(maneuvers_dir.glob('*/*.mp4')):
+                try:
+                    m.unlink()
+                    deleted['maneuvers'] += 1
+                    # Also delete JSON sidecar if exists
+                    json_file = m.with_suffix('.json')
+                    if json_file.exists():
+                        json_file.unlink()
+                except Exception as e:
+                    errors.append(f"maneuvers/{m.name}: {e}")
+            # Remove empty subdirectories
+            for subdir in maneuvers_dir.iterdir():
+                if subdir.is_dir():
+                    try:
+                        if not list(subdir.iterdir()):
+                            subdir.rmdir()
+                    except Exception:
+                        pass
+            # Remove maneuvers directory if empty
+            try:
+                if maneuvers_dir.exists() and not list(maneuvers_dir.iterdir()):
+                    maneuvers_dir.rmdir()
+            except Exception:
+                pass
+
     # Remove date directory if empty
     try:
         if date_dir.exists() and not list(date_dir.iterdir()):
@@ -4324,7 +4431,8 @@ def api_data_delete():
     except Exception:
         pass
 
-    logger.info(f"Deleted data for {date}: {deleted['sensors']} sensor files, {deleted['videos']} videos")
+    logger.info(f"Deleted data for {date}: {deleted['sensors']} sensor files, {deleted['videos']} videos, "
+                f"{deleted['photos']} photos, {deleted['maneuvers']} maneuvers")
 
     if errors:
         return jsonify({
