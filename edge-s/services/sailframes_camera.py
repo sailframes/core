@@ -30,7 +30,7 @@ from typing import Optional, Dict, Any
 
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder, JpegEncoder, Quality
-from picamera2.outputs import FfmpegOutput, CircularOutput, FileOutput
+from picamera2.outputs import FfmpegOutput, CircularOutput
 import yaml
 
 # Camera ID to index mapping (Pi 5 has CSI-0 and CSI-1)
@@ -513,7 +513,8 @@ def run_smart_mode(config, camera_id: str):
     last_photo_time = 0
     maneuver_start_time: Optional[datetime] = None
     current_video_path: Optional[Path] = None
-    file_output: Optional[FileOutput] = None
+    h264_path: Optional[Path] = None
+    file_output = None  # File handle for raw H264 output
 
     try:
         while running:
@@ -552,13 +553,14 @@ def run_smart_mode(config, camera_id: str):
                     mode = CameraMode.VIDEO
                     maneuver_start_time = datetime.now(timezone.utc)
 
-                    # Create video file
+                    # Create video file (raw H264, will convert to MP4 after)
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    h264_path = maneuver_dir / f'maneuver_{timestamp}.h264'
                     current_video_path = maneuver_dir / f'maneuver_{timestamp}.mp4'
 
                     # Switch from circular buffer to file output
-                    # This captures the pre-buffer and continues recording
-                    file_output = FfmpegOutput(str(current_video_path))
+                    # CircularOutput requires a file object, not FfmpegOutput
+                    file_output = open(h264_path, 'wb')
                     circular.fileoutput = file_output
                     circular.start()
 
@@ -574,17 +576,38 @@ def run_smart_mode(config, camera_id: str):
                     logger.info(f"Maneuver ended, recording {postbuffer_sec}s post-buffer")
                     time.sleep(postbuffer_sec)
 
-                    # Stop recording
+                    # Stop recording and close file
                     circular.stop()
+                    if file_output:
+                        file_output.close()
+                        file_output = None
 
                     maneuver_end_time = datetime.now(timezone.utc)
                     maneuver_count += 1
 
+                    # Convert H264 to MP4
+                    if h264_path and h264_path.exists():
+                        h264_size_mb = h264_path.stat().st_size / (1024 * 1024)
+                        logger.info(f"Converting {h264_path.name} ({h264_size_mb:.1f}MB) to MP4...")
+                        try:
+                            import subprocess
+                            result = subprocess.run([
+                                'ffmpeg', '-y', '-framerate', str(fps),
+                                '-i', str(h264_path),
+                                '-c', 'copy',
+                                str(current_video_path)
+                            ], capture_output=True, timeout=60)
+                            if result.returncode == 0 and current_video_path.exists():
+                                h264_path.unlink()  # Delete raw h264
+                                file_size_mb = current_video_path.stat().st_size / (1024 * 1024)
+                                logger.info(f"Maneuver {maneuver_count} recorded: {file_size_mb:.1f}MB")
+                            else:
+                                logger.error(f"ffmpeg failed: {result.stderr.decode()}")
+                        except Exception as e:
+                            logger.error(f"MP4 conversion failed: {e}")
+
                     # Write metadata
                     if current_video_path and current_video_path.exists():
-                        file_size_mb = current_video_path.stat().st_size / (1024 * 1024)
-                        logger.info(f"Maneuver {maneuver_count} recorded: {file_size_mb:.1f}MB")
-
                         write_maneuver_metadata(
                             current_video_path, camera_id,
                             maneuver_start_time, maneuver_end_time,
@@ -596,6 +619,7 @@ def run_smart_mode(config, camera_id: str):
                     mode = CameraMode.PHOTO
                     maneuver_start_time = None
                     current_video_path = None
+                    h264_path = None
 
                     update_camera_status(camera_id, 'smart', photo_count, maneuver_count, recording=False)
                 else:
