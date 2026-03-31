@@ -665,25 +665,6 @@ DASHBOARD_HTML = """
             <div class="value"><span id="cpu-temp">{{ state.cpu_temp_c or '—' }}</span><span class="unit">°C</span></div>
         </div>
         <div class="card">
-            {% if state.battery.type == 'external' %}
-            <h2>Power</h2>
-            <div class="value"><span id="battery-percent">50</span><span class="unit">Ah</span></div>
-            <div class="sub" id="battery-details">USB Power Bank · Check display for level</div>
-            <div id="battery-estimate" class="sub" style="margin-top: 4px; display: none;"></div>
-            {% else %}
-            <h2>Battery <span id="battery-charging-icon" style="display: {{ 'inline' if state.battery.charging else 'none' }};" class="charging">⚡</span></h2>
-            <div class="value"><span id="battery-percent">{{ state.battery.percent or '—' }}</span><span class="unit">%</span></div>
-            <div class="sub" id="battery-details"><span id="battery-voltage">{{ state.battery.voltage or '—' }}</span>V · <span id="battery-current">{{ state.battery.current_ma or '—' }}</span>mA · <span id="battery-status">{% if state.battery.charging %}<span class="charging">Charging</span>{% else %}<span class="discharging">On Battery</span>{% endif %}</span></div>
-            <div id="battery-estimate" class="sub" style="margin-top: 4px;">
-            {% if state.battery.remaining_str and not state.battery.charging %}
-            <span style="color: #ff9800;">~{{ state.battery.remaining_str }} remaining · empty ~{{ state.battery.empty_time }}</span>
-            {% elif state.battery.charge_str and state.battery.charging %}
-            <span style="color: #1976d2;">~{{ state.battery.charge_str }} to full · ready ~{{ state.battery.full_time }}</span>
-            {% endif %}
-            </div>
-            {% endif %}
-        </div>
-        <div class="card">
             <h2>Disk Free</h2>
             <div class="value"><span id="disk-free">{{ state.disk.free_gb or '—' }}</span><span class="unit">GB</span></div>
         </div>
@@ -1767,42 +1748,6 @@ DASHBOARD_HTML = """
                 document.getElementById('cpu-temp').textContent = data.cpu_temp_c || '—';
                 document.getElementById('ram-percent').textContent = data.ram_percent || '—';
                 document.getElementById('disk-free').textContent = data.disk ? data.disk.free_gb : '—';
-
-                // Battery
-                if (data.battery) {
-                    if (data.battery.type === 'external') {
-                        // External USB power bank - no live data
-                        document.getElementById('battery-percent').textContent = '50';
-                        const details = document.getElementById('battery-details');
-                        if (details) details.textContent = 'USB Power Bank · Check display for level';
-                        const estimate = document.getElementById('battery-estimate');
-                        if (estimate) estimate.style.display = 'none';
-                        const icon = document.getElementById('battery-charging-icon');
-                        if (icon) icon.style.display = 'none';
-                    } else {
-                        // HAT battery with live data
-                        document.getElementById('battery-percent').textContent = data.battery.percent || '—';
-                        const voltageEl = document.getElementById('battery-voltage');
-                        const currentEl = document.getElementById('battery-current');
-                        const statusEl = document.getElementById('battery-status');
-                        if (voltageEl) voltageEl.textContent = data.battery.voltage || '—';
-                        if (currentEl) currentEl.textContent = data.battery.current_ma || '—';
-                        const icon = document.getElementById('battery-charging-icon');
-                        if (icon) icon.style.display = data.battery.charging ? 'inline' : 'none';
-                        if (statusEl) statusEl.innerHTML = data.battery.charging
-                            ? '<span class="charging">Charging</span>'
-                            : '<span class="discharging">On Battery</span>';
-
-                        let estimate = '';
-                        if (data.battery.remaining_str && !data.battery.charging) {
-                            estimate = '<span style="color: #ff9800;">~' + data.battery.remaining_str + ' remaining · empty ~' + data.battery.empty_time + '</span>';
-                        } else if (data.battery.charge_str && data.battery.charging) {
-                            estimate = '<span style="color: #1976d2;">~' + data.battery.charge_str + ' to full · ready ~' + data.battery.full_time + '</span>';
-                        }
-                        const estimateEl = document.getElementById('battery-estimate');
-                        if (estimateEl) estimateEl.innerHTML = estimate;
-                    }
-                }
 
                 // GPS indicator
                 const gpsInd = document.getElementById('gps-indicator');
@@ -3552,6 +3497,427 @@ DATA_MANAGEMENT_HTML = """
 </body>
 </html>
 """
+
+
+# ── Sailing Dashboard ──
+SAILING_DASHBOARD_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sailing - SailFrames</title>
+    <meta name="viewport" content="width=800, height=480, initial-scale=1, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta http-equiv="refresh" content="60">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 800px;
+            height: 480px;
+            overflow: hidden;
+            background: #0a1628;
+            color: #e0e8f0;
+            font-family: 'Roboto Mono', 'SF Mono', 'Monaco', monospace;
+        }
+        .container {
+            display: flex;
+            width: 800px;
+            height: 480px;
+            padding: 10px;
+            gap: 10px;
+        }
+        .compass-section {
+            width: 280px;
+            height: 460px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .compass-container {
+            position: relative;
+            width: 260px;
+            height: 260px;
+        }
+        .compass-svg {
+            width: 100%;
+            height: 100%;
+        }
+        .data-section {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: repeat(4, 1fr);
+            gap: 8px;
+        }
+        .data-panel {
+            background: #1a2a40;
+            border-radius: 8px;
+            padding: 8px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            border: 1px solid #2a3a50;
+        }
+        .data-label {
+            font-size: 14px;
+            color: #7a8a9a;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+        .data-value {
+            font-size: 80px;
+            font-weight: bold;
+            color: #00e0ff;
+            line-height: 1;
+        }
+        .data-value.wind {
+            color: #ff6b6b;
+        }
+        .data-value.speed {
+            color: #4ecdc4;
+        }
+        .data-value.heel {
+            color: #ffe66d;
+        }
+        .data-value.sat {
+            color: #95e1d3;
+            font-size: 60px;
+        }
+        .data-unit {
+            font-size: 12px;
+            color: #5a6a7a;
+            margin-top: 2px;
+        }
+        .data-panel.no-data .data-value {
+            color: #3a4a5a;
+        }
+        /* Compass styles */
+        .compass-ring {
+            fill: none;
+            stroke: #2a3a50;
+            stroke-width: 2;
+        }
+        .compass-tick {
+            stroke: #4a5a6a;
+            stroke-width: 1;
+        }
+        .compass-tick-major {
+            stroke: #7a8a9a;
+            stroke-width: 2;
+        }
+        .compass-text {
+            fill: #7a8a9a;
+            font-size: 14px;
+            text-anchor: middle;
+            dominant-baseline: middle;
+        }
+        .compass-center {
+            fill: #1a2a40;
+            stroke: #3a4a5a;
+            stroke-width: 1;
+        }
+        .boat-icon {
+            fill: #4ecdc4;
+            stroke: #2a8a7a;
+            stroke-width: 1;
+        }
+        .wind-arrow {
+            fill: none;
+            stroke: #ff6b6b;
+            stroke-width: 4;
+            stroke-linecap: round;
+        }
+        .wind-arrow-head {
+            fill: #ff6b6b;
+        }
+        .heading-indicator {
+            fill: #00e0ff;
+        }
+        .heading-text {
+            fill: #00e0ff;
+            font-size: 24px;
+            font-weight: bold;
+            text-anchor: middle;
+        }
+        .center-label {
+            fill: #5a6a7a;
+            font-size: 10px;
+            text-anchor: middle;
+        }
+        /* Connection status */
+        .status-dot {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #3a4a5a;
+        }
+        .status-dot.connected {
+            background: #4ecdc4;
+        }
+        .status-dot.warning {
+            background: #ffe66d;
+        }
+        .status-dot.error {
+            background: #ff6b6b;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="compass-section">
+            <div class="compass-container">
+                <svg class="compass-svg" viewBox="0 0 380 380">
+                    <!-- Outer ring -->
+                    <circle cx="190" cy="190" r="175" class="compass-ring"/>
+
+                    <!-- Degree ticks -->
+                    <g id="compass-ticks">
+                        <!-- Generated by JS -->
+                    </g>
+
+                    <!-- Cardinal directions -->
+                    <text x="190" y="30" class="compass-text">N</text>
+                    <text x="350" y="195" class="compass-text">E</text>
+                    <text x="190" y="360" class="compass-text">S</text>
+                    <text x="30" y="195" class="compass-text">W</text>
+
+                    <!-- Center background -->
+                    <circle cx="190" cy="190" r="60" class="compass-center"/>
+
+                    <!-- Heading value in center -->
+                    <text id="heading-text" x="190" y="190" class="heading-text">---</text>
+                    <text x="190" y="210" class="center-label">HDG</text>
+
+                    <!-- Boat icon (always pointing up) -->
+                    <g id="boat-icon" transform="translate(190, 190)">
+                        <path d="M 0,-45 L 12,-15 L 10,40 L 0,50 L -10,40 L -12,-15 Z" class="boat-icon"/>
+                    </g>
+
+                    <!-- Wind arrow (rotates based on AWA) -->
+                    <g id="wind-arrow" transform="translate(190, 190) rotate(0)">
+                        <line x1="0" y1="-65" x2="0" y2="-140" class="wind-arrow"/>
+                        <polygon points="0,-150 -8,-130 8,-130" class="wind-arrow-head"/>
+                    </g>
+
+                    <!-- Heading indicator on outer ring (shows compass direction) -->
+                    <g id="heading-indicator" transform="translate(190, 190) rotate(0)">
+                        <polygon points="0,-165 -8,-180 8,-180" class="heading-indicator"/>
+                    </g>
+                </svg>
+            </div>
+        </div>
+
+        <div class="data-section">
+            <div class="data-panel" id="panel-aws">
+                <div class="data-label">AWS</div>
+                <div class="data-value wind" id="val-aws">--</div>
+            </div>
+            <div class="data-panel" id="panel-awa">
+                <div class="data-label">AWA</div>
+                <div class="data-value wind" id="val-awa">--</div>
+            </div>
+            <div class="data-panel" id="panel-tws">
+                <div class="data-label">TWS</div>
+                <div class="data-value wind" id="val-tws">--</div>
+            </div>
+            <div class="data-panel" id="panel-twa">
+                <div class="data-label">TWA</div>
+                <div class="data-value wind" id="val-twa">--</div>
+            </div>
+            <div class="data-panel" id="panel-sog">
+                <div class="data-label">SOG</div>
+                <div class="data-value speed" id="val-sog">--</div>
+            </div>
+            <div class="data-panel" id="panel-hdg">
+                <div class="data-label">HDG</div>
+                <div class="data-value" id="val-hdg">--</div>
+            </div>
+            <div class="data-panel" id="panel-heel">
+                <div class="data-label">HEEL</div>
+                <div class="data-value heel" id="val-heel">--</div>
+            </div>
+            <div class="data-panel" id="panel-sat">
+                <div class="data-label">SAT</div>
+                <div class="data-value sat" id="val-sat">--</div>
+            </div>
+        </div>
+    </div>
+    <div id="update-indicator" style="position:absolute;bottom:5px;right:10px;font-size:10px;color:#3a4a5a"></div>
+
+    <script>
+        // Generate compass ticks
+        function generateCompassTicks() {
+            const ticksGroup = document.getElementById('compass-ticks');
+            const cx = 190, cy = 190, r = 175;
+
+            for (let deg = 0; deg < 360; deg += 10) {
+                const rad = (deg - 90) * Math.PI / 180;
+                const isMajor = deg % 30 === 0;
+                const innerR = isMajor ? r - 15 : r - 8;
+
+                const x1 = cx + innerR * Math.cos(rad);
+                const y1 = cy + innerR * Math.sin(rad);
+                const x2 = cx + r * Math.cos(rad);
+                const y2 = cy + r * Math.sin(rad);
+
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.setAttribute('x1', x1);
+                line.setAttribute('y1', y1);
+                line.setAttribute('x2', x2);
+                line.setAttribute('y2', y2);
+                line.setAttribute('class', isMajor ? 'compass-tick-major' : 'compass-tick');
+                ticksGroup.appendChild(line);
+            }
+        }
+
+        // Calculate true wind from apparent wind and boat speed
+        function calcTrueWind(aws, awa, sog) {
+            if (aws === null || awa === null || sog === null) {
+                return { tws: null, twa: null };
+            }
+
+            // Convert AWA to radians (AWA is relative to bow, positive = starboard)
+            const awaRad = awa * Math.PI / 180;
+
+            // True wind speed using law of cosines
+            const tws = Math.sqrt(aws * aws + sog * sog - 2 * aws * sog * Math.cos(awaRad));
+
+            // True wind angle using atan2
+            const twaRad = Math.atan2(aws * Math.sin(awaRad), aws * Math.cos(awaRad) - sog);
+            let twa = twaRad * 180 / Math.PI;
+
+            return {
+                tws: tws.toFixed(1),
+                twa: Math.round(twa)
+            };
+        }
+
+        // Format angle with sign for port/starboard indication
+        function formatAngle(angle) {
+            if (angle === null || isNaN(angle)) return '--';
+            const absAngle = Math.abs(Math.round(angle));
+            const side = angle >= 0 ? 'S' : 'P';  // Starboard / Port
+            return absAngle + '°' + side;
+        }
+
+        // Update dashboard with latest data from direct API endpoints
+        function updateDashboard() {
+            Promise.all([
+                fetch('/api/imu/status').then(r => r.json()).catch(() => ({})),
+                fetch('/api/gps/status').then(r => r.json()).catch(() => ({})),
+                fetch('/api/wind/status').then(r => r.json()).catch(() => ({})),
+                fetch('/api/status').then(r => r.json()).catch(() => ({}))
+            ]).then(([imu, gpsLive, wind, status]) => {
+                // IMU data (live)
+                const heel = imu.heel_deg;
+
+                // GPS data - combine live status and parsed CSV
+                const gps = status.gps || {};
+                const sog = gps.speed_knots;
+                const hdg = gps.course_deg;
+                const sats = gpsLive.satellites || gps.satellites || 0;
+                const hdop = gpsLive.hdop || gps.hdop;
+
+                // Wind data (live)
+                const aws = wind.speed_knots;
+                const awa = wind.angle_deg;
+
+                // Calculate true wind
+                const { tws, twa } = calcTrueWind(aws, awa, sog);
+
+                // Update data panels
+                updatePanel('aws', aws !== undefined && aws !== null ? aws.toFixed(1) : '--', aws !== null);
+                updatePanel('awa', awa !== undefined && awa !== null ? formatAngle(awa) : '--', awa !== null);
+                updatePanel('tws', tws !== null ? tws : '--', tws !== null);
+                updatePanel('twa', twa !== null ? formatAngle(twa) : '--', twa !== null);
+                updatePanel('sog', sog !== undefined && sog !== null ? sog.toFixed(1) : '--', sog !== null);
+                updatePanel('hdg', hdg !== undefined && hdg !== null ? Math.round(hdg) + '°' : '--', hdg !== null);
+                updatePanel('heel', heel !== undefined && heel !== null ? Math.round(heel) + '°' : '--', heel !== null);
+
+                // SAT panel: show sats and HDOP together
+                const hdopStr = hdop !== undefined && hdop !== null ? hdop.toFixed(1) : '--';
+                updatePanel('sat', sats + ' H' + hdopStr, sats > 0);
+
+                // Update compass heading text
+                document.getElementById('heading-text').textContent =
+                    hdg !== null && hdg !== undefined ? Math.round(hdg) + '°' : '---';
+
+                // Rotate heading indicator (compass heading on outer ring)
+                if (hdg !== null && hdg !== undefined) {
+                    document.getElementById('heading-indicator').setAttribute(
+                        'transform', 'translate(190, 190) rotate(' + hdg + ')'
+                    );
+                }
+
+                // Rotate wind arrow based on AWA
+                if (awa !== null && awa !== undefined) {
+                    document.getElementById('wind-arrow').setAttribute(
+                        'transform', 'translate(190, 190) rotate(' + awa + ')'
+                    );
+                }
+
+                // Update indicator
+                const now = new Date();
+                document.getElementById('update-indicator').textContent =
+                    now.toLocaleTimeString();
+            }).catch(err => {
+                console.error('Update error:', err);
+                document.getElementById('update-indicator').textContent = 'ERR';
+            });
+        }
+
+        function updatePanel(id, value, hasData) {
+            const panel = document.getElementById('panel-' + id);
+            const valEl = document.getElementById('val-' + id);
+
+            valEl.textContent = value;
+
+            if (hasData) {
+                panel.classList.remove('no-data');
+            } else {
+                panel.classList.add('no-data');
+            }
+        }
+
+        // Initialize
+        try {
+            generateCompassTicks();
+        } catch(e) {
+            console.error('Compass error:', e);
+        }
+
+        // Start updates immediately and 10x per second (10Hz)
+        updateDashboard();
+        setInterval(updateDashboard, 100);
+
+        // Auto-redirect to sailing page on 5" display
+        // (uncomment if desired)
+        // if (window.innerWidth === 800 && window.innerHeight === 480) {
+        //     if (window.location.pathname !== '/sailing') {
+        //         window.location.href = '/sailing';
+        //     }
+        // }
+    </script>
+</body>
+</html>
+"""
+
+
+@app.route('/sailing')
+def sailing_dashboard():
+    """Full-screen sailing dashboard optimized for 5" Newhaven display."""
+    from flask import make_response
+    response = make_response(render_template_string(SAILING_DASHBOARD_HTML, state=system_state))
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/data')

@@ -95,20 +95,9 @@ def run(config, camera_id):
     # Configure for video recording
     video_config = picam2.create_video_configuration(
         main={"size": (width, height), "format": "RGB888"},
-        controls={
-            "FrameRate": fps,
-        }
+        controls={"FrameRate": fps}
     )
     picam2.configure(video_config)
-
-    # Set autofocus mode
-    af_mode = cam_config.get('autofocus', 'continuous')
-    if af_mode == 'continuous':
-        picam2.set_controls({"AfMode": 2})  # Continuous autofocus
-    elif af_mode == 'manual':
-        picam2.set_controls({"AfMode": 0})
-    elif af_mode == 'single':
-        picam2.set_controls({"AfMode": 1})
 
     # Apply rotation if configured
     rotation = cam_config.get('rotation', 0)
@@ -121,8 +110,32 @@ def run(config, camera_id):
     picam2.start()
     logger.info(f"Camera {camera_id} started")
 
+    # Set focus - use manual mode with infinity focus for outdoor sailing
+    # LensPosition: 0.0 = infinity, higher values = closer focus
+    af_mode = cam_config.get('autofocus', 'infinity')
+    if af_mode == 'infinity':
+        # Manual focus at infinity - best for outdoor sailing
+        picam2.set_controls({
+            "AfMode": 0,           # Manual
+            "LensPosition": 0.0,   # Infinity
+        })
+        logger.info("Manual focus set to infinity")
+    elif af_mode == 'auto':
+        # Single autofocus then hold
+        picam2.set_controls({"AfMode": 1, "AfSpeed": 1})
+        time.sleep(0.1)
+        picam2.set_controls({"AfTrigger": 1})
+        logger.info("Autofocus triggered")
+    else:
+        # Continuous autofocus
+        picam2.set_controls({"AfMode": 2, "AfSpeed": 1})
+        logger.info("Continuous autofocus enabled")
+
     # Allow auto-exposure to settle
     time.sleep(2)
+
+    # Track time for any periodic operations
+    last_af_trigger = time.monotonic()
 
     data_dir = get_data_dir(config, camera_id)
     segment_count = 0
