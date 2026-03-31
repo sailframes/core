@@ -403,6 +403,33 @@ def check_service_status(service_name):
         return False
 
 
+def get_camera_status(camera_id):
+    """Read camera status from status file written by camera service."""
+    status_file = Path(f'/tmp/sailframes-camera-{camera_id}-status.json')
+    try:
+        if not status_file.exists():
+            return None
+
+        with open(status_file, 'r') as f:
+            data = json.load(f)
+
+        # Check if data is stale (older than 30 seconds)
+        if data.get('timestamp'):
+            ts = datetime.fromisoformat(data['timestamp'].replace('Z', '+00:00'))
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            if age > 30:
+                return None
+
+        return {
+            'mode': data.get('mode', 'unknown'),
+            'photo_count': data.get('photo_count', 0),
+            'maneuver_count': data.get('maneuver_count', 0),
+            'recording_maneuver': data.get('recording_maneuver', False),
+        }
+    except Exception:
+        return None
+
+
 def get_gps_status():
     """Read current GPS data from status file written by GPS service."""
     status_file = Path('/tmp/sailframes-gps-status.json')
@@ -705,9 +732,17 @@ def monitor_loop(config):
                 'wind': check_service_status('sailframes-wind'),
             }
             # Track cameras separately for individual control
+            # Include mode and counts from camera status files
+            cockpit_running = check_service_status('sailframes-camera-cockpit')
+            sails_running = check_service_status('sailframes-camera-sails')
+            cockpit_status = get_camera_status('cockpit') if cockpit_running else None
+            sails_status = get_camera_status('sails') if sails_running else None
+
             system_state['cameras'] = {
-                'cockpit': check_service_status('sailframes-camera-cockpit'),
-                'sails': check_service_status('sailframes-camera-sails'),
+                'cockpit': cockpit_running,
+                'sails': sails_running,
+                'cockpit_status': cockpit_status,
+                'sails_status': sails_status,
             }
             # Netdata monitoring (optional, can be toggled)
             system_state['netdata'] = check_service_status('netdata')
@@ -1202,11 +1237,29 @@ DASHBOARD_HTML = """
         <h2>Camera Control</h2>
         <div style="display: flex; flex-direction: column; gap: 12px;">
             <!-- Cockpit Camera -->
-            <div style="display: flex; align-items: center; gap: 12px;">
+            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
                 <div style="width: 80px; font-size: 14px; font-weight: 600;">Cockpit</div>
-                <div style="flex: 1; font-size: 14px;">
+                <div style="flex: 1; font-size: 14px; min-width: 150px;">
                     {% if state.cameras.cockpit %}
-                    <span style="color: #4caf50;">● Recording</span>
+                        {% if state.cameras.cockpit_status %}
+                            {% if state.cameras.cockpit_status.mode == 'smart' %}
+                            <span style="color: #4caf50;">● Smart</span>
+                            <span style="color: #78909c; font-size: 12px; margin-left: 8px;">
+                                📷 {{ state.cameras.cockpit_status.photo_count }}
+                                🎬 {{ state.cameras.cockpit_status.maneuver_count }}
+                                {% if state.cameras.cockpit_status.recording_maneuver %}<span style="color: #f44336;">⚡REC</span>{% endif %}
+                            </span>
+                            {% elif state.cameras.cockpit_status.mode == 'continuous' %}
+                            <span style="color: #ff9800;">● Continuous</span>
+                            {% elif state.cameras.cockpit_status.mode == 'photo_only' %}
+                            <span style="color: #8e24aa;">● Photo</span>
+                            <span style="color: #78909c; font-size: 12px; margin-left: 8px;">📷 {{ state.cameras.cockpit_status.photo_count }}</span>
+                            {% else %}
+                            <span style="color: #4caf50;">● Running</span>
+                            {% endif %}
+                        {% else %}
+                        <span style="color: #4caf50;">● Running</span>
+                        {% endif %}
                     {% else %}
                     <span style="color: #78909c;">○ Stopped</span>
                     {% endif %}
@@ -1220,14 +1273,32 @@ DASHBOARD_HTML = """
                     background: {% if state.cameras.cockpit %}#c62828{% else %}#1976d2{% endif %};
                     color: white; border: none; padding: 8px 16px; border-radius: 6px;
                     font-size: 13px; font-weight: 600; cursor: pointer; min-width: 100px;
-                ">{% if state.cameras.cockpit %}Stop{% else %}Record{% endif %}</button>
+                ">{% if state.cameras.cockpit %}Stop{% else %}Start{% endif %}</button>
             </div>
             <!-- Sails Camera -->
-            <div style="display: flex; align-items: center; gap: 12px;">
+            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
                 <div style="width: 80px; font-size: 14px; font-weight: 600;">Sails</div>
-                <div style="flex: 1; font-size: 14px;">
+                <div style="flex: 1; font-size: 14px; min-width: 150px;">
                     {% if state.cameras.sails %}
-                    <span style="color: #4caf50;">● Recording</span>
+                        {% if state.cameras.sails_status %}
+                            {% if state.cameras.sails_status.mode == 'smart' %}
+                            <span style="color: #4caf50;">● Smart</span>
+                            <span style="color: #78909c; font-size: 12px; margin-left: 8px;">
+                                📷 {{ state.cameras.sails_status.photo_count }}
+                                🎬 {{ state.cameras.sails_status.maneuver_count }}
+                                {% if state.cameras.sails_status.recording_maneuver %}<span style="color: #f44336;">⚡REC</span>{% endif %}
+                            </span>
+                            {% elif state.cameras.sails_status.mode == 'continuous' %}
+                            <span style="color: #ff9800;">● Continuous</span>
+                            {% elif state.cameras.sails_status.mode == 'photo_only' %}
+                            <span style="color: #8e24aa;">● Photo</span>
+                            <span style="color: #78909c; font-size: 12px; margin-left: 8px;">📷 {{ state.cameras.sails_status.photo_count }}</span>
+                            {% else %}
+                            <span style="color: #4caf50;">● Running</span>
+                            {% endif %}
+                        {% else %}
+                        <span style="color: #4caf50;">● Running</span>
+                        {% endif %}
                     {% else %}
                     <span style="color: #78909c;">○ Stopped</span>
                     {% endif %}
@@ -1241,7 +1312,7 @@ DASHBOARD_HTML = """
                     background: {% if state.cameras.sails %}#c62828{% else %}#1976d2{% endif %};
                     color: white; border: none; padding: 8px 16px; border-radius: 6px;
                     font-size: 13px; font-weight: 600; cursor: pointer; min-width: 100px;
-                ">{% if state.cameras.sails %}Stop{% else %}Record{% endif %}</button>
+                ">{% if state.cameras.sails %}Stop{% else %}Start{% endif %}</button>
             </div>
         </div>
     </div>
