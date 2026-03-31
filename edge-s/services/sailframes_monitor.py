@@ -3561,17 +3561,17 @@ SAILING_DASHBOARD_HTML = """
             border: 1px solid #2a3a50;
         }
         .data-label {
-            font-size: 12px;
+            font-size: 24px;
             color: #7a8a9a;
             text-transform: uppercase;
             letter-spacing: 1px;
             writing-mode: vertical-rl;
             transform: rotate(180deg);
-            margin-right: 4px;
-            min-width: 18px;
+            margin-right: 8px;
+            min-width: 32px;
         }
         .data-value {
-            font-size: 72px;
+            font-size: 90px;
             font-weight: bold;
             color: #00e0ff;
             line-height: 1;
@@ -3589,7 +3589,7 @@ SAILING_DASHBOARD_HTML = """
         }
         .data-value.sat {
             color: #95e1d3;
-            font-size: 36px;
+            font-size: 48px;
         }
         .data-unit {
             font-size: 12px;
