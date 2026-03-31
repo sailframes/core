@@ -559,7 +559,7 @@ def run_smart_mode(config, camera_id: str):
                     # Switch from circular buffer to file output
                     # This captures the pre-buffer and continues recording
                     file_output = FfmpegOutput(str(current_video_path))
-                    circular.fileoutput(file_output)
+                    circular.fileoutput = file_output
                     circular.start()
 
                     logger.info(f"Recording maneuver to: {current_video_path.name}")
