@@ -205,6 +205,192 @@ def get_disk_usage(mount_point):
         return {'total_gb': 0, 'used_gb': 0, 'free_gb': 0, 'percent': 0}
 
 
+def get_service_resources():
+    """Get CPU and memory usage for SailFrames services."""
+    services = []
+    try:
+        # Get list of sailframes services
+        result = subprocess.run(
+            ['systemctl', 'list-units', 'sailframes*', '--no-pager', '-q', '--plain'],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            unit = line.split()[0] if line.split() else None
+            if not unit:
+                continue
+
+            # Get PID
+            pid_result = subprocess.run(
+                ['systemctl', 'show', '-p', 'MainPID', '--value', unit],
+                capture_output=True, text=True, timeout=2
+            )
+            pid = pid_result.stdout.strip()
+            if not pid or pid == '0':
+                continue
+
+            # Get CPU and memory usage
+            try:
+                proc = psutil.Process(int(pid))
+                cpu = proc.cpu_percent(interval=0.1)
+                mem = proc.memory_percent()
+                name = unit.replace('sailframes-', '').replace('.service', '')
+                services.append({
+                    'name': name,
+                    'unit': unit,
+                    'pid': int(pid),
+                    'cpu': round(cpu, 1),
+                    'mem': round(mem, 1),
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # Sort by CPU usage descending
+        services.sort(key=lambda x: x['cpu'], reverse=True)
+    except Exception as e:
+        logger.debug(f"Service resources error: {e}")
+
+    return services
+
+
+def get_system_power_stats():
+    """Get system power-related stats."""
+    stats = {
+        'temp': None,
+        'voltage': None,
+        'cpu_percent': psutil.cpu_percent(interval=0.1),
+        'estimated_watts': None,
+    }
+
+    try:
+        # Get CPU temperature
+        result = subprocess.run(['vcgencmd', 'measure_temp'], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            # Parse "temp=57.6'C"
+            temp_str = result.stdout.strip().replace("temp=", "").replace("'C", "")
+            stats['temp'] = float(temp_str)
+    except Exception:
+        pass
+
+    try:
+        # Get core voltage
+        result = subprocess.run(['vcgencmd', 'measure_volts'], capture_output=True, text=True, timeout=2)
+        if result.returncode == 0:
+            # Parse "volt=0.9070V"
+            volt_str = result.stdout.strip().replace("volt=", "").replace("V", "")
+            stats['voltage'] = float(volt_str)
+    except Exception:
+        pass
+
+    # Estimate power: Pi 5 idle ~3W, full load ~8W, plus peripherals
+    # Rough estimate based on CPU usage
+    base_power = 3.0  # Idle Pi 5
+    cpu_power = (stats['cpu_percent'] / 100) * 5.0  # Up to 5W more at full CPU
+    peripheral_power = 3.0  # Display, camera, sensors
+    stats['estimated_watts'] = round(base_power + cpu_power + peripheral_power, 1)
+
+    return stats
+
+
+# Power logging state
+_power_log_file = None
+_power_log_date = None
+
+
+def log_power_stats(data_dir):
+    """Log power stats to CSV file for later analysis."""
+    global _power_log_file, _power_log_date
+
+    today = datetime.now().strftime('%Y-%m-%d')
+    power_dir = Path(data_dir) / today / 'power'
+
+    # Rotate file daily
+    if _power_log_date != today or _power_log_file is None:
+        if _power_log_file:
+            try:
+                _power_log_file.close()
+            except Exception:
+                pass
+        power_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filepath = power_dir / f'power_{timestamp}.csv'
+        _power_log_file = open(filepath, 'w', buffering=1)  # Line buffered
+        # Write header
+        _power_log_file.write('timestamp,cpu_temp,dps310_temp,cpu_percent,voltage,est_watts,')
+        _power_log_file.write('camera_cpu,camera_mem,monitor_cpu,monitor_mem,')
+        _power_log_file.write('gps_cpu,gps_mem,imu_cpu,imu_mem,pressure_cpu,pressure_mem,wind_cpu,wind_mem\n')
+        _power_log_date = today
+        logger.info(f"Power logging started: {filepath}")
+
+    try:
+        # Get current stats
+        system = get_system_power_stats()
+        services = get_service_resources()
+        pressure = get_pressure_status() or {}
+
+        # Build service lookup
+        svc_data = {s['name']: s for s in services}
+
+        # Get DPS310 temperature
+        dps310_temp = pressure.get('temperature_c', 0) or 0
+
+        # Format row
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        row = [
+            ts,
+            f"{system.get('temp', 0):.1f}",
+            f"{dps310_temp:.1f}",
+            f"{system.get('cpu_percent', 0):.1f}",
+            f"{system.get('voltage', 0):.3f}",
+            f"{system.get('estimated_watts', 0):.1f}",
+        ]
+
+        # Add per-service stats
+        for name in ['camera-cockpit', 'monitor', 'gps', 'imu', 'pressure', 'wind']:
+            svc = svc_data.get(name, {})
+            row.append(f"{svc.get('cpu', 0):.1f}")
+            row.append(f"{svc.get('mem', 0):.1f}")
+
+        _power_log_file.write(','.join(row) + '\n')
+    except Exception as e:
+        logger.debug(f"Power logging error: {e}")
+
+
+def get_power_log_files(data_dir, date=None):
+    """Get list of power log files for a date."""
+    if date is None:
+        date = datetime.now().strftime('%Y-%m-%d')
+    power_dir = Path(data_dir) / date / 'power'
+    if not power_dir.exists():
+        return []
+    return sorted(power_dir.glob('power_*.csv'), reverse=True)
+
+
+def get_power_history(data_dir, date=None, limit=500):
+    """Read recent power log entries."""
+    files = get_power_log_files(data_dir, date)
+    if not files:
+        return []
+
+    rows = []
+    for filepath in files:
+        try:
+            with open(filepath, 'r') as f:
+                lines = f.readlines()
+                # Skip header, get data rows
+                for line in lines[1:]:
+                    if line.strip():
+                        rows.append(line.strip().split(','))
+        except Exception:
+            pass
+        if len(rows) >= limit:
+            break
+
+    # Return most recent entries (last N rows)
+    return rows[-limit:]
+
+
 def check_service_status(service_name):
     """Check if a systemd service is running."""
     try:
@@ -525,6 +711,9 @@ def monitor_loop(config):
             }
             # Netdata monitoring (optional, can be toggled)
             system_state['netdata'] = check_service_status('netdata')
+
+            # Log power stats every minute for analysis
+            log_power_stats(data_mount)
 
         # Low battery shutdown - only if HAT battery is present (not external power bank)
         # (voltage > 5V means batteries installed, not just HAT with no/dead batteries)
@@ -1169,7 +1358,7 @@ DASHBOARD_HTML = """
     <div class="updated">Updated {{ state.last_update }}</div>
     <div style="text-align: center; margin-top: 12px; display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;">
         <a href="/gps" style="color: #4fc3f7; font-size: 13px;">📍 GPS Details</a>
-        <a href="/battery" style="color: #4fc3f7; font-size: 13px;">🔋 Battery History</a>
+        <a href="/battery" style="color: #4fc3f7; font-size: 13px;">Power Monitor</a>
         <a href="/video" style="color: #4fc3f7; font-size: 13px;">🎬 Video Review</a>
         <a href="/data" style="color: #4fc3f7; font-size: 13px;">🗂️ Data Management</a>
     </div>
@@ -2669,11 +2858,51 @@ def api_finalize_session():
     return jsonify({'error': 'Failed to finalize session'}), 500
 
 
+@app.route('/api/power/status')
+def api_power_status():
+    """Get current power/resource usage for services."""
+    pressure = get_pressure_status() or {}
+    system = get_system_power_stats()
+    system['dps310_temp'] = pressure.get('temperature_c')
+    return jsonify({
+        'services': get_service_resources(),
+        'system': system,
+    })
+
+
+@app.route('/api/power/history')
+def api_power_history():
+    """Get historical power data for charting."""
+    date = request.args.get('date')
+    limit = int(request.args.get('limit', 120))  # Default 2 hours at 1/min
+    config = load_config()
+    data_mount = config['storage']['ssd_mount']
+    rows = get_power_history(data_mount, date, limit)
+
+    # Parse rows into structured data
+    # Header: timestamp,cpu_temp,dps310_temp,cpu_percent,voltage,est_watts,camera_cpu,...
+    history = []
+    for row in rows:
+        if len(row) >= 6:
+            history.append({
+                'timestamp': row[0],
+                'cpu_temp': float(row[1]) if row[1] else 0,
+                'dps310_temp': float(row[2]) if row[2] else 0,
+                'cpu_percent': float(row[3]) if row[3] else 0,
+                'voltage': float(row[4]) if row[4] else 0,
+                'est_watts': float(row[5]) if row[5] else 0,
+                'camera_cpu': float(row[6]) if len(row) > 6 and row[6] else 0,
+                'monitor_cpu': float(row[8]) if len(row) > 8 and row[8] else 0,
+            })
+
+    return jsonify(history)
+
+
 BATTERY_HISTORY_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Battery History - SailFrames</title>
+    <title>Power Monitor - SailFrames</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -2684,188 +2913,229 @@ BATTERY_HISTORY_HTML = """
         a:hover { text-decoration: underline; }
         .nav { margin-bottom: 16px; font-size: 14px; }
         .card { background: #1a2a40; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
-        .session { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #233; }
-        .session:last-child { border-bottom: none; }
-        .session:hover { background: #233; cursor: pointer; }
-        .session-date { font-weight: 600; }
-        .session-stats { font-size: 13px; color: #90a4ae; }
-        .stat { display: inline-block; margin-right: 16px; }
-        .stat-value { color: #fff; font-weight: 600; }
-        .no-data { color: #546e7a; font-style: italic; padding: 20px; text-align: center; }
-        table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #233; }
-        th { color: #78909c; font-weight: 500; }
-        .chart { height: 200px; background: #0d1929; border-radius: 4px; margin: 12px 0; position: relative; }
-        .chart-bar { position: absolute; bottom: 0; background: #4fc3f7; min-width: 2px; }
-        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 12px; }
         .summary-item { text-align: center; }
-        .summary-value { font-size: 24px; font-weight: 700; color: #fff; }
+        .summary-value { font-size: 28px; font-weight: 700; color: #fff; }
         .summary-label { font-size: 12px; color: #78909c; }
-        .tag { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 500; }
-        .tag-core { background: #1565c0; color: #fff; }
-        .tag-desktop { background: #6a1b9a; color: #fff; }
-        .tag-sailframes { background: #00695c; color: #fff; }
-        .tag-added { background: #e65100; color: #fff; }
-        .tag-varies { background: #455a64; color: #fff; }
-        .tag-unknown { background: #37474f; color: #90a4ae; }
+        table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid #233; }
+        th { color: #78909c; font-weight: 500; }
+        .service-name { font-weight: 600; color: #4fc3f7; }
+        .cpu-bar { height: 8px; background: #233; border-radius: 4px; overflow: hidden; min-width: 100px; }
+        .cpu-fill { height: 100%; background: linear-gradient(90deg, #4fc3f7, #ff6b6b); transition: width 0.3s; }
+        .cpu-value { font-weight: 600; min-width: 50px; text-align: right; }
+        .cpu-high { color: #ff6b6b; }
+        .cpu-medium { color: #ffb74d; }
+        .cpu-low { color: #66bb6a; }
+        .mem-value { color: #90a4ae; font-size: 12px; }
+        .update-time { font-size: 12px; color: #546e7a; margin-top: 8px; }
+        .power-source { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 13px; font-weight: 500; }
+        .power-usb { background: #1b5e20; color: #a5d6a7; }
     </style>
 </head>
 <body>
     <div class="nav"><a href="/">← Back to Dashboard</a></div>
-    <h1>🔋 Battery History</h1>
+    <h1>Power Monitor</h1>
+    <p style="margin-bottom: 16px;"><span class="power-source power-usb">USB Power Bank (50Ah)</span></p>
 
-    {% if session %}
-    <h2>{{ session.start_time_ny }} → {{ session.end_time_ny }}</h2>
+    <h2>System Status</h2>
     <div class="card">
         <div class="summary-grid">
             <div class="summary-item">
-                <div class="summary-value">{{ session.duration_minutes }}m</div>
-                <div class="summary-label">Duration</div>
+                <div class="summary-value" id="sys-temp">--</div>
+                <div class="summary-label">CPU Temp</div>
             </div>
             <div class="summary-item">
-                <div class="summary-value">{{ session.percent_used }}%</div>
-                <div class="summary-label">Battery Used</div>
+                <div class="summary-value" id="sys-enclosure-temp">--</div>
+                <div class="summary-label">Enclosure</div>
             </div>
             <div class="summary-item">
-                <div class="summary-value">{{ session.start_percent }}%</div>
-                <div class="summary-label">Start</div>
+                <div class="summary-value" id="sys-cpu">--</div>
+                <div class="summary-label">CPU %</div>
             </div>
             <div class="summary-item">
-                <div class="summary-value">{{ session.end_percent }}%</div>
-                <div class="summary-label">End</div>
+                <div class="summary-value" id="sys-voltage">--</div>
+                <div class="summary-label">Core V</div>
             </div>
             <div class="summary-item">
-                <div class="summary-value">{{ session.total_power_mwh }}</div>
-                <div class="summary-label">mWh Used</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{{ session.max_current_ma }}</div>
-                <div class="summary-label">Peak mA</div>
+                <div class="summary-value" id="sys-watts">--</div>
+                <div class="summary-label">Est. Watts</div>
             </div>
         </div>
     </div>
 
-    {% if top_processes %}
-    <h2>Top Power Consumers</h2>
+    <h2>Service Resource Usage</h2>
     <div class="card">
         <table>
-            <tr><th>Process</th><th>Type</th><th>Description</th><th>Avg CPU %</th><th>Total CPU</th></tr>
-            {% for proc in top_processes %}
-            <tr>
-                <td><strong>{{ proc.name }}</strong></td>
-                <td><span class="tag tag-{{ proc.description[1]|lower|replace(' ', '') }}">{{ proc.description[1] }}</span></td>
-                <td style="font-size: 12px; color: #90a4ae;">{{ proc.description[2] }}</td>
-                <td>{{ proc.avg_cpu }}%</td>
-                <td>{{ proc.total_cpu|round(1) }}</td>
-            </tr>
-            {% endfor %}
+            <thead>
+                <tr><th>Service</th><th>CPU</th><th style="width: 120px;"></th><th>Memory</th></tr>
+            </thead>
+            <tbody id="services-table">
+                <tr><td colspan="4" style="text-align: center; color: #546e7a;">Loading...</td></tr>
+            </tbody>
         </table>
+        <div class="update-time">Updates every 2 seconds · <span id="last-update">--</span></div>
     </div>
-    <div style="margin-top: 12px; font-size: 12px; color: #78909c;">
-        <strong>Type Legend:</strong>
-        <span class="tag tag-core">Core</span> = Essential system service
-        <span class="tag tag-desktop">Desktop</span> = GUI/Desktop environment
-        <span class="tag tag-sailframes">SailFrames</span> = Our services
-        <span class="tag tag-added">Added</span> = Optional/installable
-    </div>
-    {% endif %}
 
-    <p style="margin-top: 12px;"><a href="/battery">← All Sessions</a></p>
-
-    {% else %}
-    {% if active_session %}
-    {% if active_session.is_stale %}
-    <h2 style="color: #ffb74d;">⚠ Interrupted Session</h2>
-    <div class="card" style="border: 2px solid #ffb74d;">
-    {% else %}
-    <h2 style="color: #66bb6a;">⚡ Active Session (On Battery)</h2>
-    <div class="card" style="border: 2px solid #66bb6a;">
-    {% endif %}
-        <div class="summary-grid">
-            <div class="summary-item">
-                <div class="summary-value">{{ active_session.duration_minutes }}m</div>
-                <div class="summary-label">Duration</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{{ active_session.percent_used }}%</div>
-                <div class="summary-label">Battery Used</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{{ active_session.start_percent|round|int }}%</div>
-                <div class="summary-label">Start</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{{ active_session.current_percent|round|int }}%</div>
-                <div class="summary-label">End</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{{ active_session.current_ma|round|int }}</div>
-                <div class="summary-label">mA Draw</div>
-            </div>
-            <div class="summary-item">
-                <div class="summary-value">{{ active_session.sample_count }}</div>
-                <div class="summary-label">Samples</div>
-            </div>
-        </div>
-        {% if active_session.is_stale %}
-        <div style="margin-top: 12px; display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-size: 12px; color: #90a4ae;">
-                {{ active_session.start_time_ny }} → {{ active_session.end_time_ny }} · Session ended by shutdown/restart
-            </span>
-            <button onclick="finalizeSession('{{ active_session.session_id }}')"
-                    style="background: #1976d2; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 13px;">
-                Save to History
-            </button>
-        </div>
-        {% else %}
-        <div style="margin-top: 12px; font-size: 12px; color: #90a4ae;">
-            Started: {{ active_session.start_time_ny }} · Session will be saved when USB-C is connected
-        </div>
-        {% endif %}
-    </div>
-    {% endif %}
-
-    <h2>Completed Sessions</h2>
+    <h2>Power History <span style="font-size: 12px; color: #546e7a;">(logged every minute)</span></h2>
     <div class="card">
-        {% if sessions %}
-        {% for s in sessions %}
-        <div class="session" onclick="location.href='/battery/{{ s.session_id }}'">
-            <div>
-                <div class="session-date">{{ s.start_time_ny }}</div>
-                <div class="session-stats">
-                    <span class="stat"><span class="stat-value">{{ s.duration_minutes }}m</span> duration</span>
-                    <span class="stat"><span class="stat-value">{{ s.percent_used }}%</span> used</span>
-                </div>
-            </div>
-            <div style="text-align: right;">
-                <div style="font-size: 18px; font-weight: 600;">{{ s.start_percent }}% → {{ s.end_percent }}%</div>
-                <div class="session-stats">{{ s.total_power_mwh }} mWh</div>
-            </div>
+        <div style="display: flex; gap: 12px; margin-bottom: 8px; font-size: 11px; flex-wrap: wrap;">
+            <span><span style="color: #ff6b6b;">■</span> Est. Watts</span>
+            <span><span style="color: #4fc3f7;">■</span> CPU %</span>
+            <span><span style="color: #ffb74d;">■</span> CPU Temp</span>
+            <span><span style="color: #e040fb;">■</span> Enclosure Temp</span>
+            <span><span style="color: #66bb6a;">■</span> Camera CPU</span>
         </div>
-        {% endfor %}
-        {% else %}
-        <div class="no-data">No completed battery sessions yet.<br>Sessions are saved when USB-C is reconnected.</div>
-        {% endif %}
+        <canvas id="history-chart" width="800" height="200" style="width: 100%; height: 200px; background: #0d1929; border-radius: 4px;"></canvas>
+        <div id="history-status" style="font-size: 12px; color: #546e7a; margin-top: 8px;">Loading history...</div>
     </div>
-    {% endif %}
+
+    <h2>Power Tips</h2>
+    <div class="card" style="font-size: 13px; color: #90a4ae;">
+        <p><strong>Camera</strong> uses most power (~2W). Stop recording when not needed.</p>
+        <p style="margin-top: 8px;"><strong>Display</strong> at 1100 nits draws ~2.8W. PWM dimming available via GPIO18.</p>
+        <p style="margin-top: 8px;"><strong>50Ah @ 5V = 250Wh</strong> → ~25-30 hours at typical 8-10W draw.</p>
+    </div>
 
     <script>
-    function finalizeSession(sessionId) {
-        fetch('/api/battery/finalize', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({session_id: sessionId})
-        })
-        .then(r => r.json())
-        .then(data => {
-            if (data.success) {
-                location.reload();
-            } else {
-                alert('Error: ' + (data.error || 'Unknown error'));
-            }
-        })
-        .catch(e => alert('Error: ' + e));
+    let historyData = [];
+
+    function drawChart() {
+        const canvas = document.getElementById('history-chart');
+        const ctx = canvas.getContext('2d');
+        const w = canvas.width;
+        const h = canvas.height;
+
+        // Clear
+        ctx.fillStyle = '#0d1929';
+        ctx.fillRect(0, 0, w, h);
+
+        if (historyData.length < 2) {
+            ctx.fillStyle = '#546e7a';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Collecting data... (logged every minute)', w/2, h/2);
+            return;
+        }
+
+        const padding = 40;
+        const chartW = w - padding * 2;
+        const chartH = h - padding;
+
+        // Draw grid lines
+        ctx.strokeStyle = '#233';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i++) {
+            const y = padding/2 + (chartH / 4) * i;
+            ctx.beginPath();
+            ctx.moveTo(padding, y);
+            ctx.lineTo(w - padding/2, y);
+            ctx.stroke();
+        }
+
+        // Y-axis labels (0-100 for percentage scale)
+        ctx.fillStyle = '#78909c';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'right';
+        for (let i = 0; i <= 4; i++) {
+            const val = 100 - i * 25;
+            const y = padding/2 + (chartH / 4) * i + 4;
+            ctx.fillText(val.toString(), padding - 5, y);
+        }
+
+        // Draw lines
+        const drawLine = (data, color, key, scale = 1) => {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            data.forEach((d, i) => {
+                const x = padding + (i / (data.length - 1)) * chartW;
+                const val = Math.min((d[key] || 0) * scale, 100);
+                const y = padding/2 + chartH - (val / 100) * chartH;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        };
+
+        drawLine(historyData, '#ff6b6b', 'est_watts', 10);  // Scale watts to %
+        drawLine(historyData, '#4fc3f7', 'cpu_percent', 1);
+        drawLine(historyData, '#ffb74d', 'cpu_temp', 1);      // CPU temp 0-100 scale
+        drawLine(historyData, '#e040fb', 'dps310_temp', 1);   // Enclosure temp
+        drawLine(historyData, '#66bb6a', 'camera_cpu', 1);
+
+        // Time labels
+        if (historyData.length > 0) {
+            ctx.fillStyle = '#546e7a';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            const first = historyData[0].timestamp.split(' ')[1] || '';
+            const last = historyData[historyData.length-1].timestamp.split(' ')[1] || '';
+            ctx.fillText(first.substring(0,5), padding, h - 5);
+            ctx.fillText(last.substring(0,5), w - padding, h - 5);
+        }
     }
+
+    function loadHistory() {
+        fetch('/api/power/history?limit=120')
+            .then(r => r.json())
+            .then(data => {
+                historyData = data;
+                const status = document.getElementById('history-status');
+                if (data.length > 0) {
+                    const first = data[0].timestamp;
+                    const last = data[data.length-1].timestamp;
+                    status.textContent = `${data.length} samples · ${first} to ${last}`;
+                } else {
+                    status.textContent = 'No history yet. Data logged every minute.';
+                }
+                drawChart();
+            })
+            .catch(e => {
+                document.getElementById('history-status').textContent = 'Error loading history';
+            });
+    }
+
+    function updatePower() {
+        fetch('/api/power/status')
+            .then(r => r.json())
+            .then(data => {
+                // System stats
+                const sys = data.system || {};
+                document.getElementById('sys-temp').textContent = sys.temp ? sys.temp.toFixed(1) + '°C' : '--';
+                document.getElementById('sys-enclosure-temp').textContent = sys.dps310_temp ? sys.dps310_temp.toFixed(1) + '°C' : '--';
+                document.getElementById('sys-cpu').textContent = sys.cpu_percent ? sys.cpu_percent.toFixed(0) + '%' : '--';
+                document.getElementById('sys-voltage').textContent = sys.voltage ? sys.voltage.toFixed(2) + 'V' : '--';
+                document.getElementById('sys-watts').textContent = sys.estimated_watts ? '~' + sys.estimated_watts + 'W' : '--';
+
+                // Services table
+                const services = data.services || [];
+                const tbody = document.getElementById('services-table');
+                if (services.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: #546e7a;">No services running</td></tr>';
+                } else {
+                    tbody.innerHTML = services.map(s => {
+                        const cpuClass = s.cpu > 50 ? 'cpu-high' : s.cpu > 20 ? 'cpu-medium' : 'cpu-low';
+                        const cpuWidth = Math.min(s.cpu, 100);
+                        return `<tr>
+                            <td class="service-name">${s.name}</td>
+                            <td class="cpu-value ${cpuClass}">${s.cpu.toFixed(1)}%</td>
+                            <td><div class="cpu-bar"><div class="cpu-fill" style="width: ${cpuWidth}%"></div></div></td>
+                            <td class="mem-value">${s.mem.toFixed(1)}%</td>
+                        </tr>`;
+                    }).join('');
+                }
+
+                document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+            })
+            .catch(e => console.error('Power update error:', e));
+    }
+
+    updatePower();
+    setInterval(updatePower, 2000);
+
+    loadHistory();
+    setInterval(loadHistory, 60000);  // Refresh history every minute
     </script>
 </body>
 </html>
@@ -2874,10 +3144,8 @@ BATTERY_HISTORY_HTML = """
 
 @app.route('/battery')
 def battery_history():
-    """Battery history dashboard."""
-    sessions = get_battery_sessions()
-    active = get_active_session()
-    return render_template_string(BATTERY_HISTORY_HTML, sessions=sessions, session=None, top_processes=None, active_session=active)
+    """Power monitoring dashboard."""
+    return render_template_string(BATTERY_HISTORY_HTML)
 
 
 @app.route('/battery/<session_id>')

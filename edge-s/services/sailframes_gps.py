@@ -471,9 +471,10 @@ def run(config):
             ubx_file.write(raw_data)
             ubx_bytes_written += len(raw_data)
 
-            # Flush UBX file periodically
+            # Flush UBX file periodically and sync to disk for crash safety
             if ubx_bytes_written % 10000 < len(raw_data):
                 ubx_file.flush()
+                os.fsync(ubx_file.fileno())
 
             # Extract NMEA lines from buffer
             nmea_buffer += raw_data
