@@ -3974,6 +3974,21 @@ SAILING_DASHBOARD_HTML = """
             color: #95e1d3;
             font-size: 48px;
         }
+        .data-value.mag {
+            color: #b39ddb;
+        }
+        .sat-section {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            width: 360px;
+        }
+        .sat-panel {
+            padding: 8px 15px;
+        }
+        .sat-panel .data-value {
+            font-size: 42px;
+        }
         .data-unit {
             font-size: 12px;
             color: #5a6a7a;
@@ -4078,9 +4093,9 @@ SAILING_DASHBOARD_HTML = """
                     <!-- Center background -->
                     <circle cx="190" cy="190" r="60" class="compass-center"/>
 
-                    <!-- Heading value in center -->
+                    <!-- COG value in center -->
                     <text id="heading-text" x="190" y="190" class="heading-text">---</text>
-                    <text x="190" y="210" class="center-label">HDG</text>
+                    <text x="190" y="210" class="center-label">COG</text>
 
                     <!-- Boat icon (always pointing up) -->
                     <g id="boat-icon" transform="translate(190, 190)">
@@ -4122,18 +4137,25 @@ SAILING_DASHBOARD_HTML = """
                 <div class="data-label">SOG</div>
                 <div class="data-value speed" id="val-sog">--</div>
             </div>
-            <div class="data-panel" id="panel-hdg">
-                <div class="data-label">HDG</div>
-                <div class="data-value" id="val-hdg">--</div>
+            <div class="data-panel" id="panel-cog">
+                <div class="data-label">COG</div>
+                <div class="data-value" id="val-cog">--</div>
             </div>
             <div class="data-panel" id="panel-heel">
                 <div class="data-label">HEEL</div>
                 <div class="data-value heel" id="val-heel">--</div>
             </div>
-            <div class="data-panel" id="panel-sat">
-                <div class="data-label">SAT</div>
-                <div class="data-value sat" id="val-sat">--</div>
+            <div class="data-panel" id="panel-mag">
+                <div class="data-label">MAG</div>
+                <div class="data-value mag" id="val-mag">--</div>
             </div>
+        </div>
+    </div>
+    <!-- Satellite info below compass -->
+    <div class="sat-section">
+        <div class="data-panel sat-panel" id="panel-sat">
+            <div class="data-label">SAT</div>
+            <div class="data-value sat" id="val-sat">--</div>
         </div>
     </div>
     <div id="update-indicator" style="position:absolute;bottom:5px;right:10px;font-size:10px;color:#3a4a5a"></div>
@@ -4204,11 +4226,12 @@ SAILING_DASHBOARD_HTML = """
             ]).then(([imu, gpsLive, wind, status]) => {
                 // IMU data (live)
                 const heel = imu.heel_deg;
+                const mag = imu.heading_deg;  // Magnetometer heading from BNO085
 
                 // GPS data - combine live status and parsed CSV
                 const gps = status.gps || {};
                 const sog = gps.speed_knots;
-                const hdg = gps.course_deg;
+                const cog = gps.course_deg;  // Course Over Ground from GPS
                 const satsInUse = gpsLive.satellites || gps.satellites || 0;
                 const hdop = gpsLive.hdop || gps.hdop;
 
@@ -4234,21 +4257,22 @@ SAILING_DASHBOARD_HTML = """
                 updatePanel('tws', tws !== null ? tws : '--', tws !== null);
                 updatePanel('twa', twa !== null ? formatAngle(twa) : '--', twa !== null);
                 updatePanel('sog', sog !== undefined && sog !== null ? sog.toFixed(1) : '--', sog !== null);
-                updatePanel('hdg', hdg !== undefined && hdg !== null ? Math.round(hdg) + '°' : '--', hdg !== null);
+                updatePanel('cog', cog !== undefined && cog !== null ? Math.round(cog) + '°' : '--', cog !== null);
                 updatePanel('heel', heel !== undefined && heel !== null ? Math.round(heel) + '°' : '--', heel !== null);
+                updatePanel('mag', mag !== undefined && mag !== null ? Math.round(mag) + '°' : '--', mag !== null);
 
                 // SAT panel: show fix/view and HDOP
                 const hdopStr = hdop !== undefined && hdop !== null ? hdop.toFixed(1) : '--';
                 updatePanel('sat', satsInUse + '/' + satsInView + ' H' + hdopStr, satsInUse > 0);
 
-                // Update compass heading text
+                // Update compass heading text (show COG from GPS)
                 document.getElementById('heading-text').textContent =
-                    hdg !== null && hdg !== undefined ? Math.round(hdg) + '°' : '---';
+                    cog !== null && cog !== undefined ? Math.round(cog) + '°' : '---';
 
-                // Rotate heading indicator (compass heading on outer ring)
-                if (hdg !== null && hdg !== undefined) {
+                // Rotate heading indicator (COG on outer ring)
+                if (cog !== null && cog !== undefined) {
                     document.getElementById('heading-indicator').setAttribute(
-                        'transform', 'translate(190, 190) rotate(' + hdg + ')'
+                        'transform', 'translate(190, 190) rotate(' + cog + ')'
                     );
                 }
 
