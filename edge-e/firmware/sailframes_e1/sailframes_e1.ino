@@ -142,6 +142,7 @@ bool otaInProgress = false;
 char connectedSSID[64] = "";
 int uploadCount = 0, uploadTotal = 0;
 int satsInView = 0;
+unsigned long lastValidGPS = 0;  // Track when we last had a valid fix
 
 // IMU calibration offsets (stored on SD card)
 float imuHeelOffset = 0.0;
@@ -489,6 +490,7 @@ void parseNMEA(const char* s) {
       if (fq >= 0 && fq <= 5) {
         gps.fix_quality = fq;
         gps.valid = fq > 0;
+        if (gps.valid) lastValidGPS = millis();
       }
     }
     if (getField(s, 7, f, sizeof(f))) {
@@ -1023,68 +1025,66 @@ void updateDisplay() {
 
   u8g2.clearBuffer();
 
-  // Row 0: Warnings or status (small font)
-  u8g2.setFont(u8g2_font_6x10_tr);
-
-  // Check for problems
+  // Check for problems first
   bool hasWarning = false;
   if (!sdOK) {
     u8g2.setFont(u8g2_font_helvB12_tr);
-    u8g2.drawStr(0, 12, "NO SD CARD!");
+    u8g2.drawStr(21, 16, "NO SD CARD!");
     hasWarning = true;
-  } else if (!gps.valid && millis() > 60000) {
+  } else if (lastValidGPS == 0 && millis() > 120000) {
     u8g2.setFont(u8g2_font_helvB12_tr);
-    u8g2.drawStr(0, 12, "NO GPS FIX!");
+    u8g2.drawStr(21, 16, "NO GPS FIX!");
+    hasWarning = true;
+  } else if (lastValidGPS > 0 && millis() - lastValidGPS > 60000) {
+    u8g2.setFont(u8g2_font_helvB12_tr);
+    u8g2.drawStr(21, 16, "GPS LOST!");
     hasWarning = true;
   } else if (!imuOK) {
     u8g2.setFont(u8g2_font_helvB12_tr);
-    u8g2.drawStr(0, 12, "NO IMU!");
+    u8g2.drawStr(21, 16, "NO IMU!");
     hasWarning = true;
-  } else if (uploading) {
-    u8g2.setFont(u8g2_font_6x10_tr);
-    snprintf(buf, sizeof(buf), "Upload %d/%d", uploadCount, uploadTotal);
-    u8g2.drawStr(0, 8, buf);
-  } else {
-    // Normal status
-    u8g2.setFont(u8g2_font_6x10_tr);
-    snprintf(buf, sizeof(buf), "%s %s", config.boat_id, wifiConnected ? "WiFi" : "");
-    u8g2.drawStr(0, 8, buf);
   }
 
-  // Row 1: SOG and COG (large font)
-  u8g2.setFont(u8g2_font_helvB14_tr);
-  snprintf(buf, sizeof(buf), "%.1f", gps.speed_kts);
-  u8g2.drawStr(0, 28, buf);
+  // Vertical labels (rotated 90° CCW) - tiny font
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.setFontDirection(3);  // 270° = 90° counter-clockwise
+  u8g2.drawStr(6, 26, "SOG");
+  u8g2.drawStr(70, 26, "COG");
+  u8g2.drawStr(6, 52, "HEEL");
+  u8g2.drawStr(70, 52, "MAG");
+  u8g2.setFontDirection(0);  // Reset to normal
+
+  // Row 1: SOG and COG (larger font)
+  u8g2.setFont(u8g2_font_helvB18_tr);
+  if (!hasWarning) {
+    snprintf(buf, sizeof(buf), "%.1f", gps.speed_kts);
+    u8g2.drawStr(9, 24, buf);
+  }
   snprintf(buf, sizeof(buf), "%03d", (int)gps.course);
-  u8g2.drawStr(75, 28, buf);
-  // Labels
-  u8g2.setFont(u8g2_font_6x10_tr);
-  u8g2.drawStr(45, 20, "kt");
-  u8g2.drawStr(108, 20, "COG");
+  u8g2.drawStr(73, 24, buf);
 
-  // Row 2: Heel and Magnetic heading (large font)
-  u8g2.setFont(u8g2_font_helvB14_tr);
+  // Row 2: Heel and Magnetic heading (larger font)
+  u8g2.setFont(u8g2_font_helvB18_tr);
   snprintf(buf, sizeof(buf), "%+.0f", imu.heel);
-  u8g2.drawStr(0, 46, buf);
+  u8g2.drawStr(9, 50, buf);
   snprintf(buf, sizeof(buf), "%03d", (int)imu.heading);
-  u8g2.drawStr(75, 46, buf);
-  // Labels
-  u8g2.setFont(u8g2_font_6x10_tr);
-  u8g2.drawStr(35, 38, "HEEL");
-  u8g2.drawStr(108, 38, "MAG");
+  u8g2.drawStr(73, 50, buf);
 
-  // Row 3: Pitch + satellites + HDOP (small font)
-  u8g2.setFont(u8g2_font_6x10_tr);
+  // Row 3: Status + Pitch + satellites + HDOP (small font)
+  u8g2.setFont(u8g2_font_5x7_tr);
   int dispSats = (gps.satellites >= 0 && gps.satellites <= 50) ? gps.satellites : 0;
-  int dispView = satsInView;
-  if (dispView < dispSats) dispView = dispSats;
-  if (dispView > 60) dispView = dispSats;
+  int dispView = (satsInView >= 0 && satsInView <= 60) ? satsInView : 0;
+  if (dispView < dispSats) dispView = dispSats;  // In view can't be less than used
   float dispHdop = (gps.hdop >= 0 && gps.hdop < 50) ? gps.hdop : 99.9;
   const char* fixStr = "---";
   if (gps.fix_quality == 1) fixStr = "GPS";
-  else if (gps.fix_quality == 2) fixStr = "DIF";
-  snprintf(buf, sizeof(buf), "P%+.0f %d/%d %s H%.1f", imu.pitch, dispSats, dispView, fixStr, dispHdop);
-  u8g2.drawStr(0, 64, buf);
+  else if (gps.fix_quality == 2) fixStr = "SBAS";
+
+  // Status + data on bottom row
+  const char* wifiStr = uploading ? "UP" : (wifiConnected ? "W" : "");
+  snprintf(buf, sizeof(buf), "%s%s P%+.0f %d/%d %s H%.1f",
+    config.boat_id, wifiStr, imu.pitch, dispSats, dispView, fixStr, dispHdop);
+  u8g2.drawStr(1, 64, buf);
 
   u8g2.sendBuffer();
 }
