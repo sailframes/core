@@ -38,16 +38,39 @@ def lambda_handler(event, context):
 
 
 def process_file(bucket: str, key: str):
-    """Process a single CSV file."""
-    # Parse path: raw/{device_id}/{date}/{sensor_type}/{filename}.csv
+    """Process a single CSV file.
+
+    Supports two path structures:
+    - S1 format: raw/{device_id}/{date}/{sensor_type}/{filename}.csv (5+ parts)
+    - E1 format: raw/{device_id}/{date}/{filename}.csv (4 parts, sensor in filename)
+    """
     parts = key.split('/')
-    if len(parts) < 5:
+
+    if len(parts) >= 5:
+        # S1 format: raw/{device}/{date}/{sensor}/{file}.csv
+        device_id = parts[1]
+        date = parts[2]
+        sensor_type = parts[3]
+    elif len(parts) == 4:
+        # E1 format: raw/{device}/{date}/{file}.csv
+        device_id = parts[1]
+        date = parts[2]
+        filename = parts[3]
+        # Extract sensor type from filename suffix (e.g., E1_20260401_120000_nav.csv)
+        if '_nav.csv' in filename:
+            sensor_type = 'gps'
+        elif '_imu.csv' in filename:
+            sensor_type = 'imu'
+        elif '_pressure.csv' in filename or '_baro.csv' in filename:
+            sensor_type = 'pressure'
+        elif '_wind.csv' in filename:
+            sensor_type = 'wind'
+        else:
+            logger.warning(f"Unknown E1 file type: {filename}")
+            return
+    else:
         logger.warning(f"Invalid path structure: {key}")
         return
-
-    device_id = parts[1]
-    date = parts[2]
-    sensor_type = parts[3]
 
     # Download CSV
     response = s3.get_object(Bucket=bucket, Key=key)
