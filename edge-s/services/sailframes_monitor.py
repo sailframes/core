@@ -4002,17 +4002,18 @@ SAILING_DASHBOARD_HTML = """
             align-items: baseline;
         }
         .sat-panel .sat-count {
-            font-size: 28px;
+            font-size: 38px;
             font-weight: bold;
             color: #95e1d3;
         }
         .sat-panel .sat-fix {
-            font-size: 16px;
+            font-size: 22px;
             color: #4fc3f7;
             font-weight: 600;
         }
         .sat-panel .sat-hdop {
-            font-size: 14px;
+            font-size: 28px;
+            font-weight: bold;
             color: #7a8a9a;
         }
         .data-unit {
