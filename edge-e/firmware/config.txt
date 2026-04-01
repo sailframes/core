@@ -1,10 +1,20 @@
 # SailFrames E1 Configuration
-# Place this file as config.txt in the root of the SD card
-#
-# Lines starting with # are ignored
+# Place this file on the SD card root as config.txt
 
-device_id=E1
-wifi_ssid=YachtClubWiFi
-wifi_pass=sailing2026
-upload_url=https://sailframes-fleet-data.s3.amazonaws.com
-api_key=your-api-key-here
+# Boat identifier (shown on OLED, used in filenames)
+boat_id=E1
+
+# GPS fix rate in Hz (1, 5, or 10)
+gps_rate_hz=10
+
+# Multiple WiFi networks (tries in order until one connects)
+# Format: wifi1_ssid, wifi1_pass, wifi2_ssid, wifi2_pass, etc.
+
+wifi1_ssid=Home-IOT
+wifi1_pass=Sidney2001
+
+wifi2_ssid=paul2
+wifi2_pass=hellowifi
+
+# AWS S3 upload endpoint (API Gateway URL)
+upload_url=https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/prod/upload
