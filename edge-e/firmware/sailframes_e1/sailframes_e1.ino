@@ -1048,20 +1048,22 @@ void updateDisplay() {
   // Vertical labels (rotated 90° CCW) - tiny font
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.setFontDirection(3);  // 270° = 90° counter-clockwise
-  u8g2.drawStr(6, 26, "SOG");
-  u8g2.drawStr(70, 26, "COG");
+  if (!hasWarning) {
+    u8g2.drawStr(6, 26, "SOG");
+    u8g2.drawStr(70, 26, "COG");
+  }
   u8g2.drawStr(6, 52, "HEEL");
   u8g2.drawStr(70, 52, "MAG");
   u8g2.setFontDirection(0);  // Reset to normal
 
-  // Row 1: SOG and COG (larger font)
+  // Row 1: SOG and COG (larger font) - skip if warning shown
   u8g2.setFont(u8g2_font_helvB18_tr);
   if (!hasWarning) {
     snprintf(buf, sizeof(buf), "%.1f", gps.speed_kts);
     u8g2.drawStr(9, 24, buf);
+    snprintf(buf, sizeof(buf), "%03d", (int)gps.course);
+    u8g2.drawStr(73, 24, buf);
   }
-  snprintf(buf, sizeof(buf), "%03d", (int)gps.course);
-  u8g2.drawStr(73, 24, buf);
 
   // Row 2: Heel and Magnetic heading (larger font)
   u8g2.setFont(u8g2_font_helvB18_tr);
