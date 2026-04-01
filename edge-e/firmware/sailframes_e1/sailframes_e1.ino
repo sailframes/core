@@ -499,7 +499,7 @@ void parseNMEA(const char* s) {
     }
     if (getField(s, 8, f, sizeof(f))) {
       float hdop = atof(f);
-      if (hdop >= 0 && hdop < 50) gps.hdop = hdop;
+      if (hdop > 0.1 && hdop < 50) gps.hdop = hdop;  // HDOP is never 0 or near-zero
     }
     if (getField(s, 9, f, sizeof(f))) gps.alt = atof(f);
     gps.newGGA = true;
@@ -1571,8 +1571,9 @@ void processCommand(String cmd, bool fromTelnet) {
   } else if (cmd == "gps") {
     tprintln("=== GPS Details ===");
     tprintf("Fix: %s (quality %d)\n", gps.valid ? "YES" : "NO", gps.fix_quality);
-    tprintf("Satellites: %d used / %d in view\n", gps.satellites, satsInView);
-    tprintf("HDOP: %.1f\n", gps.hdop);
+    int dispView = (satsInView < gps.satellites) ? gps.satellites : satsInView;
+    tprintf("Satellites: %d used / %d in view\n", gps.satellites, dispView);
+    tprintf("HDOP: %.1f%s\n", gps.hdop, gps.hdop > 50 ? " (no data)" : "");
     tprintf("Position: %.8f, %.8f\n", gps.lat, gps.lon);
     tprintf("Altitude: %.1f m\n", gps.alt);
     tprintf("Speed: %.2f kt\n", gps.speed_kts);
