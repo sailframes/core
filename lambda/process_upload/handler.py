@@ -76,11 +76,11 @@ def process_file(bucket: str, key: str):
     response = s3.get_object(Bucket=bucket, Key=key)
     csv_content = response['Body'].read().decode('utf-8')
 
-    # Parse and downsample
+    # Parse and downsample (pass date for E1 timestamp generation)
     if sensor_type == 'gps':
-        data = process_gps(csv_content)
+        data = process_gps(csv_content, date)
     elif sensor_type == 'imu':
-        data = process_imu(csv_content)
+        data = process_imu(csv_content, date)
     elif sensor_type == 'pressure':
         data = process_pressure(csv_content)
     elif sensor_type == 'wind':
@@ -103,67 +103,143 @@ def process_file(bucket: str, key: str):
     update_manifest(bucket, device_id, date, sensor_type, data)
 
 
-def process_gps(csv_content: str) -> list:
-    """Downsample GPS from 10Hz to 1Hz, keeping max speed per second."""
+def process_gps(csv_content: str, date: str = None) -> list:
+    """Downsample GPS from 10Hz to 1Hz, keeping max speed per second.
+
+    Supports two CSV formats:
+    - S1: utc_time,latitude,longitude,speed_knots,course_deg,fix_quality,satellites
+    - E1: ms,utc,lat,lon,alt,sog,cog,sat,hdop,fix
+
+    Args:
+        csv_content: CSV data as string
+        date: Date string (YYYY-MM-DD) for E1 timestamp generation
+    """
     from datetime import timedelta
 
-    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
-    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
-
     reader = csv.DictReader(StringIO(csv_content))
+    rows = list(reader)
+    if not rows:
+        return []
 
-    # Group by second with time correction
+    # Detect format based on column names
+    first_row = rows[0]
+    is_e1_format = 'utc' in first_row and 'lat' in first_row
+
+    # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
+    TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
+
+    # Group by second
     by_second = defaultdict(list)
-    for row in reader:
-        ts = row.get('utc_time', '')
-        if not ts:
-            continue
-        try:
-            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
-            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
-            second = dt_corrected.strftime('%Y-%m-%dT%H:%M:%S')
-        except ValueError:
-            second = ts[:19]
+    for row in rows:
+        if is_e1_format:
+            # E1 format: utc is HHMMSS.mmm (e.g., "123756.100")
+            utc_raw = row.get('utc', '')
+            if not utc_raw:
+                continue
+            try:
+                # Parse HHMMSS.mmm format
+                utc_float = float(utc_raw)
+                hours = int(utc_float // 10000)
+                minutes = int((utc_float % 10000) // 100)
+                seconds = int(utc_float % 100)
+                # Combine date from path with time from CSV
+                second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
+            except ValueError:
+                continue
+        else:
+            # S1 format: utc_time is ISO timestamp
+            ts = row.get('utc_time', '')
+            if not ts:
+                continue
+            try:
+                dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+                dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+                second = dt_corrected.strftime('%Y-%m-%dT%H:%M:%S')
+            except ValueError:
+                second = ts[:19]
+
         by_second[second].append(row)
 
     # Take sample with max speed per second
     result = []
     for second, samples in sorted(by_second.items()):
-        best = max(samples, key=lambda r: float(r.get('speed_knots', 0) or 0))
-        result.append({
-            't': second + 'Z',
-            'lat': float(best.get('latitude', 0) or 0),
-            'lon': float(best.get('longitude', 0) or 0),
-            'speed_kn': round(float(best.get('speed_knots', 0) or 0), 2),
-            'course': round(float(best.get('course_deg', 0) or 0), 1),
-            'fix': int(best.get('fix_quality', 0) or 0),
-            'sats': int(best.get('satellites', 0) or 0)
-        })
+        if is_e1_format:
+            best = max(samples, key=lambda r: float(r.get('sog', 0) or 0))
+            result.append({
+                't': second + 'Z',
+                'lat': float(best.get('lat', 0) or 0),
+                'lon': float(best.get('lon', 0) or 0),
+                'speed_kn': round(float(best.get('sog', 0) or 0), 2),
+                'course': round(float(best.get('cog', 0) or 0), 1),
+                'fix': int(best.get('fix', 0) or 0),
+                'sats': int(best.get('sat', 0) or 0)
+            })
+        else:
+            best = max(samples, key=lambda r: float(r.get('speed_knots', 0) or 0))
+            result.append({
+                't': second + 'Z',
+                'lat': float(best.get('latitude', 0) or 0),
+                'lon': float(best.get('longitude', 0) or 0),
+                'speed_kn': round(float(best.get('speed_knots', 0) or 0), 2),
+                'course': round(float(best.get('course_deg', 0) or 0), 1),
+                'fix': int(best.get('fix_quality', 0) or 0),
+                'sats': int(best.get('satellites', 0) or 0)
+            })
 
     return result
 
 
-def process_imu(csv_content: str) -> list:
-    """Downsample IMU from 50Hz to 1Hz, averaging values."""
+def process_imu(csv_content: str, date: str = None) -> list:
+    """Downsample IMU from 50Hz to 1Hz, averaging values.
+
+    Supports two CSV formats:
+    - S1: utc_time,heel_deg,pitch_deg,heading_deg,accel_x_mps2,accel_y_mps2,accel_z_mps2
+    - E1: ms,ax,ay,az,gx,gy,gz,heel,pitch
+
+    Args:
+        csv_content: CSV data as string
+        date: Date string (YYYY-MM-DD) for E1 timestamp generation
+    """
     from datetime import timedelta
 
-    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
-    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
-
     reader = csv.DictReader(StringIO(csv_content))
+    rows = list(reader)
+    if not rows:
+        return []
 
-    # Group by second with time correction
+    # Detect format based on column names
+    first_row = rows[0]
+    is_e1_format = 'ms' in first_row and 'ax' in first_row
+
+    # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
+    TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
+
+    # Group by second
     by_second = defaultdict(list)
-    for row in reader:
-        ts = row.get('utc_time', '')
-        if not ts:
-            continue
-        try:
-            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
-            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
-            second = dt_corrected.strftime('%Y-%m-%dT%H:%M:%S')
-        except ValueError:
-            second = ts[:19]
+    for row in rows:
+        if is_e1_format:
+            # E1 format: ms is milliseconds since boot (relative time only)
+            ms = row.get('ms', '')
+            if not ms:
+                continue
+            try:
+                sec = int(float(ms) // 1000)
+                # Use date + relative time offset
+                second = f"{date}T00:00:{sec:02d}" if sec < 60 else f"{date}T00:{sec//60:02d}:{sec%60:02d}"
+            except ValueError:
+                continue
+        else:
+            # S1 format: utc_time is ISO timestamp
+            ts = row.get('utc_time', '')
+            if not ts:
+                continue
+            try:
+                dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+                dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+                second = dt_corrected.strftime('%Y-%m-%dT%H:%M:%S')
+            except ValueError:
+                second = ts[:19]
+
         by_second[second].append(row)
 
     # Average values per second
@@ -172,23 +248,36 @@ def process_imu(csv_content: str) -> list:
         n = len(samples)
         avg = lambda field: sum(float(r.get(field, 0) or 0) for r in samples) / n
 
-        # Heading correction: IMU mounted 180° (X-axis toward stern)
-        raw_heading = avg('heading_deg')
-        corrected_heading = (raw_heading + 180) % 360
+        if is_e1_format:
+            # E1 has heel and pitch directly, ax/ay/az for accel
+            result.append({
+                't': second + 'Z',
+                'heel': round(avg('heel'), 1),
+                'pitch': round(avg('pitch'), 1),
+                'heading': 0,  # E1 doesn't have heading from IMU
+                'accel_x': round(avg('ax'), 2),
+                'accel_y': round(avg('ay'), 2),
+                'accel_z': round(avg('az'), 2)
+            })
+        else:
+            # S1 format with corrections for mounting orientation
+            # Heading correction: IMU mounted 180° (X-axis toward stern)
+            raw_heading = avg('heading_deg')
+            corrected_heading = (raw_heading + 180) % 360
 
-        # Heel correction: IMU mounted 90° off
-        raw_heel = avg('heel_deg')
-        corrected_heel = raw_heel + 90
+            # Heel correction: IMU mounted 90° off
+            raw_heel = avg('heel_deg')
+            corrected_heel = raw_heel + 90
 
-        result.append({
-            't': second + 'Z',
-            'heel': round(corrected_heel, 1),
-            'pitch': round(avg('pitch_deg'), 1),
-            'heading': round(corrected_heading, 1),
-            'accel_x': round(avg('accel_x_mps2'), 2),
-            'accel_y': round(avg('accel_y_mps2'), 2),
-            'accel_z': round(avg('accel_z_mps2'), 2)
-        })
+            result.append({
+                't': second + 'Z',
+                'heel': round(corrected_heel, 1),
+                'pitch': round(avg('pitch_deg'), 1),
+                'heading': round(corrected_heading, 1),
+                'accel_x': round(avg('accel_x_mps2'), 2),
+                'accel_y': round(avg('accel_y_mps2'), 2),
+                'accel_z': round(avg('accel_z_mps2'), 2)
+            })
 
     return result
 
