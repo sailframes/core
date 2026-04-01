@@ -4016,6 +4016,30 @@ SAILING_DASHBOARD_HTML = """
             font-weight: bold;
             color: #7a8a9a;
         }
+        .cpu-section {
+            position: absolute;
+            bottom: 75px;
+            left: 15px;
+            width: 250px;
+        }
+        .cpu-panel {
+            padding: 4px 12px;
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .cpu-panel .cpu-label {
+            font-size: 14px;
+            color: #7a8a9a;
+        }
+        .cpu-panel .cpu-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #ffb74d;
+        }
+        .cpu-panel .cpu-value.hot {
+            color: #ff6b6b;
+        }
         .data-unit {
             font-size: 12px;
             color: #5a6a7a;
@@ -4178,6 +4202,13 @@ SAILING_DASHBOARD_HTML = """
             </div>
         </div>
     </div>
+    <!-- CPU temp above SAT section -->
+    <div class="cpu-section">
+        <div class="data-panel cpu-panel" id="panel-cpu">
+            <span class="cpu-label">CPU</span>
+            <span class="cpu-value" id="val-cpu-temp">--°</span>
+        </div>
+    </div>
     <!-- Satellite info below compass -->
     <div class="sat-section">
         <div class="data-panel sat-panel" id="panel-sat">
@@ -4314,6 +4345,21 @@ SAILING_DASHBOARD_HTML = """
                     satPanel.classList.remove('no-data');
                 } else {
                     satPanel.classList.add('no-data');
+                }
+
+                // CPU temp panel
+                const cpuTemp = status.cpu_temp_c;
+                const cpuEl = document.getElementById('val-cpu-temp');
+                if (cpuTemp !== undefined && cpuTemp !== null) {
+                    cpuEl.textContent = Math.round(cpuTemp) + '°';
+                    // Add 'hot' class if temp > 70°C
+                    if (cpuTemp > 70) {
+                        cpuEl.classList.add('hot');
+                    } else {
+                        cpuEl.classList.remove('hot');
+                    }
+                } else {
+                    cpuEl.textContent = '--°';
                 }
 
                 // Update compass heading text (show COG from GPS)
