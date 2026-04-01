@@ -3914,8 +3914,9 @@ SAILING_DASHBOARD_HTML = """
             width: 280px;
             height: 460px;
             display: flex;
-            align-items: center;
+            align-items: flex-start;
             justify-content: center;
+            padding-top: 20px;
         }
         .compass-container {
             position: relative;
@@ -3979,15 +3980,40 @@ SAILING_DASHBOARD_HTML = """
         }
         .sat-section {
             position: absolute;
-            bottom: 10px;
-            left: 10px;
-            width: 360px;
+            bottom: 8px;
+            left: 15px;
+            width: 250px;
         }
         .sat-panel {
-            padding: 8px 15px;
+            padding: 6px 12px;
+            flex-direction: column;
+            align-items: flex-start;
         }
-        .sat-panel .data-value {
-            font-size: 42px;
+        .sat-panel .data-label {
+            writing-mode: horizontal-tb;
+            transform: none;
+            font-size: 11px;
+            margin-bottom: 2px;
+        }
+        .sat-panel .sat-row {
+            display: flex;
+            width: 100%;
+            justify-content: space-between;
+            align-items: baseline;
+        }
+        .sat-panel .sat-count {
+            font-size: 28px;
+            font-weight: bold;
+            color: #95e1d3;
+        }
+        .sat-panel .sat-fix {
+            font-size: 16px;
+            color: #4fc3f7;
+            font-weight: 600;
+        }
+        .sat-panel .sat-hdop {
+            font-size: 14px;
+            color: #7a8a9a;
         }
         .data-unit {
             font-size: 12px;
@@ -4154,8 +4180,14 @@ SAILING_DASHBOARD_HTML = """
     <!-- Satellite info below compass -->
     <div class="sat-section">
         <div class="data-panel sat-panel" id="panel-sat">
-            <div class="data-label">SAT</div>
-            <div class="data-value sat" id="val-sat">--</div>
+            <div class="data-label">SATELLITES</div>
+            <div class="sat-row">
+                <span class="sat-count" id="val-sat-count">--/--</span>
+                <span class="sat-hdop" id="val-sat-hdop">H--</span>
+            </div>
+            <div class="sat-row">
+                <span class="sat-fix" id="val-sat-fix">--</span>
+            </div>
         </div>
     </div>
     <div id="update-indicator" style="position:absolute;bottom:5px;right:10px;font-size:10px;color:#3a4a5a"></div>
@@ -4234,6 +4266,8 @@ SAILING_DASHBOARD_HTML = """
                 const cog = gps.course_deg;  // Course Over Ground from GPS
                 const satsInUse = gpsLive.satellites || gps.satellites || 0;
                 const hdop = gpsLive.hdop || gps.hdop;
+                const fixQuality = gpsLive.fix_quality || gps.fix_quality || 0;
+                const fixType = gpsLive.fix_type || gps.fix_type || 'No Fix';
 
                 // Calculate total satellites in view from constellations
                 let satsInView = 0;
@@ -4261,9 +4295,25 @@ SAILING_DASHBOARD_HTML = """
                 updatePanel('heel', heel !== undefined && heel !== null ? Math.round(heel) + '°' : '--', heel !== null);
                 updatePanel('mag', mag !== undefined && mag !== null ? Math.round(mag) + '°' : '--', mag !== null);
 
-                // SAT panel: show fix/view and HDOP
-                const hdopStr = hdop !== undefined && hdop !== null ? hdop.toFixed(1) : '--';
-                updatePanel('sat', satsInUse + '/' + satsInView + ' H' + hdopStr, satsInUse > 0);
+                // SAT panel: show counts, HDOP, and fix type
+                const hdopStr = hdop !== undefined && hdop !== null ? 'H' + hdop.toFixed(1) : 'H--';
+                document.getElementById('val-sat-count').textContent = satsInUse + '/' + satsInView;
+                document.getElementById('val-sat-hdop').textContent = hdopStr;
+                // Show short fix type (GPS, SBAS/DGPS, RTK, etc)
+                let shortFix = 'No Fix';
+                if (fixQuality === 1) shortFix = 'GPS';
+                else if (fixQuality === 2) shortFix = 'SBAS';
+                else if (fixQuality === 4) shortFix = 'RTK Fixed';
+                else if (fixQuality === 5) shortFix = 'RTK Float';
+                else if (fixQuality === 6) shortFix = 'Dead Reckoning';
+                else if (fixQuality > 0) shortFix = fixType;
+                document.getElementById('val-sat-fix').textContent = shortFix;
+                const satPanel = document.getElementById('panel-sat');
+                if (satsInUse > 0) {
+                    satPanel.classList.remove('no-data');
+                } else {
+                    satPanel.classList.add('no-data');
+                }
 
                 // Update compass heading text (show COG from GPS)
                 document.getElementById('heading-text').textContent =
