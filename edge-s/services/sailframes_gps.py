@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 SailFrames GPS Service
-Reads u-blox ZED-F9P via USB serial, logs position/speed/heading at 10Hz.
+Reads u-blox ZED-F9P via I2C (Qwiic) or USB serial, logs position/speed/heading at 10Hz.
 Also logs raw UBX data for RTKLib post-processing.
+
+I2C connection via Qwiic connector is preferred (saves USB port space in enclosure).
+Falls back to USB serial if I2C is not available.
 """
 
 import os
@@ -19,6 +22,18 @@ import json
 import serial
 import pynmea2
 import yaml
+
+# I2C support for Qwiic connection
+try:
+    import smbus2
+    I2C_AVAILABLE = True
+except ImportError:
+    I2C_AVAILABLE = False
+
+# ZED-F9P I2C constants
+ZED_F9P_I2C_ADDR = 0x42
+ZED_F9P_DATA_STREAM_REG = 0xFF  # Read data from this register
+ZED_F9P_BYTES_AVAIL_REG = 0xFD  # High byte of bytes available (0xFD=high, 0xFE=low)
 
 # Status file for dashboard
 GPS_STATUS_FILE = Path('/tmp/sailframes-gps-status.json')
@@ -410,14 +425,123 @@ def update_gps_status(current, constellation_data=None, sats_used_by_constellati
         logger.warning(f"Failed to update GPS status file: {e}")
 
 
-def find_gps_device(preferred_device, baud_rate):
+class I2CGPSReader:
     """
-    Find GPS device, checking preferred device first then scanning USB ports.
-    Returns (device_path, serial_connection) or (None, None) if not found.
+    Read GPS data from ZED-F9P via I2C (Qwiic connector).
+    Mimics serial interface for compatibility with existing code.
+    """
+    def __init__(self, bus_num=1, address=ZED_F9P_I2C_ADDR):
+        self.bus = smbus2.SMBus(bus_num)
+        self.address = address
+        self.timeout = 1
+        self._buffer = b''
+
+    def close(self):
+        self.bus.close()
+
+    @property
+    def in_waiting(self):
+        """Return number of bytes available to read."""
+        try:
+            # Read bytes available from registers 0xFD (high) and 0xFE (low)
+            high = self.bus.read_byte_data(self.address, 0xFD)
+            low = self.bus.read_byte_data(self.address, 0xFE)
+            return (high << 8) | low
+        except Exception:
+            return 0
+
+    def read(self, size=256):
+        """Read up to size bytes from GPS."""
+        try:
+            available = self.in_waiting
+            if available == 0:
+                time.sleep(0.01)  # Small delay if no data
+                return b''
+
+            # Read available bytes (max 32 at a time for I2C)
+            to_read = min(available, size, 32)
+            data = bytes(self.bus.read_i2c_block_data(self.address, ZED_F9P_DATA_STREAM_REG, to_read))
+
+            # Filter out 0xFF padding bytes (indicates no data)
+            if data == bytes([0xFF] * len(data)):
+                return b''
+
+            return data
+        except Exception as e:
+            logger.debug(f"I2C read error: {e}")
+            return b''
+
+    def readline(self):
+        """Read a line (for compatibility with serial interface)."""
+        start = time.time()
+        while time.time() - start < self.timeout:
+            chunk = self.read(64)
+            if chunk:
+                self._buffer += chunk
+                if b'\r\n' in self._buffer:
+                    idx = self._buffer.index(b'\r\n')
+                    line = self._buffer[:idx + 2]
+                    self._buffer = self._buffer[idx + 2:]
+                    return line
+            time.sleep(0.01)
+        return b''
+
+    def write(self, data):
+        """Write data to GPS via I2C."""
+        try:
+            # Write in chunks of up to 32 bytes
+            for i in range(0, len(data), 32):
+                chunk = list(data[i:i+32])
+                self.bus.write_i2c_block_data(self.address, ZED_F9P_DATA_STREAM_REG, chunk)
+            return len(data)
+        except Exception as e:
+            logger.debug(f"I2C write error: {e}")
+            return 0
+
+
+def find_gps_i2c(bus_num=1, address=ZED_F9P_I2C_ADDR):
+    """
+    Try to find ZED-F9P on I2C bus.
+    Returns I2CGPSReader or None.
+    """
+    if not I2C_AVAILABLE:
+        logger.debug("smbus2 not available, skipping I2C")
+        return None
+
+    try:
+        reader = I2CGPSReader(bus_num, address)
+        # Try to read some data to verify GPS is there
+        time.sleep(0.1)
+        data = reader.read(64)
+        # Check if we got any NMEA data
+        if b'$G' in data or reader.in_waiting > 0:
+            logger.info(f"GPS found on I2C bus {bus_num} at address 0x{address:02X}")
+            return reader
+        # Even if no data yet, check if device responds
+        if reader.in_waiting >= 0:  # Device responded
+            logger.info(f"GPS found on I2C bus {bus_num} at address 0x{address:02X} (waiting for data)")
+            return reader
+        reader.close()
+    except Exception as e:
+        logger.debug(f"I2C GPS not found: {e}")
+
+    return None
+
+
+def find_gps_device(preferred_device, baud_rate, use_i2c=True, i2c_bus=1, i2c_address=ZED_F9P_I2C_ADDR):
+    """
+    Find GPS device, trying I2C first, then preferred serial, then scanning USB ports.
+    Returns (device_path, connection) or (None, None) if not found.
     """
     import glob
 
-    # Try preferred device first
+    # Try I2C first (Qwiic connector) - preferred for space saving
+    if use_i2c:
+        i2c_reader = find_gps_i2c(i2c_bus, i2c_address)
+        if i2c_reader:
+            return f'i2c:{i2c_bus}:0x{i2c_address:02X}', i2c_reader
+
+    # Try preferred serial device
     if os.path.exists(preferred_device):
         try:
             ser = serial.Serial(preferred_device, baud_rate, timeout=1)
@@ -452,17 +576,23 @@ def find_gps_device(preferred_device, baud_rate):
 def run(config):
     """Main GPS acquisition loop."""
     gps_config = config['gps']
-    preferred_device = gps_config['device']
-    baud = gps_config['baud_rate']
+    preferred_device = gps_config.get('device', '/dev/ttyACM0')
+    baud = gps_config.get('baud_rate', 115200)
+    use_i2c = gps_config.get('use_i2c', True)  # Default to trying I2C first
+    i2c_bus = gps_config.get('i2c_bus', 1)
+    i2c_address = gps_config.get('i2c_address', ZED_F9P_I2C_ADDR)
 
-    logger.info(f"Looking for GPS (preferred: {preferred_device}, baud: {baud})")
+    if use_i2c and I2C_AVAILABLE:
+        logger.info(f"Looking for GPS on I2C bus {i2c_bus} (Qwiic) first, then serial (preferred: {preferred_device})")
+    else:
+        logger.info(f"Looking for GPS on serial (preferred: {preferred_device}, baud: {baud})")
 
     # Try to find GPS device, with retries
     device = None
-    ser = None
+    conn = None
     retries = 0
     while device is None and running:
-        device, ser = find_gps_device(preferred_device, baud)
+        device, conn = find_gps_device(preferred_device, baud, use_i2c=use_i2c, i2c_bus=i2c_bus, i2c_address=i2c_address)
         if device is None:
             retries += 1
             if retries % 10 == 0:
@@ -472,7 +602,8 @@ def run(config):
     if not running:
         return
 
-    logger.info(f"GPS connected on {device}")
+    is_i2c = device.startswith('i2c:')
+    logger.info(f"GPS connected via {'I2C (Qwiic)' if is_i2c else 'USB serial'} on {device}")
 
     data_dir = get_data_dir(config)
     csv_file, writer = create_csv_writer(data_dir)
@@ -505,14 +636,14 @@ def run(config):
 
     try:
         while running:
-            # Read raw bytes from serial
+            # Read raw bytes from GPS (I2C or serial)
             try:
-                if ser.in_waiting > 0:
-                    raw_data = ser.read(ser.in_waiting)
+                if conn.in_waiting > 0:
+                    raw_data = conn.read(conn.in_waiting)
                 else:
-                    raw_data = ser.read(256)  # Blocking read with timeout
-            except (serial.SerialException, OSError) as e:
-                logger.error(f"Serial read error: {e}")
+                    raw_data = conn.read(256)  # Blocking read with timeout
+            except (serial.SerialException, OSError, Exception) as e:
+                logger.error(f"GPS read error: {e}")
                 update_gps_status(current, constellation_data, sats_used_by_constellation, usb_connected=False, receiving_nmea=False)
                 time.sleep(1)
                 continue
@@ -639,7 +770,7 @@ def run(config):
     finally:
         csv_file.close()
         ubx_file.close()
-        ser.close()
+        conn.close()
         logger.info(f"GPS service stopped. {rows_written} CSV rows, {ubx_bytes_written / (1024*1024):.1f} MB UBX data.")
 
 
