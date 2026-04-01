@@ -11,6 +11,7 @@
 - **Main repo:** github.com/sailframes/core
 - **Domain:** sailframes.com (registered via AWS)
 - **Cloud:** AWS
+- **S3 Bucket:** `sailframes-data-prod` (unified bucket for both S1 and E1 devices)
 - **Fleet:** 6 boats — Sonar 23 and J/80 class, Boston Harbor
 
 The system has two hardware tiers:
@@ -652,8 +653,9 @@ GOES satellite imagery overlay, current field reconstruction from fleet GPS data
   Wi-Fi AP → live dashboard to crew phones
 
 [Post Race]
-  Data → S3 upload (scripts/sync.sh)
-  S3 → Lambda trigger → processing/ engine
+  S1 data → S3 upload (scripts/sailframes-sync.sh) → s3://sailframes-data-prod/raw/{device}/{date}/{sensor}/
+  E1 data → API Gateway → upload Lambda → s3://sailframes-data-prod/raw/{device}/{date}/
+  S3 → Lambda trigger (process_upload) → processed JSON
   Processed results → PostgreSQL
   Weather APIs → Lambda → PostgreSQL
 
@@ -663,6 +665,10 @@ GOES satellite imagery overlay, current field reconstruction from fleet GPS data
   Video player ↔ data graphs (synchronized via timestamps)
   Export → PDF, PNG, social video (FFmpeg)
 ```
+
+**S3 Path Formats:**
+- S1: `raw/{device_id}/{date}/{sensor_type}/{filename}.csv` (e.g., `raw/sailframes-01/2026-04-01/gps/track_20260401_140000.csv`)
+- E1: `raw/{device_id}/{date}/{filename}.csv` (e.g., `raw/E1/2026-04-01/E1_20260401_140000_nav.csv`)
 
 ### Claude Code Session Strategy
 
@@ -778,4 +784,4 @@ Competitive analysis is maintained separately.
 
 ---
 
-*Last updated: March 30, 2026 — Full sync with Claude.ai project knowledge*
+*Last updated: April 1, 2026 — Unified S1/E1 S3 bucket (sailframes-data-prod)*
