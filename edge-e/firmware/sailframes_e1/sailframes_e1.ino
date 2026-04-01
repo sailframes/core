@@ -34,6 +34,8 @@
 #include <SPI.h>
 #include <SD.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
+#include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <U8g2lib.h>
 #include <Adafruit_BNO08x.h>
@@ -95,7 +97,7 @@ struct GPSData {
 struct IMUData {
   float accel_x = 0, accel_y = 0, accel_z = 0;
   float gyro_x = 0, gyro_y = 0, gyro_z = 0;
-  float heel = 0, pitch = 0;
+  float heel = 0, pitch = 0, heading = 0;
 } imu;
 
 struct RTCM3Parser {
@@ -134,6 +136,21 @@ sh2_SensorValue_t sensorValue;
 File navFile, imuFile, rawFile;
 bool sdOK = false, imuOK = false, oledOK = false, logging = false;
 bool useIMU_BNO = false;
+bool uploading = false;
+bool wifiConnected = false;
+bool otaInProgress = false;
+char connectedSSID[64] = "";
+int uploadCount = 0, uploadTotal = 0;
+int satsInView = 0;
+
+// IMU calibration offsets (stored on SD card)
+float imuHeelOffset = 0.0;
+float imuPitchOffset = 0.0;
+
+// Telnet server for remote console
+WiFiServer telnetServer(23);
+WiFiClient telnetClient;
+String telnetBuffer = "";
 unsigned long logStart = 0, lastDisp = 0, lastFlush = 0, lastIMU = 0;
 unsigned long totalBytes = 0;
 char nmeaBuf[256];
@@ -212,6 +229,7 @@ void setup() {
         cardType == CARD_SD ? "SD" :
         cardType == CARD_SDHC ? "SDHC" : "UNKNOWN");
       loadConfig();
+      loadIMUCalibration();
     }
   } else {
     Serial.println("[SD] === SD CARD FAILED ===");
@@ -234,16 +252,20 @@ void setup() {
   if (bno08x.begin_I2C(BNO085_ADDR, &Wire)) {
     imuOK = true;
     useIMU_BNO = true;
-    Serial.println("[IMU] BNO085 detected, enabling GAME_ROTATION_VECTOR");
-    // Enable Game Rotation Vector (6DOF, no magnetometer - better for boats)
+    Serial.println("[IMU] BNO085 detected, enabling reports");
+    // Enable Game Rotation Vector for heel/pitch (no magnetometer drift)
     if (!bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000)) {
+      Serial.println("[IMU] WARNING: Failed to enable game rotation vector");
+    }
+    // Enable Rotation Vector for heading (includes magnetometer)
+    if (!bno08x.enableReport(SH2_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000)) {
       Serial.println("[IMU] WARNING: Failed to enable rotation vector");
     }
     // Also enable accelerometer for raw data
     if (!bno08x.enableReport(SH2_ACCELEROMETER, IMU_INTERVAL_MS * 1000)) {
       Serial.println("[IMU] WARNING: Failed to enable accelerometer");
     }
-    Serial.println("[IMU] BNO085 OK at 0x4A");
+    Serial.println("[IMU] BNO085 OK");
   } else {
     Serial.println("[IMU] BNO085 not found, trying MPU-6050...");
 #else
@@ -304,13 +326,31 @@ void setup() {
   } else {
     Serial.println("[LOG] Cannot start logging - SD card not available");
   }
+
+  // Connect to WiFi at boot (for OTA and telnet)
+  if (config.wifi_count > 0) {
+    Serial.println("[WIFI] Connecting at boot...");
+    if (oledOK) {
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(0, 20, "Connecting WiFi...");
+      u8g2.sendBuffer();
+    }
+    connectWiFi();
+  }
 }
 
 // ============================================================
 // CONFIGURE LG290P FOR PPK
 // ============================================================
 void configureLG290P() {
-  Serial.println("[GPS] Configuring raw RTCM3 output for PPK...");
+  Serial.println("[GPS] Configuring LG290P for NMEA + RTCM3...");
+
+  // First, ensure NMEA messages are enabled (essential for position data)
+  sendPQTM("PQTMCFGMSGRATE,W,GGA,1,0");   // Position + fix quality
+  sendPQTM("PQTMCFGMSGRATE,W,RMC,1,0");   // Speed + course + date
+  sendPQTM("PQTMCFGMSGRATE,W,GSA,1,0");   // Satellites used
+  sendPQTM("PQTMCFGMSGRATE,W,GSV,1,0");   // Satellites in view
 
   // RTCM3 MSM7 — full pseudorange + phase + doppler + CNR
   sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1077,1,0");  // GPS
@@ -444,11 +484,21 @@ void parseNMEA(const char* s) {
       if (getField(s, 5, ew, sizeof(ew)) && ew[0] == 'W') gps.lon = -gps.lon;
     }
     if (getField(s, 6, f, sizeof(f))) {
-      gps.fix_quality = atoi(f);
-      gps.valid = gps.fix_quality > 0;
+      int fq = atoi(f);
+      // Validate: 0=none, 1=GPS, 2=DGPS, 4=RTK, 5=RTK float
+      if (fq >= 0 && fq <= 5) {
+        gps.fix_quality = fq;
+        gps.valid = fq > 0;
+      }
     }
-    if (getField(s, 7, f, sizeof(f))) gps.satellites = atoi(f);
-    if (getField(s, 8, f, sizeof(f))) gps.hdop = atof(f);
+    if (getField(s, 7, f, sizeof(f))) {
+      int sats = atoi(f);
+      if (sats >= 0 && sats <= 50) gps.satellites = sats;
+    }
+    if (getField(s, 8, f, sizeof(f))) {
+      float hdop = atof(f);
+      if (hdop >= 0 && hdop < 50) gps.hdop = hdop;
+    }
     if (getField(s, 9, f, sizeof(f))) gps.alt = atof(f);
     gps.newGGA = true;
   } else if (strstr(s, "RMC")) {
@@ -456,6 +506,39 @@ void parseNMEA(const char* s) {
     if (getField(s, 7, f, sizeof(f))) gps.speed_kts = atof(f);
     if (getField(s, 8, f, sizeof(f))) gps.course = atof(f);
     if (getField(s, 9, f, sizeof(f))) strncpy(gps.date, f, sizeof(gps.date) - 1);
+  } else if (strstr(s, "GSV")) {
+    // GSV sentences: GPGSV (GPS), GLGSV (GLONASS), GAGSV (Galileo), GBGSV (BeiDou)
+    // Field 1 = total messages, Field 2 = message number, Field 3 = total sats in view
+    // Only parse if sentence looks valid (starts with $G and has reasonable length)
+    if (s[0] == '$' && s[1] == 'G' && strlen(s) > 20) {
+      char f[32];
+      if (getField(s, 2, f, sizeof(f))) {
+        int msgNum = atoi(f);
+        if (msgNum == 1) {  // First message in sequence has total count
+          if (getField(s, 3, f, sizeof(f))) {
+            int count = atoi(f);
+            // Sanity check: count should be 0-50
+            if (count >= 0 && count <= 50) {
+              // Track each constellation separately, sum them up
+              static int gpCount = 0, glCount = 0, gaCount = 0, gbCount = 0;
+
+              if (strstr(s, "GPGSV")) {
+                gpCount = count;
+              } else if (strstr(s, "GLGSV")) {
+                glCount = count;
+              } else if (strstr(s, "GAGSV")) {
+                gaCount = count;
+              } else if (strstr(s, "GBGSV")) {
+                gbCount = count;
+              }
+
+              // Sum all constellations
+              satsInView = gpCount + glCount + gaCount + gbCount;
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -471,6 +554,7 @@ void readIMU() {
     if (bno08x.wasReset()) {
       Serial.println("[IMU] BNO085 was reset, re-enabling reports");
       bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
+      bno08x.enableReport(SH2_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
       bno08x.enableReport(SH2_ACCELEROMETER, IMU_INTERVAL_MS * 1000);
     }
 
@@ -478,31 +562,49 @@ void readIMU() {
     int maxReads = 3;
     while (maxReads-- > 0 && bno08x.getSensorEvent(&sensorValue)) {
       switch (sensorValue.sensorId) {
-        case SH2_GAME_ROTATION_VECTOR: {
-          // Quaternion to Euler angles for heel and pitch
-          float qr = sensorValue.un.gameRotationVector.real;
-          float qi = sensorValue.un.gameRotationVector.i;
-          float qj = sensorValue.un.gameRotationVector.j;
-          float qk = sensorValue.un.gameRotationVector.k;
-
-          // Roll (heel) = rotation around X axis
-          float sinr_cosp = 2.0 * (qr * qi + qj * qk);
-          float cosr_cosp = 1.0 - 2.0 * (qi * qi + qj * qj);
-          imu.heel = atan2(sinr_cosp, cosr_cosp) * 180.0 / PI;
-
-          // Pitch = rotation around Y axis
-          float sinp = 2.0 * (qr * qj - qk * qi);
-          if (fabs(sinp) >= 1)
-            imu.pitch = copysign(90.0, sinp);
-          else
-            imu.pitch = asin(sinp) * 180.0 / PI;
+        case SH2_GAME_ROTATION_VECTOR:
+          // Not using quaternion for heel/pitch - accelerometer is more reliable
+          // Just ignore this report, we calculate from accelerometer below
           break;
-        }
         case SH2_ACCELEROMETER:
           imu.accel_x = sensorValue.un.accelerometer.x;
           imu.accel_y = sensorValue.un.accelerometer.y;
           imu.accel_z = sensorValue.un.accelerometer.z;
+
+          // Calculate heel and pitch from accelerometer (gravity reference)
+          // Chip is mounted with X pointing UP, Y pointing STARBOARD, Z pointing BOW
+          // X ≈ 9.8 when level (gravity)
+          // Y changes with heel (port/starboard tilt)
+          // Z changes with pitch (bow up/down tilt)
+
+          // Heel: positive = starboard down, negative = port down
+          imu.heel = atan2(imu.accel_y, imu.accel_x) * 180.0 / PI;
+
+          // Pitch: positive = bow up, negative = bow down
+          imu.pitch = atan2(-imu.accel_z, sqrt(imu.accel_y * imu.accel_y + imu.accel_x * imu.accel_x)) * 180.0 / PI;
+
+          // Apply calibration offsets
+          imu.heel -= imuHeelOffset;
+          imu.pitch -= imuPitchOffset;
           break;
+
+        case SH2_ROTATION_VECTOR: {
+          // Full rotation vector with magnetometer - use for heading only
+          float qr = sensorValue.un.rotationVector.real;
+          float qi = sensorValue.un.rotationVector.i;
+          float qj = sensorValue.un.rotationVector.j;
+          float qk = sensorValue.un.rotationVector.k;
+
+          // Yaw (heading) = rotation around Z axis
+          float siny_cosp = 2.0 * (qr * qk + qi * qj);
+          float cosy_cosp = 1.0 - 2.0 * (qj * qj + qk * qk);
+          float heading = atan2(siny_cosp, cosy_cosp) * 180.0 / PI;
+
+          // Convert to 0-360 range
+          if (heading < 0) heading += 360.0;
+          imu.heading = heading;
+          break;
+        }
       }
     }
   } else
@@ -527,9 +629,13 @@ void readIMU() {
       imu.gyro_x = gx / 131.0;
       imu.gyro_y = gy / 131.0;
       imu.gyro_z = gz / 131.0;
-      imu.heel = atan2(imu.accel_y, imu.accel_z) * 180.0 / PI;
-      imu.pitch = atan2(-imu.accel_x,
+      imu.pitch = atan2(imu.accel_y, imu.accel_z) * 180.0 / PI;
+      imu.heel = atan2(-imu.accel_x,
         sqrt(imu.accel_y * imu.accel_y + imu.accel_z * imu.accel_z)) * 180.0 / PI;
+
+      // Apply calibration offsets
+      imu.heel -= imuHeelOffset;
+      imu.pitch -= imuPitchOffset;
     }
   }
 }
@@ -537,6 +643,61 @@ void readIMU() {
 // ============================================================
 // CONFIG
 // ============================================================
+void loadIMUCalibration() {
+  File f = SD.open("/imu_cal.txt", FILE_READ);
+  if (!f) {
+    Serial.println("[IMU] No calibration file, using defaults");
+    return;
+  }
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("heel_offset=")) {
+      imuHeelOffset = line.substring(12).toFloat();
+    } else if (line.startsWith("pitch_offset=")) {
+      imuPitchOffset = line.substring(13).toFloat();
+    }
+  }
+  f.close();
+  Serial.printf("[IMU] Loaded calibration: heel=%.1f, pitch=%.1f\n",
+    imuHeelOffset, imuPitchOffset);
+}
+
+void saveIMUCalibration() {
+  File f = SD.open("/imu_cal.txt", FILE_WRITE);
+  if (!f) {
+    Serial.println("[IMU] Failed to save calibration");
+    return;
+  }
+  f.printf("heel_offset=%.2f\n", imuHeelOffset);
+  f.printf("pitch_offset=%.2f\n", imuPitchOffset);
+  f.close();
+  Serial.printf("[IMU] Saved calibration: heel=%.1f, pitch=%.1f\n",
+    imuHeelOffset, imuPitchOffset);
+}
+
+void calibrateIMU() {
+  if (!imuOK) {
+    Serial.println("[IMU] No IMU available for calibration");
+    return;
+  }
+
+  // Read current raw values (before offset applied)
+  float rawHeel = imu.heel + imuHeelOffset;  // Undo current offset to get raw
+  float rawPitch = imu.pitch + imuPitchOffset;
+
+  // Set new offsets so current position becomes zero
+  imuHeelOffset = rawHeel;
+  imuPitchOffset = rawPitch;
+
+  // Save to SD card
+  saveIMUCalibration();
+
+  Serial.printf("[IMU] Calibrated: new offsets heel=%.1f, pitch=%.1f\n",
+    imuHeelOffset, imuPitchOffset);
+}
+
 void loadConfig() {
   File f = SD.open("/config.txt", FILE_READ);
   if (!f) { Serial.println("[CFG] No config.txt"); return; }
@@ -588,6 +749,165 @@ void loadConfig() {
     config.boat_id, config.gps_rate_hz, config.wifi_count);
   for (int i = 0; i < config.wifi_count; i++) {
     Serial.printf("[CFG]   %d: %s\n", i + 1, config.wifi[i].ssid);
+  }
+}
+
+// ============================================================
+// OTA + TELNET SETUP
+// ============================================================
+void setupOTA() {
+  ArduinoOTA.setHostname(config.boat_id);  // Use boat ID as hostname
+  ArduinoOTA.setPassword("sailframes");     // OTA password
+
+  ArduinoOTA.onStart([]() {
+    otaInProgress = true;
+    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "firmware" : "filesystem";
+    Serial.printf("[OTA] Start updating %s\n", type.c_str());
+
+    // Show on display
+    if (oledOK) {
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_helvB14_tr);
+      u8g2.drawStr(10, 25, "OTA");
+      u8g2.drawStr(10, 45, "UPDATE");
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(10, 60, "DO NOT POWER OFF");
+      u8g2.sendBuffer();
+    }
+
+    // Close log files before OTA
+    if (logging) {
+      navFile.close();
+      if (imuFile) imuFile.close();
+      rawFile.close();
+      logging = false;
+    }
+  });
+
+  ArduinoOTA.onEnd([]() {
+    otaInProgress = false;
+    Serial.println("\n[OTA] Complete! Rebooting...");
+    if (oledOK) {
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_helvB14_tr);
+      u8g2.drawStr(10, 35, "REBOOTING");
+      u8g2.sendBuffer();
+    }
+  });
+
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    int pct = progress / (total / 100);
+    Serial.printf("[OTA] Progress: %u%%\r", pct);
+
+    // Update progress bar on display
+    if (oledOK) {
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_helvB14_tr);
+      u8g2.drawStr(10, 20, "UPDATING");
+      u8g2.setFont(u8g2_font_6x10_tr);
+
+      // Progress bar
+      u8g2.drawFrame(10, 30, 108, 16);
+      u8g2.drawBox(12, 32, (104 * pct) / 100, 12);
+
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%d%%", pct);
+      u8g2.drawStr(50, 58, buf);
+      u8g2.sendBuffer();
+    }
+  });
+
+  ArduinoOTA.onError([](ota_error_t error) {
+    otaInProgress = false;
+    Serial.printf("[OTA] Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+
+    if (oledOK) {
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(10, 30, "OTA ERROR!");
+      u8g2.sendBuffer();
+    }
+  });
+
+  ArduinoOTA.begin();
+  Serial.println("[OTA] Ready");
+}
+
+void startTelnetServer() {
+  telnetServer.begin();
+  telnetServer.setNoDelay(true);
+  Serial.println("[TELNET] Server started on port 23");
+}
+
+void handleTelnet() {
+  // Check for new clients
+  if (telnetServer.hasClient()) {
+    if (!telnetClient || !telnetClient.connected()) {
+      if (telnetClient) telnetClient.stop();
+      telnetClient = telnetServer.available();
+      telnetClient.println("\n=================================");
+      telnetClient.println("  SailFrames E1 Telnet Console");
+      telnetClient.printf("  Boat: %s\n", config.boat_id);
+      telnetClient.println("  Type 'help' for commands");
+      telnetClient.println("=================================\n");
+      telnetClient.print("> ");
+      Serial.println("[TELNET] Client connected");
+    } else {
+      // Reject additional clients
+      telnetServer.available().stop();
+    }
+  }
+
+  // Handle client input
+  if (telnetClient && telnetClient.connected()) {
+    while (telnetClient.available()) {
+      char c = telnetClient.read();
+      if (c == '\n' || c == '\r') {
+        if (telnetBuffer.length() > 0) {
+          telnetClient.println();  // Echo newline
+          processCommand(telnetBuffer, true);
+          telnetBuffer = "";
+          telnetClient.print("> ");
+        }
+      } else if (c == 127 || c == 8) {  // Backspace
+        if (telnetBuffer.length() > 0) {
+          telnetBuffer.remove(telnetBuffer.length() - 1);
+          telnetClient.print("\b \b");  // Erase character
+        }
+      } else if (c >= 32 && c < 127) {  // Printable
+        telnetBuffer += c;
+        telnetClient.print(c);  // Echo
+      }
+    }
+  }
+}
+
+// Print to both Serial and Telnet if connected
+void tprint(const char* msg) {
+  Serial.print(msg);
+  if (telnetClient && telnetClient.connected()) {
+    telnetClient.print(msg);
+  }
+}
+
+void tprintf(const char* fmt, ...) {
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  tprint(buf);
+}
+
+void tprintln(const char* msg) {
+  Serial.println(msg);
+  if (telnetClient && telnetClient.connected()) {
+    telnetClient.println(msg);
   }
 }
 
@@ -702,43 +1022,69 @@ void updateDisplay() {
   char buf[32];
 
   u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x10_tr);  // 6x10 monospace font
 
-  // Row 0: GPS status (y=10 for first line with this font)
-  snprintf(buf, sizeof(buf), "SAT:%d FIX:%s", gps.satellites,
-    gps.fix_quality == 0 ? "---" :
-    gps.fix_quality == 1 ? "GPS" :
-    gps.fix_quality == 2 ? "DGPS" : "RTK");
-  u8g2.drawStr(0, 10, buf);
+  // Row 0: Warnings or status (small font)
+  u8g2.setFont(u8g2_font_6x10_tr);
 
-  // Row 1: Speed and course
-  snprintf(buf, sizeof(buf), "SOG:%.1fkt COG:%d", gps.speed_kts, (int)gps.course);
-  u8g2.drawStr(0, 20, buf);
-
-  // Row 2: Heel and pitch
-  snprintf(buf, sizeof(buf), "HEEL:%.0f PITCH:%.0f", imu.heel, imu.pitch);
-  u8g2.drawStr(0, 30, buf);
-
-  // Row 3: Recording status
-  if (logging) {
-    unsigned long secs = (millis() - logStart) / 1000;
-    snprintf(buf, sizeof(buf), "REC %02d:%02d %s",
-      (int)(secs/60), (int)(secs%60),
-      ((millis() / 500) % 2) ? "*" : "");
+  // Check for problems
+  bool hasWarning = false;
+  if (!sdOK) {
+    u8g2.setFont(u8g2_font_helvB12_tr);
+    u8g2.drawStr(0, 12, "NO SD CARD!");
+    hasWarning = true;
+  } else if (!gps.valid && millis() > 60000) {
+    u8g2.setFont(u8g2_font_helvB12_tr);
+    u8g2.drawStr(0, 12, "NO GPS FIX!");
+    hasWarning = true;
+  } else if (!imuOK) {
+    u8g2.setFont(u8g2_font_helvB12_tr);
+    u8g2.drawStr(0, 12, "NO IMU!");
+    hasWarning = true;
+  } else if (uploading) {
+    u8g2.setFont(u8g2_font_6x10_tr);
+    snprintf(buf, sizeof(buf), "Upload %d/%d", uploadCount, uploadTotal);
+    u8g2.drawStr(0, 8, buf);
   } else {
-    snprintf(buf, sizeof(buf), "IDLE");
+    // Normal status
+    u8g2.setFont(u8g2_font_6x10_tr);
+    snprintf(buf, sizeof(buf), "%s %s", config.boat_id, wifiConnected ? "WiFi" : "");
+    u8g2.drawStr(0, 8, buf);
   }
-  u8g2.drawStr(0, 40, buf);
 
-  // Row 4: Hardware status
-  snprintf(buf, sizeof(buf), "SD:%s IMU:%s",
-    sdOK ? "OK" : "--",
-    imuOK ? (useIMU_BNO ? "BNO" : "MPU") : "---");
-  u8g2.drawStr(0, 50, buf);
+  // Row 1: SOG and COG (large font)
+  u8g2.setFont(u8g2_font_helvB14_tr);
+  snprintf(buf, sizeof(buf), "%.1f", gps.speed_kts);
+  u8g2.drawStr(0, 28, buf);
+  snprintf(buf, sizeof(buf), "%03d", (int)gps.course);
+  u8g2.drawStr(75, 28, buf);
+  // Labels
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(45, 20, "kt");
+  u8g2.drawStr(108, 20, "COG");
 
-  // Row 5: Boat ID and data size
-  snprintf(buf, sizeof(buf), "%s %luKB", config.boat_id, totalBytes / 1024);
-  u8g2.drawStr(0, 60, buf);
+  // Row 2: Heel and Magnetic heading (large font)
+  u8g2.setFont(u8g2_font_helvB14_tr);
+  snprintf(buf, sizeof(buf), "%+.0f", imu.heel);
+  u8g2.drawStr(0, 46, buf);
+  snprintf(buf, sizeof(buf), "%03d", (int)imu.heading);
+  u8g2.drawStr(75, 46, buf);
+  // Labels
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(35, 38, "HEEL");
+  u8g2.drawStr(108, 38, "MAG");
+
+  // Row 3: Pitch + satellites + HDOP (small font)
+  u8g2.setFont(u8g2_font_6x10_tr);
+  int dispSats = (gps.satellites >= 0 && gps.satellites <= 50) ? gps.satellites : 0;
+  int dispView = satsInView;
+  if (dispView < dispSats) dispView = dispSats;
+  if (dispView > 60) dispView = dispSats;
+  float dispHdop = (gps.hdop >= 0 && gps.hdop < 50) ? gps.hdop : 99.9;
+  const char* fixStr = "---";
+  if (gps.fix_quality == 1) fixStr = "GPS";
+  else if (gps.fix_quality == 2) fixStr = "DIF";
+  snprintf(buf, sizeof(buf), "P%+.0f %d/%d %s H%.1f", imu.pitch, dispSats, dispView, fixStr, dispHdop);
+  u8g2.drawStr(0, 64, buf);
 
   u8g2.sendBuffer();
 }
@@ -754,6 +1100,50 @@ bool isUploaded(const char* filepath) {
   return SD.exists(marker);
 }
 
+// Delete files that have been uploaded (have .uploaded marker)
+int deleteUploadedFiles(const char* dirname) {
+  int count = 0;
+  File root = SD.open(dirname);
+  if (!root || !root.isDirectory()) return 0;
+
+  // First pass: collect files to delete (can't delete while iterating)
+  String filesToDelete[50];
+  int fileCount = 0;
+
+  File file = root.openNextFile();
+  while (file && fileCount < 50) {
+    char filepath[128];
+    snprintf(filepath, sizeof(filepath), "%s/%s", dirname, file.name());
+    String name = String(file.name());
+
+    if (file.isDirectory()) {
+      file.close();
+      count += deleteUploadedFiles(filepath);  // Recurse
+    } else if (name.endsWith(".uploaded")) {
+      // This is a marker file - get the original filename
+      String original = String(filepath);
+      original = original.substring(0, original.length() - 9);  // Remove ".uploaded"
+      filesToDelete[fileCount++] = original;
+      filesToDelete[fileCount++] = String(filepath);  // Also delete marker
+    }
+    file.close();
+    file = root.openNextFile();
+    yield();
+  }
+  root.close();
+
+  // Second pass: delete collected files
+  for (int i = 0; i < fileCount; i++) {
+    if (SD.remove(filesToDelete[i].c_str())) {
+      Serial.printf("[CLEANUP] Deleted: %s\n", filesToDelete[i].c_str());
+      count++;
+    }
+    yield();
+  }
+
+  return count;
+}
+
 // Mark file as uploaded
 void markUploaded(const char* filepath) {
   char marker[128];
@@ -767,8 +1157,15 @@ void markUploaded(const char* filepath) {
 
 // Upload a single file to S3 via HTTP PUT
 // Expects upload_url to be an API Gateway endpoint that returns a pre-signed S3 URL
-// Or a direct pre-signed S3 PUT URL
+// Upload a single file to S3 via HTTP PUT
 bool uploadFile(const char* filepath) {
+  uploadCount++;
+  updateDisplay();
+
+  // Feed watchdog before file operations
+  yield();
+  delay(10);
+
   File file = SD.open(filepath, FILE_READ);
   if (!file) {
     Serial.printf("[UPLOAD] Cannot open: %s\n", filepath);
@@ -776,9 +1173,23 @@ bool uploadFile(const char* filepath) {
   }
 
   size_t fileSize = file.size();
+
+  // Skip empty files
+  if (fileSize == 0) {
+    Serial.printf("[UPLOAD] Skipping empty file: %s\n", filepath);
+    file.close();
+    return true;  // Mark as success so it gets .uploaded marker
+  }
+
   Serial.printf("[UPLOAD] Uploading %s (%u bytes)...\n", filepath, fileSize);
 
+  // Feed watchdog
+  yield();
+  delay(10);
+
   HTTPClient http;
+  http.setTimeout(60000);  // 60 second timeout for larger files
+  http.setReuse(false);    // Don't reuse connections
 
   // Build the upload URL with filename as query param
   String url = String(config.upload_url);
@@ -787,17 +1198,29 @@ bool uploadFile(const char* filepath) {
   url += "&file=";
   url += filepath;
 
-  http.begin(url);
+  // Feed watchdog before network operation
+  yield();
+
+  if (!http.begin(url)) {
+    Serial.printf("[UPLOAD] Failed to begin HTTP: %s\n", filepath);
+    file.close();
+    return false;
+  }
+
   http.addHeader("Content-Type", "application/octet-stream");
   http.addHeader("Content-Length", String(fileSize));
 
-  // Stream upload - read in chunks
-  WiFiClient* stream = http.getStreamPtr();
+  // Feed watchdog
+  yield();
 
   int httpCode = http.sendRequest("PUT", &file, fileSize);
 
   file.close();
   http.end();
+
+  // Feed watchdog after network operation
+  yield();
+  delay(50);
 
   if (httpCode == 200 || httpCode == 201 || httpCode == 204) {
     Serial.printf("[UPLOAD] Success: %s (HTTP %d)\n", filepath, httpCode);
@@ -808,10 +1231,11 @@ bool uploadFile(const char* filepath) {
   }
 }
 
-// Scan directory and upload all un-uploaded files
-void uploadDirectory(const char* dirname) {
+// Count files to upload in directory
+int countFilesToUpload(const char* dirname) {
+  int count = 0;
   File root = SD.open(dirname);
-  if (!root || !root.isDirectory()) return;
+  if (!root || !root.isDirectory()) return 0;
 
   File file = root.openNextFile();
   while (file) {
@@ -819,25 +1243,80 @@ void uploadDirectory(const char* dirname) {
     snprintf(filepath, sizeof(filepath), "%s/%s", dirname, file.name());
 
     if (file.isDirectory()) {
+      count += countFilesToUpload(filepath);
+    } else {
+      String name = String(file.name());
+      if (!name.endsWith(".uploaded") && !isUploaded(filepath)) {
+        count++;
+      }
+    }
+    file = root.openNextFile();
+    yield();  // Feed watchdog
+  }
+  return count;
+}
+
+// Scan directory and upload all un-uploaded files
+void uploadDirectory(const char* dirname) {
+  // Feed watchdog before directory operations
+  yield();
+  delay(10);
+
+  File root = SD.open(dirname);
+  if (!root || !root.isDirectory()) return;
+
+  File file = root.openNextFile();
+  while (file) {
+    // Feed watchdog on each iteration
+    yield();
+
+    char filepath[128];
+    snprintf(filepath, sizeof(filepath), "%s/%s", dirname, file.name());
+
+    if (file.isDirectory()) {
       // Recurse into subdirectories
+      file.close();  // Close before recursing
       uploadDirectory(filepath);
     } else {
       // Skip marker files and already uploaded files
       String name = String(file.name());
+      file.close();  // Close file handle before upload
+
       if (!name.endsWith(".uploaded") && !isUploaded(filepath)) {
+        // Feed watchdog before upload
+        yield();
+        delay(100);
+
         if (uploadFile(filepath)) {
           markUploaded(filepath);
         }
-        delay(500);  // Brief pause between uploads
+
+        // Longer pause between uploads to prevent crashes
+        // Also service OTA and telnet during this time
+        for (int i = 0; i < 10; i++) {
+          yield();
+          delay(50);
+          ArduinoOTA.handle();
+          handleTelnet();
+        }
+
+        // Update display
+        updateDisplay();
       }
     }
+
+    // Feed watchdog before getting next file
+    yield();
     file = root.openNextFile();
   }
+  root.close();
 }
 
 // Try to connect to any configured WiFi network
-// Returns true if connected
+// Returns true if connected, stores SSID in connectedSSID
 bool connectWiFi() {
+  connectedSSID[0] = '\0';
+
   if (config.wifi_count == 0) {
     Serial.println("[WIFI] No networks configured");
     return false;
@@ -850,23 +1329,60 @@ bool connectWiFi() {
     Serial.printf("[WIFI] Trying %s (%d/%d)...\n",
       config.wifi[i].ssid, i + 1, config.wifi_count);
 
+    // Show on display
+    if (oledOK) {
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(0, 10, "CONNECTING...");
+      char buf[32];
+      snprintf(buf, sizeof(buf), "WiFi: %s", config.wifi[i].ssid);
+      u8g2.drawStr(0, 25, buf);
+      snprintf(buf, sizeof(buf), "(%d/%d)", i + 1, config.wifi_count);
+      u8g2.drawStr(0, 40, buf);
+      u8g2.sendBuffer();
+    }
+
     WiFi.begin(config.wifi[i].ssid, config.wifi[i].pass);
 
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts++ < 20) {
       delay(500);
       Serial.print(".");
+      yield();  // Feed watchdog
     }
     Serial.println();
 
     if (WiFi.status() == WL_CONNECTED) {
+      strncpy(connectedSSID, config.wifi[i].ssid, sizeof(connectedSSID) - 1);
       Serial.printf("[WIFI] Connected to %s! IP: %s\n",
-        config.wifi[i].ssid, WiFi.localIP().toString().c_str());
+        connectedSSID, WiFi.localIP().toString().c_str());
+      wifiConnected = true;
+
+      // Start OTA and Telnet services
+      setupOTA();
+      startTelnetServer();
+
+      // Show IP on display
+      if (oledOK) {
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_6x10_tr);
+        u8g2.drawStr(0, 10, "WiFi CONNECTED");
+        char buf[32];
+        snprintf(buf, sizeof(buf), "SSID: %s", connectedSSID);
+        u8g2.drawStr(0, 22, buf);
+        snprintf(buf, sizeof(buf), "IP: %s", WiFi.localIP().toString().c_str());
+        u8g2.drawStr(0, 34, buf);
+        u8g2.drawStr(0, 46, "Telnet: port 23");
+        u8g2.drawStr(0, 58, "OTA: enabled");
+        u8g2.sendBuffer();
+        delay(2000);
+      }
       return true;
     }
 
     WiFi.disconnect(true);
     delay(100);
+    yield();  // Feed watchdog
   }
 
   Serial.println("[WIFI] All networks failed");
@@ -890,13 +1406,37 @@ void checkWiFiUpload() {
 
   // Try to connect to any available WiFi
   if (connectWiFi()) {
-    // Upload all files in /sf directory
-    Serial.println("[UPLOAD] Scanning for files to upload...");
-    uploadDirectory("/sf");
-    Serial.println("[UPLOAD] Done");
+    // Give system time to stabilize after WiFi connect
+    Serial.println("[UPLOAD] Waiting for connection to stabilize...");
+    for (int i = 0; i < 30; i++) {
+      delay(100);
+      yield();
+      ArduinoOTA.handle();  // Keep OTA responsive
+    }
 
-    WiFi.disconnect(true);
-    Serial.println("[WIFI] Disconnected");
+    uploading = true;
+    uploadCount = 0;
+
+    // Count files to upload
+    Serial.println("[UPLOAD] Counting files...");
+    yield();
+    uploadTotal = countFilesToUpload("/sf");
+    Serial.printf("[UPLOAD] Found %d files to upload\n", uploadTotal);
+
+    if (uploadTotal > 0) {
+      updateDisplay();
+
+      // Upload all files in /sf directory
+      Serial.println("[UPLOAD] Starting upload...");
+      uploadDirectory("/sf");
+      Serial.println("[UPLOAD] Done");
+    } else {
+      Serial.println("[UPLOAD] No new files to upload");
+    }
+
+    uploading = false;
+    // Keep WiFi connected for OTA and telnet
+    Serial.println("[UPLOAD] Complete, WiFi stays connected for OTA/telnet");
   }
 
   // Reset stationary timer to avoid rapid retries
@@ -904,27 +1444,251 @@ void checkWiFiUpload() {
 }
 
 // ============================================================
-// SERIAL COMMANDS
+// SERIAL/TELNET COMMANDS
 // ============================================================
-void listDir(const char* dirname, int depth = 0) {
+void listDirOutput(const char* dirname, int depth, bool toTelnet) {
   File root = SD.open(dirname);
   if (!root || !root.isDirectory()) {
-    Serial.printf("Failed to open %s\n", dirname);
+    tprintf("Failed to open %s\n", dirname);
     return;
   }
 
   File file = root.openNextFile();
   while (file) {
-    for (int i = 0; i < depth; i++) Serial.print("  ");
+    char indent[32] = "";
+    for (int i = 0; i < depth && i < 10; i++) strcat(indent, "  ");
     if (file.isDirectory()) {
-      Serial.printf("[DIR]  %s/\n", file.name());
+      tprintf("%s[DIR]  %s/\n", indent, file.name());
       char path[128];
       snprintf(path, sizeof(path), "%s/%s", dirname, file.name());
-      listDir(path, depth + 1);
+      listDirOutput(path, depth + 1, toTelnet);
     } else {
-      Serial.printf("[FILE] %s (%lu bytes)\n", file.name(), file.size());
+      tprintf("%s[FILE] %s (%lu bytes)\n", indent, file.name(), file.size());
     }
     file = root.openNextFile();
+    yield();
+  }
+}
+
+// Process command from serial or telnet
+void processCommand(String cmd, bool fromTelnet) {
+  cmd.trim();
+  if (cmd.length() == 0) return;
+
+  if (cmd == "ls" || cmd == "list") {
+    if (!sdOK) {
+      tprintln("SD card not available");
+      return;
+    }
+    tprintln("=== SD Card Contents ===");
+    listDirOutput("/", 0, fromTelnet);
+    tprintln("========================");
+
+  } else if (cmd == "status") {
+    tprintln("=== Status ===");
+    tprintf("GPS: %s, SAT:%d, HDOP:%.1f\n",
+      gps.valid ? "FIX" : "NO FIX", gps.satellites, gps.hdop);
+    tprintf("Position: %.6f, %.6f\n", gps.lat, gps.lon);
+    tprintf("Speed: %.1f kt, Course: %.0f\n", gps.speed_kts, gps.course);
+    tprintf("IMU: %s (heel:%.0f pitch:%.0f)\n",
+      imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE", imu.heel, imu.pitch);
+    tprintf("SD:  %s\n", sdOK ? "OK" : "FAILED");
+    tprintf("Logging: %s\n", logging ? "YES" : "NO");
+    tprintf("Data: %lu KB\n", totalBytes / 1024);
+    tprintf("WiFi: %s\n", wifiConnected ? connectedSSID : "disconnected");
+    if (wifiConnected) {
+      tprintf("IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+    tprintln("===============");
+
+  } else if (cmd.startsWith("cat ")) {
+    String path = cmd.substring(4);
+    path.trim();
+    if (!sdOK) {
+      tprintln("SD card not available");
+      return;
+    }
+    File f = SD.open(path.c_str());
+    if (!f) {
+      tprintf("Cannot open: %s\n", path.c_str());
+      return;
+    }
+    tprintf("=== %s (%lu bytes) ===\n", path.c_str(), f.size());
+    int lines = 0;
+    while (f.available() && lines < 50) {
+      String line = f.readStringUntil('\n');
+      tprintf("%s\n", line.c_str());
+      lines++;
+      yield();
+    }
+    if (f.available()) tprintln("... (truncated at 50 lines)");
+    f.close();
+
+  } else if (cmd == "upload") {
+    if (!sdOK) {
+      tprintln("SD card not available");
+      return;
+    }
+    if (config.wifi_count == 0) {
+      tprintln("WiFi not configured in config.txt");
+      return;
+    }
+    tprintln("Starting manual upload...");
+    if (wifiConnected || connectWiFi()) {
+      uploadDirectory("/sf");
+      tprintln("Upload complete");
+    }
+
+  } else if (cmd == "wifi") {
+    if (wifiConnected) {
+      tprintf("Already connected to %s\n", connectedSSID);
+      tprintf("IP: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+      tprintln("Connecting to WiFi...");
+      if (connectWiFi()) {
+        tprintf("Connected to %s\n", connectedSSID);
+        tprintf("IP: %s\n", WiFi.localIP().toString().c_str());
+      } else {
+        tprintln("WiFi connection failed");
+      }
+    }
+
+  } else if (cmd == "disconnect") {
+    if (wifiConnected) {
+      WiFi.disconnect(true);
+      wifiConnected = false;
+      connectedSSID[0] = '\0';
+      tprintln("WiFi disconnected");
+    } else {
+      tprintln("Not connected");
+    }
+
+  } else if (cmd == "reboot") {
+    tprintln("Rebooting...");
+    delay(500);
+    ESP.restart();
+
+  } else if (cmd == "gps") {
+    tprintln("=== GPS Details ===");
+    tprintf("Fix: %s (quality %d)\n", gps.valid ? "YES" : "NO", gps.fix_quality);
+    tprintf("Satellites: %d used / %d in view\n", gps.satellites, satsInView);
+    tprintf("HDOP: %.1f\n", gps.hdop);
+    tprintf("Position: %.8f, %.8f\n", gps.lat, gps.lon);
+    tprintf("Altitude: %.1f m\n", gps.alt);
+    tprintf("Speed: %.2f kt\n", gps.speed_kts);
+    tprintf("Course: %.1f deg\n", gps.course);
+    tprintf("UTC: %s\n", gps.utc_time);
+    tprintf("Date: %s\n", gps.date);
+    tprintln("===================");
+
+  } else if (cmd == "imu") {
+    tprintln("=== IMU Details ===");
+    tprintf("Type: %s\n", imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE");
+    tprintf("Heading: %.0f deg (magnetic)\n", imu.heading);
+    tprintf("Heel: %.1f deg (starboard +, port -)\n", imu.heel);
+    tprintf("Pitch: %.1f deg (bow up +, bow down -)\n", imu.pitch);
+    tprintf("Accel: X=%.2f Y=%.2f Z=%.2f\n", imu.accel_x, imu.accel_y, imu.accel_z);
+    tprintf("Calibration offsets: heel=%.1f, pitch=%.1f\n", imuHeelOffset, imuPitchOffset);
+    tprintln("===================");
+
+  } else if (cmd == "imutest") {
+    tprintln("=== IMU Axis Test (10 seconds) ===");
+    tprintln("Tilt the device and watch which values change:");
+    tprintln("  - Heel should change when tilting PORT/STARBOARD");
+    tprintln("  - Pitch should change when tilting BOW UP/DOWN");
+    tprintln("");
+    unsigned long start = millis();
+    while (millis() - start < 10000) {
+      readIMU();
+      // Show raw values (before calibration offset)
+      float rawHeel = imu.heel + imuHeelOffset;
+      float rawPitch = imu.pitch + imuPitchOffset;
+      tprintf("H:%+6.1f P:%+6.1f  Accel X:%+5.2f Y:%+5.2f Z:%+5.2f\r",
+        rawHeel, rawPitch, imu.accel_x, imu.accel_y, imu.accel_z);
+      delay(200);
+      yield();
+    }
+    tprintln("\n=== Test complete ===");
+    tprintln("If axes are wrong, note which accel axis changes for each tilt");
+
+  } else if (cmd == "cal" || cmd == "calibrate") {
+    tprintln("=== IMU Calibration ===");
+    tprintln("Place boat level on flat surface");
+    tprintln("Current readings:");
+    tprintf("  Heel: %.1f, Pitch: %.1f\n", imu.heel, imu.pitch);
+    tprintln("Setting current position as zero...");
+    calibrateIMU();
+    tprintln("Calibration saved to SD card");
+    tprintf("New offsets: heel=%.1f, pitch=%.1f\n", imuHeelOffset, imuPitchOffset);
+    tprintln("=======================");
+
+  } else if (cmd == "calreset") {
+    tprintln("Resetting IMU calibration to defaults...");
+    imuHeelOffset = 0.0;
+    imuPitchOffset = 0.0;
+    saveIMUCalibration();
+    tprintln("Calibration reset to zero");
+
+  } else if (cmd == "cleanup" || cmd == "delup") {
+    if (!sdOK) {
+      tprintln("SD card not available");
+      return;
+    }
+    tprintln("Deleting uploaded files...");
+    int deleted = deleteUploadedFiles("/sf");
+    tprintf("Deleted %d files\n", deleted);
+
+  } else if (cmd == "gpsraw") {
+    tprintln("=== Raw GPS data (10 seconds) ===");
+    tprintln("Press any key to stop early...");
+    unsigned long start = millis();
+    while (millis() - start < 10000) {
+      while (Serial2.available()) {
+        char c = Serial2.read();
+        if (c >= 32 || c == '\n' || c == '\r') {
+          Serial.print(c);
+          if (telnetClient && telnetClient.connected()) {
+            telnetClient.print(c);
+          }
+        }
+      }
+      // Check for keypress to stop
+      if (Serial.available() || (telnetClient && telnetClient.available())) {
+        while (Serial.available()) Serial.read();
+        while (telnetClient && telnetClient.available()) telnetClient.read();
+        break;
+      }
+      yield();
+    }
+    tprintln("\n=== End raw GPS ===");
+
+  } else if (cmd == "gpscfg") {
+    tprintln("Reconfiguring GPS...");
+    configureLG290P();
+    tprintln("GPS reconfigured");
+
+  } else if (cmd == "help") {
+    tprintln("=== Commands ===");
+    tprintln("  status     - Show device status");
+    tprintln("  gps        - Detailed GPS info");
+    tprintln("  gpsraw     - Show raw GPS serial data");
+    tprintln("  gpscfg     - Reconfigure GPS module");
+    tprintln("  imu        - Detailed IMU info");
+    tprintln("  imutest    - Test IMU axes (5 sec)");
+    tprintln("  cal        - Calibrate IMU (set level)");
+    tprintln("  calreset   - Reset IMU calibration");
+    tprintln("  ls, list   - List SD card files");
+    tprintln("  cat <file> - Show file contents");
+    tprintln("  upload     - Manual upload to S3");
+    tprintln("  cleanup    - Delete uploaded files");
+    tprintln("  wifi       - Connect to WiFi");
+    tprintln("  disconnect - Disconnect WiFi");
+    tprintln("  reboot     - Restart device");
+    tprintln("  help       - Show this help");
+    tprintln("================");
+
+  } else {
+    tprintf("Unknown command: %s (type 'help')\n", cmd.c_str());
   }
 }
 
@@ -936,75 +1700,7 @@ void handleSerialCommand() {
   if (cmd.length() == 0) return;
 
   Serial.printf("\n> %s\n", cmd.c_str());
-
-  if (cmd == "ls" || cmd == "list") {
-    if (!sdOK) {
-      Serial.println("SD card not available");
-      return;
-    }
-    Serial.println("=== SD Card Contents ===");
-    listDir("/");
-    Serial.println("========================");
-
-  } else if (cmd == "status") {
-    Serial.println("=== Status ===");
-    Serial.printf("GPS: %s, SAT:%d, HDOP:%.1f\n",
-      gps.valid ? "FIX" : "NO FIX", gps.satellites, gps.hdop);
-    Serial.printf("IMU: %s\n", imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE");
-    Serial.printf("SD:  %s\n", sdOK ? "OK" : "FAILED");
-    Serial.printf("Logging: %s\n", logging ? "YES" : "NO");
-    Serial.printf("Data: %lu KB\n", totalBytes / 1024);
-    Serial.println("===============");
-
-  } else if (cmd.startsWith("cat ")) {
-    String path = cmd.substring(4);
-    path.trim();
-    if (!sdOK) {
-      Serial.println("SD card not available");
-      return;
-    }
-    File f = SD.open(path.c_str());
-    if (!f) {
-      Serial.printf("Cannot open: %s\n", path.c_str());
-      return;
-    }
-    Serial.printf("=== %s (%lu bytes) ===\n", path.c_str(), f.size());
-    int lines = 0;
-    while (f.available() && lines < 20) {
-      Serial.println(f.readStringUntil('\n'));
-      lines++;
-    }
-    if (f.available()) Serial.println("... (truncated)");
-    f.close();
-
-  } else if (cmd == "upload") {
-    if (!sdOK) {
-      Serial.println("SD card not available");
-      return;
-    }
-    if (config.wifi_count == 0) {
-      Serial.println("WiFi not configured in config.txt");
-      return;
-    }
-    Serial.println("Starting manual upload...");
-    if (connectWiFi()) {
-      uploadDirectory("/sf");
-      WiFi.disconnect(true);
-      Serial.println("Upload complete, WiFi disconnected");
-    }
-
-  } else if (cmd == "help") {
-    Serial.println("=== Commands ===");
-    Serial.println("  ls, list  - List SD card files");
-    Serial.println("  cat <file> - Show file contents (first 20 lines)");
-    Serial.println("  status    - Show device status");
-    Serial.println("  upload    - Manual upload to AWS S3");
-    Serial.println("  help      - Show this help");
-    Serial.println("================");
-
-  } else {
-    Serial.printf("Unknown command: %s (type 'help')\n", cmd.c_str());
-  }
+  processCommand(cmd, false);
 }
 
 // ============================================================
@@ -1012,6 +1708,15 @@ void handleSerialCommand() {
 // ============================================================
 void loop() {
   unsigned long now = millis();
+
+  // Handle OTA updates (highest priority)
+  if (wifiConnected) {
+    ArduinoOTA.handle();
+    if (otaInProgress) return;  // Don't do anything else during OTA
+
+    // Handle telnet connections
+    handleTelnet();
+  }
 
   // Check for serial commands
   handleSerialCommand();
@@ -1030,7 +1735,9 @@ void loop() {
   }
 
   if (now - lastDisp >= DISPLAY_UPDATE_MS) {
-    updateDisplay();
+    if (!uploading) {  // Don't override upload display
+      updateDisplay();
+    }
     if (logging) digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     lastDisp = now;
   }
@@ -1042,6 +1749,10 @@ void loop() {
     lastFlush = now;
   }
 
-  static unsigned long lastWifi = 0;
-  if (now - lastWifi >= 60000) { checkWiFiUpload(); lastWifi = now; }
+  // Auto WiFi upload check (every 60 seconds when not already connected)
+  static unsigned long lastWifiCheck = 0;
+  if (!wifiConnected && now - lastWifiCheck >= 60000) {
+    checkWiFiUpload();
+    lastWifiCheck = now;
+  }
 }
