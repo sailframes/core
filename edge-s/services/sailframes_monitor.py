@@ -4018,7 +4018,7 @@ SAILING_DASHBOARD_HTML = """
         }
         .cpu-section {
             position: absolute;
-            bottom: 75px;
+            bottom: 115px;
             left: 15px;
             width: 250px;
         }
