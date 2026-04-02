@@ -13,7 +13,7 @@ Group=root
 # Environment
 Environment=SAILFRAMES_CONFIG=/etc/sailframes/sailframes.yaml
 Environment=SAILFRAMES_DATA_DIR=/mnt/sailframes-data
-Environment=SAILFRAMES_S3_BUCKET=sailframes-fleet-data-prod
+Environment=SAILFRAMES_UPLOAD_URL=https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/prod/upload
 
 # Logging
 StandardOutput=journal

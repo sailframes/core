@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# SailFrames Data Sync to AWS S3
-# Syncs race data from Pi device to AWS S3 bucket
+# SailFrames Data Sync to AWS S3 via API Gateway
+# Uploads race data from Pi device to S3 using HTTP (no AWS credentials needed)
 #
 # Usage: sailframes-sync.sh [--force]
 #
@@ -14,22 +14,22 @@ set -e
 # Configuration
 CONFIG_FILE="${SAILFRAMES_CONFIG:-/etc/sailframes/sailframes.yaml}"
 DATA_DIR="${SAILFRAMES_DATA_DIR:-/mnt/sailframes-data}"
-S3_BUCKET="${SAILFRAMES_S3_BUCKET:-sailframes-fleet-data-prod}"
+UPLOAD_URL="${SAILFRAMES_UPLOAD_URL:-https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/prod/upload}"
 SYNC_LOG="/var/log/sailframes/sync.log"
 SYNC_STATE="/var/lib/sailframes/last-sync"
+UPLOADED_MARKER=".uploaded"
 LOCK_FILE="/var/run/sailframes-sync.lock"
 
 # Parse device ID from config
 get_device_id() {
     if [ -f "$CONFIG_FILE" ]; then
-        grep -E "^device_id:" "$CONFIG_FILE" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "unknown"
+        grep -E "^\s*id:" "$CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}' | tr -d '"' || echo "S1"
     else
         hostname
     fi
 }
 
 DEVICE_ID=$(get_device_id)
-S3_PREFIX="raw/${DEVICE_ID}"
 
 # Ensure directories exist
 mkdir -p /var/log/sailframes
@@ -85,21 +85,6 @@ check_network() {
     return 1
 }
 
-# Check AWS credentials
-check_credentials() {
-    if ! aws sts get-caller-identity >/dev/null 2>&1; then
-        log "ERROR" "AWS credentials not configured or invalid"
-        return 1
-    fi
-    return 0
-}
-
-# Get total size of files to sync
-get_sync_size() {
-    local folder="$1"
-    du -sb "$folder" 2>/dev/null | awk '{print $1}' || echo "0"
-}
-
 # Format bytes to human readable
 format_size() {
     local bytes="$1"
@@ -114,6 +99,53 @@ format_size() {
     fi
 }
 
+# Upload a single file via HTTP
+upload_file() {
+    local filepath="$1"
+    local filename
+    filename=$(basename "$filepath")
+
+    # Skip if already uploaded
+    if [ -f "${filepath}${UPLOADED_MARKER}" ]; then
+        return 0
+    fi
+
+    # Skip temp files
+    case "$filename" in
+        *.tmp|*.swp|.DS_Store|*.pyc)
+            return 0
+            ;;
+    esac
+
+    local filesize
+    filesize=$(stat -c %s "$filepath" 2>/dev/null || stat -f %z "$filepath")
+
+    log "INFO" "  Uploading: $filename ($(format_size "$filesize"))"
+
+    # Upload via HTTP POST with query parameters
+    local response
+    local http_code
+
+    http_code=$(curl -s -w "%{http_code}" -o /tmp/upload_response.txt \
+        -X POST \
+        "${UPLOAD_URL}?boat=${DEVICE_ID}&file=${filepath}" \
+        --data-binary "@${filepath}" \
+        -H "Content-Type: application/octet-stream" \
+        --max-time 300 \
+        2>/dev/null)
+
+    if [ "$http_code" = "200" ]; then
+        # Mark as uploaded
+        touch "${filepath}${UPLOADED_MARKER}"
+        log "INFO" "    OK"
+        return 0
+    else
+        response=$(cat /tmp/upload_response.txt 2>/dev/null || echo "No response")
+        log "ERROR" "    FAILED (HTTP $http_code): $response"
+        return 1
+    fi
+}
+
 # Sync a single date folder
 sync_date() {
     local date_folder="$1"
@@ -122,30 +154,40 @@ sync_date() {
 
     log "INFO" "Syncing $date_name..."
 
-    local size
-    size=$(get_sync_size "$date_folder")
-    log "INFO" "  Size: $(format_size "$size")"
+    local total_files=0
+    local uploaded_files=0
+    local failed_files=0
+    local skipped_files=0
 
-    # Sync with aws cli
-    # --size-only: skip files that match in size (faster for unchanged files)
-    # --exclude: skip temporary and system files
-    if aws s3 sync \
-        "$date_folder" \
-        "s3://${S3_BUCKET}/${S3_PREFIX}/${date_name}/" \
-        --exclude "*.tmp" \
-        --exclude "*.swp" \
-        --exclude ".DS_Store" \
-        --exclude "*.pyc" \
-        --exclude "__pycache__/*" \
-        --size-only \
-        --no-progress \
-        2>&1 | tee -a "$SYNC_LOG"; then
+    # Find all data files (csv, json, rtcm3, ubx, mp4)
+    while IFS= read -r -d '' file; do
+        ((total_files++))
 
-        log "INFO" "SUCCESS: Synced $date_name"
+        # Skip marker files
+        if [[ "$file" == *"$UPLOADED_MARKER" ]]; then
+            continue
+        fi
+
+        # Skip if already uploaded
+        if [ -f "${file}${UPLOADED_MARKER}" ]; then
+            ((skipped_files++))
+            continue
+        fi
+
+        if upload_file "$file"; then
+            ((uploaded_files++))
+        else
+            ((failed_files++))
+        fi
+
+    done < <(find "$date_folder" -type f \( -name "*.csv" -o -name "*.json" -o -name "*.rtcm3" -o -name "*.ubx" -o -name "*.mp4" -o -name "*.h264" \) -print0)
+
+    log "INFO" "  $date_name: $uploaded_files uploaded, $skipped_files skipped, $failed_files failed"
+
+    if [ "$failed_files" -eq 0 ]; then
         echo "$date_name" >> "$SYNC_STATE"
         return 0
     else
-        log "ERROR" "Failed to sync $date_name"
         return 1
     fi
 }
@@ -159,6 +201,8 @@ main() {
         case "$1" in
             --force)
                 force=true
+                # Remove uploaded markers if forcing
+                find "$DATA_DIR" -name "*${UPLOADED_MARKER}" -delete 2>/dev/null || true
                 shift
                 ;;
             *)
@@ -168,10 +212,10 @@ main() {
     done
 
     log "INFO" "========================================="
-    log "INFO" "Starting SailFrames sync"
+    log "INFO" "Starting SailFrames sync (HTTP mode)"
     log "INFO" "Device: ${DEVICE_ID}"
     log "INFO" "Data dir: ${DATA_DIR}"
-    log "INFO" "S3 bucket: ${S3_BUCKET}"
+    log "INFO" "Upload URL: ${UPLOAD_URL}"
     log "INFO" "========================================="
 
     # Acquire lock
@@ -179,10 +223,6 @@ main() {
 
     # Pre-flight checks
     if ! check_network; then
-        exit 1
-    fi
-
-    if ! check_credentials; then
         exit 1
     fi
 
@@ -205,22 +245,6 @@ main() {
         local date_name
         date_name=$(basename "$date_folder")
 
-        # Skip if already synced (unless --force)
-        if [ "$force" = false ] && grep -q "^${date_name}$" "$SYNC_STATE" 2>/dev/null; then
-            # Check if folder was modified since last sync
-            local folder_mtime
-            local state_mtime
-
-            folder_mtime=$(stat -c %Y "$date_folder" 2>/dev/null || stat -f %m "$date_folder")
-            state_mtime=$(stat -c %Y "$SYNC_STATE" 2>/dev/null || stat -f %m "$SYNC_STATE")
-
-            if [ "$folder_mtime" -lt "$state_mtime" ]; then
-                log "INFO" "Skipping $date_name (unchanged since last sync)"
-                ((total_skipped++))
-                continue
-            fi
-        fi
-
         if sync_date "$date_folder"; then
             ((total_synced++))
         else
@@ -230,9 +254,8 @@ main() {
 
     log "INFO" "========================================="
     log "INFO" "Sync complete"
-    log "INFO" "  Synced: $total_synced"
-    log "INFO" "  Failed: $total_failed"
-    log "INFO" "  Skipped: $total_skipped"
+    log "INFO" "  Folders synced: $total_synced"
+    log "INFO" "  Folders with errors: $total_failed"
     log "INFO" "========================================="
 
     # Return non-zero if any failed
