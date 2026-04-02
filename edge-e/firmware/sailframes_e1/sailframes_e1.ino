@@ -796,8 +796,14 @@ void parseNMEA(const char* s) {
     gps.newGGA = true;
   } else if (strstr(s, "RMC")) {
     char f[32];
-    if (getField(s, 7, f, sizeof(f))) gps.speed_kts = atof(f);
-    if (getField(s, 8, f, sizeof(f))) gps.course = atof(f);
+    if (getField(s, 7, f, sizeof(f))) {
+      float spd = atof(f);
+      if (spd >= 0 && spd < 100) gps.speed_kts = spd;  // Reject impossible speeds (>100kt)
+    }
+    if (getField(s, 8, f, sizeof(f))) {
+      float crs = atof(f);
+      if (crs >= 0 && crs <= 360) gps.course = crs;  // Reject invalid course
+    }
     if (getField(s, 9, f, sizeof(f))) strncpy(gps.date, f, sizeof(gps.date) - 1);
   } else if (strstr(s, "GSV")) {
     // GSV sentences: GPGSV (GPS), GLGSV (GLONASS), GAGSV (Galileo), GBGSV (BeiDou)
