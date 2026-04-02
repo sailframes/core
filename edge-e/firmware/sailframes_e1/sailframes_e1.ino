@@ -1,31 +1,34 @@
 /*
- * SailFrames E1 — Fleet Tracker Firmware v2.0
- * 
+ * SailFrames E1 — Fleet Tracker Firmware v2.1
+ *
  * Hardware:
  *   - ESP32 DevKit V1 (ELEGOO)
  *   - Waveshare LG290P GNSS (UART2: RX=GPIO16, TX=GPIO17, 460800 baud)
  *   - BNO085 IMU (I2C: 0x4A) — heel, pitch, heading
  *   - SSD1309 OLED 2.42" 128x64 (I2C: 0x3C)
  *   - MicroSD card module (SPI: MOSI=23, MISO=19, CLK=18, CS=5)
+ *   - Calypso Mini wind sensor (BLE) — apparent wind speed/direction
  *   - 18650 Battery Shield (5V → VIN)
- * 
+ *
  * Behavior:
  *   Power on → init sensors → configure LG290P for raw RTCM3 output
- *   → wait for GPS fix → auto-log to SD (NMEA CSV + RTCM3 binary)
+ *   → scan for Calypso wind sensor (BLE) → wait for GPS fix
+ *   → auto-log to SD (NMEA CSV + IMU CSV + Wind CSV + RTCM3 binary)
  *   → when yacht club Wi-Fi detected → auto-upload to AWS S3
  *   Power off → done
- * 
+ *
  * PPK Workflow:
  *   1. Collect *_raw.rtcm3 from SD card
  *   2. Convert to RINEX using RTKCONV (input format: RTCM3)
  *   3. Download CORS RINEX from NOAA UFCORS for matching time window
  *   4. Process with RTKPOST → centimeter-level positions
- * 
+ *
  * Log files per session:
  *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_nav.csv
  *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_imu.csv
+ *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_wind.csv
  *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_raw.rtcm3
- * 
+ *
  * License: Apache 2.0
  * Project: https://github.com/sailframes
  */
@@ -39,6 +42,7 @@
 #include <HTTPClient.h>
 #include <U8g2lib.h>
 #include <Adafruit_BNO08x.h>
+#include <NimBLEDevice.h>
 
 // ============================================================
 // PIN DEFINITIONS
@@ -67,6 +71,19 @@
 
 // BNO085 IMU enabled
 #define ENABLE_BNO085       true
+
+// Wind sensor (Calypso Mini BLE)
+#define ENABLE_WIND         true
+#define WIND_SCAN_TIMEOUT_MS    10000
+#define WIND_RECONNECT_MS       30000
+#define WIND_INTERVAL_MS        1000   // Log at 1Hz
+
+// Calypso BLE UUIDs (Environmental Sensing Service 0x181A)
+static NimBLEUUID WIND_SERVICE_UUID("181A");
+static NimBLEUUID WIND_SPEED_CHAR_UUID("2A72");      // Apparent Wind Speed (uint16, m/s * 100)
+static NimBLEUUID WIND_DIR_CHAR_UUID("2A73");        // Apparent Wind Direction (uint16, degrees * 100)
+static NimBLEUUID BATTERY_SERVICE_UUID("180F");
+static NimBLEUUID BATTERY_CHAR_UUID("2A19");         // Battery Level (uint8, 0-100%)
 // ============================================================
 // NMEA CHECKSUM + PQTM SENDER
 // ============================================================
@@ -100,6 +117,18 @@ struct IMUData {
   float heel = 0, pitch = 0, heading = 0;
 } imu;
 
+struct WindData {
+  float speed_kts = 0;      // Apparent wind speed in knots
+  float speed_mps = 0;      // Apparent wind speed in m/s
+  int angle_deg = 0;        // Apparent wind angle (0-360)
+  int battery = -1;         // Battery level (0-100, -1 = unknown)
+  bool connected = false;
+  bool newData = false;
+  unsigned long lastUpdate = 0;
+  char deviceName[32] = "";
+  char deviceAddr[20] = "";
+} wind;
+
 struct RTCM3Parser {
   enum State { WAIT_SYNC, READ_HEADER, READ_PAYLOAD };
   State state = WAIT_SYNC;
@@ -124,6 +153,8 @@ struct Config {
   char upload_url[256] = "";
   char boat_id[16] = "E1";
   int gps_rate_hz = 10;
+  char wind_mac[20] = "";   // Calypso MAC address (auto-saved after first scan)
+  bool wind_enabled = true;
 } config;
 
 // ============================================================
@@ -133,7 +164,7 @@ struct Config {
 U8G2_SSD1309_128X64_NONAME0_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 Adafruit_BNO08x bno08x(-1);  // No reset pin
 sh2_SensorValue_t sensorValue;
-File navFile, imuFile, rawFile;
+File navFile, imuFile, rawFile, windFile;
 bool sdOK = false, imuOK = false, oledOK = false, logging = false;
 bool useIMU_BNO = false;
 bool uploading = false;
@@ -152,10 +183,265 @@ float imuPitchOffset = 0.0;
 WiFiServer telnetServer(23);
 WiFiClient telnetClient;
 String telnetBuffer = "";
-unsigned long logStart = 0, lastDisp = 0, lastFlush = 0, lastIMU = 0;
+unsigned long logStart = 0, lastDisp = 0, lastFlush = 0, lastIMU = 0, lastWind = 0;
+unsigned long lastWindScan = 0;
+
+// BLE client for Calypso wind sensor
+NimBLEClient* pWindClient = nullptr;
+NimBLERemoteCharacteristic* pWindSpeedChar = nullptr;
+NimBLERemoteCharacteristic* pWindDirChar = nullptr;
+NimBLERemoteCharacteristic* pBatteryChar = nullptr;
+bool windScanning = false;
+bool windOK = false;
 unsigned long totalBytes = 0;
 char nmeaBuf[256];
 int nmeaIdx = 0;
+
+// ============================================================
+// WIND SENSOR (CALYPSO BLE)
+// ============================================================
+#if ENABLE_WIND
+
+// BLE notification callback for wind speed
+void windSpeedNotifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+  if (length >= 2) {
+    uint16_t raw = pData[0] | (pData[1] << 8);
+    wind.speed_mps = raw / 100.0;
+    wind.speed_kts = wind.speed_mps * 1.94384;
+    wind.newData = true;
+    wind.lastUpdate = millis();
+  }
+}
+
+// BLE notification callback for wind direction
+void windDirNotifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+  if (length >= 2) {
+    uint16_t raw = pData[0] | (pData[1] << 8);
+    wind.angle_deg = raw / 100;  // 0.01 degree resolution
+    wind.newData = true;
+    wind.lastUpdate = millis();
+  }
+}
+
+// BLE notification callback for battery
+void batteryNotifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+  if (length >= 1) {
+    wind.battery = pData[0];
+  }
+}
+
+// BLE client callbacks
+class WindClientCallbacks : public NimBLEClientCallbacks {
+  void onConnect(NimBLEClient* pClient) {
+    Serial.println("[WIND] BLE connected");
+    wind.connected = true;
+  }
+
+  void onDisconnect(NimBLEClient* pClient) {
+    Serial.println("[WIND] BLE disconnected");
+    wind.connected = false;
+    windOK = false;
+    pWindSpeedChar = nullptr;
+    pWindDirChar = nullptr;
+    pBatteryChar = nullptr;
+  }
+};
+
+static WindClientCallbacks windClientCallbacks;
+
+// Save discovered MAC to config for faster reconnection
+void saveWindMAC(const char* mac) {
+  strncpy(config.wind_mac, mac, sizeof(config.wind_mac) - 1);
+
+  // Save to SD card
+  File f = SD.open("/wind_mac.txt", FILE_WRITE);
+  if (f) {
+    f.println(mac);
+    f.close();
+    Serial.printf("[WIND] Saved MAC %s for auto-reconnect\n", mac);
+  }
+}
+
+// Load saved wind MAC from SD
+void loadWindMAC() {
+  File f = SD.open("/wind_mac.txt", FILE_READ);
+  if (f) {
+    String mac = f.readStringUntil('\n');
+    mac.trim();
+    if (mac.length() > 0) {
+      mac.toCharArray(config.wind_mac, sizeof(config.wind_mac));
+      Serial.printf("[WIND] Loaded saved MAC: %s\n", config.wind_mac);
+    }
+    f.close();
+  }
+}
+
+// Scan for Calypso wind sensor
+bool scanForCalypso() {
+  Serial.println("[WIND] Scanning for Calypso...");
+  windScanning = true;
+
+  NimBLEScan* pScan = NimBLEDevice::getScan();
+  pScan->setActiveScan(true);
+  pScan->setInterval(100);
+  pScan->setWindow(99);
+
+  NimBLEScanResults results = pScan->start(WIND_SCAN_TIMEOUT_MS / 1000, false);
+
+  for (int i = 0; i < results.getCount(); i++) {
+    NimBLEAdvertisedDevice device = results.getDevice(i);
+    String name = device.getName().c_str();
+    name.toLowerCase();
+
+    // Look for Calypso devices
+    if (name.indexOf("calypso") >= 0 || name.indexOf("ultrasonic") >= 0) {
+      Serial.printf("[WIND] Found: %s at %s\n",
+        device.getName().c_str(), device.getAddress().toString().c_str());
+
+      strncpy(wind.deviceName, device.getName().c_str(), sizeof(wind.deviceName) - 1);
+      strncpy(wind.deviceAddr, device.getAddress().toString().c_str(), sizeof(wind.deviceAddr) - 1);
+
+      // Save MAC for faster reconnection
+      saveWindMAC(wind.deviceAddr);
+
+      windScanning = false;
+      pScan->clearResults();
+      return true;
+    }
+  }
+
+  Serial.println("[WIND] Calypso not found");
+  windScanning = false;
+  pScan->clearResults();
+  return false;
+}
+
+// Connect to Calypso wind sensor
+bool connectToCalypso() {
+  // Use saved MAC if available
+  const char* targetAddr = strlen(config.wind_mac) > 0 ? config.wind_mac : wind.deviceAddr;
+
+  if (strlen(targetAddr) == 0) {
+    // Need to scan first
+    if (!scanForCalypso()) {
+      return false;
+    }
+    targetAddr = wind.deviceAddr;
+  }
+
+  Serial.printf("[WIND] Connecting to %s...\n", targetAddr);
+
+  if (pWindClient == nullptr) {
+    pWindClient = NimBLEDevice::createClient();
+    pWindClient->setClientCallbacks(&windClientCallbacks);
+  }
+
+  if (!pWindClient->connect(NimBLEAddress(targetAddr))) {
+    Serial.println("[WIND] Connection failed");
+    // Clear saved MAC if connection failed - might be wrong device
+    if (strlen(config.wind_mac) > 0) {
+      Serial.println("[WIND] Clearing saved MAC, will scan next time");
+      config.wind_mac[0] = '\0';
+    }
+    return false;
+  }
+
+  // Get Wind Service
+  NimBLERemoteService* pWindService = pWindClient->getService(WIND_SERVICE_UUID);
+  if (pWindService == nullptr) {
+    Serial.println("[WIND] Wind service not found");
+    pWindClient->disconnect();
+    return false;
+  }
+
+  // Subscribe to wind speed notifications
+  pWindSpeedChar = pWindService->getCharacteristic(WIND_SPEED_CHAR_UUID);
+  if (pWindSpeedChar && pWindSpeedChar->canNotify()) {
+    pWindSpeedChar->subscribe(true, windSpeedNotifyCallback);
+    Serial.println("[WIND] Subscribed to wind speed");
+  }
+
+  // Subscribe to wind direction notifications
+  pWindDirChar = pWindService->getCharacteristic(WIND_DIR_CHAR_UUID);
+  if (pWindDirChar && pWindDirChar->canNotify()) {
+    pWindDirChar->subscribe(true, windDirNotifyCallback);
+    Serial.println("[WIND] Subscribed to wind direction");
+  }
+
+  // Try to get battery service
+  NimBLERemoteService* pBattService = pWindClient->getService(BATTERY_SERVICE_UUID);
+  if (pBattService) {
+    pBatteryChar = pBattService->getCharacteristic(BATTERY_CHAR_UUID);
+    if (pBatteryChar) {
+      if (pBatteryChar->canNotify()) {
+        pBatteryChar->subscribe(true, batteryNotifyCallback);
+      } else if (pBatteryChar->canRead()) {
+        uint8_t batt = pBatteryChar->readValue<uint8_t>();
+        wind.battery = batt;
+        Serial.printf("[WIND] Battery: %d%%\n", wind.battery);
+      }
+    }
+  }
+
+  wind.connected = true;
+  windOK = true;
+  Serial.println("[WIND] Connected and streaming");
+  return true;
+}
+
+// Initialize BLE for wind sensor
+void initWindSensor() {
+  if (!config.wind_enabled) {
+    Serial.println("[WIND] Disabled in config");
+    return;
+  }
+
+  Serial.println("[WIND] Initializing BLE...");
+  NimBLEDevice::init("SailFrames-E1");
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // Max power for range
+
+  // Load saved MAC from SD
+  if (sdOK) {
+    loadWindMAC();
+  }
+
+  // Try to connect
+  connectToCalypso();
+}
+
+// Check wind connection and reconnect if needed
+void checkWindConnection() {
+  if (!config.wind_enabled) return;
+
+  unsigned long now = millis();
+
+  // If connected, nothing to do
+  if (wind.connected && windOK) {
+    return;
+  }
+
+  // Throttle reconnection attempts
+  if (now - lastWindScan < WIND_RECONNECT_MS) {
+    return;
+  }
+  lastWindScan = now;
+
+  Serial.println("[WIND] Attempting reconnect...");
+  connectToCalypso();
+}
+
+// Log wind data to CSV
+void logWind() {
+  if (!windFile || !logging || !wind.newData) return;
+
+  unsigned long e = millis() - logStart;
+  windFile.printf("%lu,%.2f,%.2f,%d,%d\n",
+    e, wind.speed_kts, wind.speed_mps, wind.angle_deg, wind.battery);
+  totalBytes += 40;
+  wind.newData = false;
+}
+
+#endif // ENABLE_WIND
 
 // ============================================================
 // SETUP
@@ -320,6 +606,11 @@ void setup() {
 
   Serial.printf("[GPS] %s — SAT:%d HDOP:%.1f\n",
     gps.valid ? "FIX" : "TIMEOUT", gps.satellites, gps.hdop);
+
+  // Initialize wind sensor (Calypso BLE)
+#if ENABLE_WIND
+  initWindSensor();
+#endif
 
   // Start logging immediately if SD is OK (don't wait for GPS fix)
   if (sdOK) {
@@ -744,6 +1035,8 @@ void loadConfig() {
     else if (k == "upload_url") v.toCharArray(config.upload_url, sizeof(config.upload_url));
     else if (k == "boat_id") v.toCharArray(config.boat_id, sizeof(config.boat_id));
     else if (k == "gps_rate_hz") config.gps_rate_hz = v.toInt();
+    else if (k == "wind_enabled") config.wind_enabled = (v == "true" || v == "1");
+    else if (k == "wind_mac") v.toCharArray(config.wind_mac, sizeof(config.wind_mac));
   }
   f.close();
 
@@ -752,6 +1045,11 @@ void loadConfig() {
   for (int i = 0; i < config.wifi_count; i++) {
     Serial.printf("[CFG]   %d: %s\n", i + 1, config.wifi[i].ssid);
   }
+  Serial.printf("[CFG] Wind: %s", config.wind_enabled ? "enabled" : "disabled");
+  if (strlen(config.wind_mac) > 0) {
+    Serial.printf(" (MAC: %s)", config.wind_mac);
+  }
+  Serial.println();
 }
 
 // ============================================================
@@ -956,10 +1254,11 @@ void startLogging() {
   }
 
   // Build file paths
-  char np[64], ip[64], rp[64];
+  char np[64], ip[64], rp[64], wp[64];
   snprintf(np, sizeof(np), "%s/%s_%s_%s_nav.csv", dd, config.boat_id, ds, ts);
   snprintf(ip, sizeof(ip), "%s/%s_%s_%s_imu.csv", dd, config.boat_id, ds, ts);
   snprintf(rp, sizeof(rp), "%s/%s_%s_%s.rtcm3", dd, config.boat_id, ds, ts);
+  snprintf(wp, sizeof(wp), "%s/%s_%s_%s_wind.csv", dd, config.boat_id, ds, ts);
 
   Serial.printf("[LOG] Opening NAV: %s\n", np);
   navFile = SD.open(np, FILE_WRITE);
@@ -973,6 +1272,14 @@ void startLogging() {
   rawFile = SD.open(rp, FILE_WRITE);
   Serial.printf("[LOG] RAW file %s\n", rawFile ? "OK" : "FAILED");
 
+#if ENABLE_WIND
+  if (config.wind_enabled) {
+    Serial.printf("[LOG] Opening WIND: %s\n", wp);
+    windFile = SD.open(wp, FILE_WRITE);
+    Serial.printf("[LOG] WIND file %s\n", windFile ? "OK" : "FAILED");
+  }
+#endif
+
   if (navFile) {
     logging = true;
     logStart = millis();
@@ -982,9 +1289,18 @@ void startLogging() {
       imuFile.println("ms,ax,ay,az,gx,gy,gz,heel,pitch");
       imuFile.flush();
     }
+#if ENABLE_WIND
+    if (windFile) {
+      windFile.println("ms,aws_kts,aws_mps,awa_deg,battery");
+      windFile.flush();
+    }
+#endif
     Serial.println("[LOG] ========================================");
     Serial.printf("[LOG] NAV: %s\n", np);
     Serial.printf("[LOG] IMU: %s\n", ip);
+#if ENABLE_WIND
+    if (config.wind_enabled) Serial.printf("[LOG] WIND: %s\n", wp);
+#endif
     Serial.printf("[LOG] RAW: %s\n", rp);
     Serial.println("[LOG] RTCM3 MSM7 raw data -> PPK via RTKLIB");
     Serial.println("[LOG] ========================================");
@@ -1082,10 +1398,29 @@ void updateDisplay() {
   if (gps.fix_quality == 1) fixStr = "GPS";
   else if (gps.fix_quality == 2) fixStr = "SBAS";
 
-  // Status + data on bottom row
-  const char* wifiStr = uploading ? "UP" : (wifiConnected ? "W" : "");
+  // Build status indicators
+  char statusStr[8] = "";
+  if (uploading) strcat(statusStr, "U");
+  else if (wifiConnected) strcat(statusStr, "W");
+#if ENABLE_WIND
+  if (wind.connected) strcat(statusStr, "C");  // C for Calypso
+#endif
+
+  // Status + data on bottom row (show wind if connected, else show pitch)
+#if ENABLE_WIND
+  if (wind.connected && wind.lastUpdate > 0 && millis() - wind.lastUpdate < 5000) {
+    // Show wind speed and direction when connected
+    snprintf(buf, sizeof(buf), "%s%s W%.0f@%d %d/%d %s",
+      config.boat_id, statusStr, wind.speed_kts, wind.angle_deg,
+      dispSats, dispView, fixStr);
+  } else {
+    snprintf(buf, sizeof(buf), "%s%s P%+.0f %d/%d %s H%.1f",
+      config.boat_id, statusStr, imu.pitch, dispSats, dispView, fixStr, dispHdop);
+  }
+#else
   snprintf(buf, sizeof(buf), "%s%s P%+.0f %d/%d %s H%.1f",
-    config.boat_id, wifiStr, imu.pitch, dispSats, dispView, fixStr, dispHdop);
+    config.boat_id, statusStr, imu.pitch, dispSats, dispView, fixStr, dispHdop);
+#endif
   u8g2.drawStr(1, 64, buf);
 
   u8g2.sendBuffer();
@@ -1501,6 +1836,19 @@ void processCommand(String cmd, bool fromTelnet) {
     if (wifiConnected) {
       tprintf("IP: %s\n", WiFi.localIP().toString().c_str());
     }
+#if ENABLE_WIND
+    if (config.wind_enabled) {
+      if (wind.connected) {
+        tprintf("Wind: %.1f kt @ %d deg", wind.speed_kts, wind.angle_deg);
+        if (wind.battery >= 0) tprintf(" (%d%%)", wind.battery);
+        tprintln("");
+      } else {
+        tprintln("Wind: scanning...");
+      }
+    } else {
+      tprintln("Wind: disabled");
+    }
+#endif
     tprintln("===============");
 
   } else if (cmd.startsWith("cat ")) {
@@ -1670,6 +2018,48 @@ void processCommand(String cmd, bool fromTelnet) {
     configureLG290P();
     tprintln("GPS reconfigured");
 
+  } else if (cmd == "wind") {
+#if ENABLE_WIND
+    tprintln("=== Wind Sensor ===");
+    tprintf("Enabled: %s\n", config.wind_enabled ? "yes" : "no");
+    tprintf("Connected: %s\n", wind.connected ? "yes" : "no");
+    if (strlen(wind.deviceName) > 0) {
+      tprintf("Device: %s (%s)\n", wind.deviceName, wind.deviceAddr);
+    }
+    if (wind.connected) {
+      tprintf("Speed: %.1f kts (%.1f m/s)\n", wind.speed_kts, wind.speed_mps);
+      tprintf("Direction: %d deg (apparent)\n", wind.angle_deg);
+      if (wind.battery >= 0) {
+        tprintf("Battery: %d%%\n", wind.battery);
+      }
+      tprintf("Last update: %lu ms ago\n", millis() - wind.lastUpdate);
+    }
+    if (strlen(config.wind_mac) > 0) {
+      tprintf("Saved MAC: %s\n", config.wind_mac);
+    }
+    tprintln("===================");
+#else
+    tprintln("Wind sensor support not compiled in");
+#endif
+
+  } else if (cmd == "windscan") {
+#if ENABLE_WIND
+    tprintln("Scanning for Calypso wind sensors...");
+    if (scanForCalypso()) {
+      tprintf("Found: %s at %s\n", wind.deviceName, wind.deviceAddr);
+      tprintln("Attempting connection...");
+      if (connectToCalypso()) {
+        tprintln("Connected successfully!");
+      } else {
+        tprintln("Connection failed");
+      }
+    } else {
+      tprintln("No Calypso device found");
+    }
+#else
+    tprintln("Wind sensor support not compiled in");
+#endif
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -1680,6 +2070,8 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  imutest    - Test IMU axes (5 sec)");
     tprintln("  cal        - Calibrate IMU (set level)");
     tprintln("  calreset   - Reset IMU calibration");
+    tprintln("  wind       - Wind sensor info");
+    tprintln("  windscan   - Scan for wind sensor");
     tprintln("  ls, list   - List SD card files");
     tprintln("  cat <file> - Show file contents");
     tprintln("  upload     - Manual upload to S3");
@@ -1737,6 +2129,20 @@ void loop() {
     gps.newGGA = false;
   }
 
+#if ENABLE_WIND
+  // Handle wind sensor
+  if (config.wind_enabled) {
+    // Check connection and reconnect if needed
+    checkWindConnection();
+
+    // Log wind data at configured interval
+    if (logging && now - lastWind >= WIND_INTERVAL_MS) {
+      logWind();
+      lastWind = now;
+    }
+  }
+#endif
+
   if (now - lastDisp >= DISPLAY_UPDATE_MS) {
     if (!uploading) {  // Don't override upload display
       updateDisplay();
@@ -1749,6 +2155,9 @@ void loop() {
     navFile.flush();
     if (imuFile) imuFile.flush();
     rawFile.flush();
+#if ENABLE_WIND
+    if (windFile) windFile.flush();
+#endif
     lastFlush = now;
   }
 

@@ -84,7 +84,7 @@ def process_file(bucket: str, key: str):
     elif sensor_type == 'pressure':
         data = process_pressure(csv_content)
     elif sensor_type == 'wind':
-        data = process_wind(csv_content)
+        data = process_wind(csv_content, date)
     else:
         logger.warning(f"Unknown sensor type: {sensor_type}")
         return
@@ -315,37 +315,83 @@ def process_pressure(csv_content: str) -> list:
     return result
 
 
-def process_wind(csv_content: str) -> list:
-    """Process wind data (already 1Hz, minimal transformation)."""
+def process_wind(csv_content: str, date: str = None) -> list:
+    """Process wind data (already 1Hz, minimal transformation).
+
+    Supports two CSV formats:
+    - S1: utc_time,apparent_wind_speed_knots,apparent_wind_angle_deg,compass_heading_deg
+    - E1: ms,aws_kts,aws_mps,awa_deg,battery
+
+    Args:
+        csv_content: CSV data as string
+        date: Date string (YYYY-MM-DD) for E1 timestamp generation
+    """
     from datetime import timedelta
 
-    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
-    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
-
     reader = csv.DictReader(StringIO(csv_content))
+    rows = list(reader)
+    if not rows:
+        return []
 
-    result = []
-    for row in reader:
-        ts = row.get('utc_time', '')
-        if not ts:
-            continue
+    # Detect format based on column names
+    first_row = rows[0]
+    is_e1_format = 'ms' in first_row and 'aws_kts' in first_row
 
-        # Apply time correction
-        try:
-            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
-            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
-            corrected_ts = dt_corrected.strftime('%Y-%m-%dT%H:%M:%SZ')
-        except ValueError:
-            corrected_ts = ts[:19] + 'Z'
+    # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
+    TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
 
-        result.append({
-            't': corrected_ts,
-            'aws_kn': round(float(row.get('apparent_wind_speed_knots', 0) or 0), 1),
-            'awa': round(float(row.get('apparent_wind_angle_deg', 0) or 0), 0),
-            'heading': round((float(row.get('compass_heading_deg', 0) or 0) + 180) % 360, 1)
-        })
+    # Group by second for E1 (may have multiple samples)
+    if is_e1_format:
+        by_second = defaultdict(list)
+        for row in rows:
+            ms = row.get('ms', '')
+            if not ms:
+                continue
+            try:
+                sec = int(float(ms) // 1000)
+                hours = sec // 3600
+                minutes = (sec % 3600) // 60
+                seconds = sec % 60
+                second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
+            except ValueError:
+                continue
+            by_second[second].append(row)
 
-    return result
+        result = []
+        for second, samples in sorted(by_second.items()):
+            # Take last sample per second (most recent)
+            best = samples[-1]
+            result.append({
+                't': second + 'Z',
+                'aws_kn': round(float(best.get('aws_kts', 0) or 0), 1),
+                'awa': round(float(best.get('awa_deg', 0) or 0), 0),
+                'heading': 0  # E1 wind sensor doesn't provide heading
+            })
+        return result
+    else:
+        # S1 format
+        result = []
+        for row in rows:
+            ts = row.get('utc_time', '')
+            if not ts:
+                continue
+
+            # Apply time correction
+            try:
+                dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+                dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+                corrected_ts = dt_corrected.strftime('%Y-%m-%dT%H:%M:%SZ')
+            except ValueError:
+                corrected_ts = ts[:19] + 'Z'
+
+            result.append({
+                't': corrected_ts,
+                'aws_kn': round(float(row.get('apparent_wind_speed_knots', 0) or 0), 1),
+                'awa': round(float(row.get('apparent_wind_angle_deg', 0) or 0), 0),
+                'heading': round((float(row.get('compass_heading_deg', 0) or 0) + 180) % 360, 1)
+            })
+
+        return result
 
 
 def update_manifest(bucket: str, device_id: str, date: str, sensor_type: str, data: list):
