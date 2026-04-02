@@ -99,6 +99,9 @@ format_size() {
     fi
 }
 
+# Size threshold for presigned URLs (5 MB)
+PRESIGN_THRESHOLD=5242880
+
 # Upload a single file via HTTP
 upload_file() {
     local filepath="$1"
@@ -122,27 +125,73 @@ upload_file() {
 
     log "INFO" "  Uploading: $filename ($(format_size "$filesize"))"
 
-    # Upload via HTTP POST with query parameters
     local response
     local http_code
 
-    http_code=$(curl -s -w "%{http_code}" -o /tmp/upload_response.txt \
-        -X POST \
-        "${UPLOAD_URL}?boat=${DEVICE_ID}&file=${filepath}" \
-        --data-binary "@${filepath}" \
-        -H "Content-Type: application/octet-stream" \
-        --max-time 300 \
-        2>/dev/null)
+    # Use presigned URL for large files (>5MB)
+    if [ "$filesize" -gt "$PRESIGN_THRESHOLD" ]; then
+        # Request presigned URL from API
+        http_code=$(curl -s -w "%{http_code}" -o /tmp/presign_response.txt \
+            -X POST \
+            "${UPLOAD_URL}?boat=${DEVICE_ID}&file=${filepath}&presign=1&size=${filesize}" \
+            -H "Content-Type: application/json" \
+            --max-time 30 \
+            2>/dev/null)
 
-    if [ "$http_code" = "200" ]; then
-        # Mark as uploaded
-        touch "${filepath}${UPLOADED_MARKER}"
-        log "INFO" "    OK"
-        return 0
+        if [ "$http_code" != "200" ]; then
+            response=$(cat /tmp/presign_response.txt 2>/dev/null || echo "No response")
+            log "ERROR" "    FAILED to get presigned URL (HTTP $http_code): $response"
+            return 1
+        fi
+
+        # Extract presigned URL from response
+        local presigned_url
+        local content_type
+        presigned_url=$(grep -o '"url":"[^"]*"' /tmp/presign_response.txt | cut -d'"' -f4)
+        content_type=$(grep -o '"content_type":"[^"]*"' /tmp/presign_response.txt | cut -d'"' -f4)
+
+        if [ -z "$presigned_url" ]; then
+            log "ERROR" "    FAILED to parse presigned URL"
+            return 1
+        fi
+
+        # Upload directly to S3 using presigned URL
+        http_code=$(curl -s -w "%{http_code}" -o /tmp/upload_response.txt \
+            -X PUT \
+            "$presigned_url" \
+            --data-binary "@${filepath}" \
+            -H "Content-Type: ${content_type:-application/octet-stream}" \
+            --max-time 600 \
+            2>/dev/null)
+
+        if [ "$http_code" = "200" ]; then
+            touch "${filepath}${UPLOADED_MARKER}"
+            log "INFO" "    OK (presigned)"
+            return 0
+        else
+            response=$(cat /tmp/upload_response.txt 2>/dev/null || echo "No response")
+            log "ERROR" "    FAILED S3 upload (HTTP $http_code): $response"
+            return 1
+        fi
     else
-        response=$(cat /tmp/upload_response.txt 2>/dev/null || echo "No response")
-        log "ERROR" "    FAILED (HTTP $http_code): $response"
-        return 1
+        # Direct upload via API Gateway for small files
+        http_code=$(curl -s -w "%{http_code}" -o /tmp/upload_response.txt \
+            -X POST \
+            "${UPLOAD_URL}?boat=${DEVICE_ID}&file=${filepath}" \
+            --data-binary "@${filepath}" \
+            -H "Content-Type: application/octet-stream" \
+            --max-time 300 \
+            2>/dev/null)
+
+        if [ "$http_code" = "200" ]; then
+            touch "${filepath}${UPLOADED_MARKER}"
+            log "INFO" "    OK"
+            return 0
+        else
+            response=$(cat /tmp/upload_response.txt 2>/dev/null || echo "No response")
+            log "ERROR" "    FAILED (HTTP $http_code): $response"
+            return 1
+        fi
     fi
 }
 

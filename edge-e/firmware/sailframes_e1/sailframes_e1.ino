@@ -2102,42 +2102,21 @@ void processCommand(String cmd, bool fromTelnet) {
 
   } else if (cmd == "blescan") {
 #if ENABLE_WIND
-    tprintln("Scanning ALL BLE devices (5 sec)...");
-    tprintln("Devices will appear as found:");
-
-    // Use a simple scan callback class
-    class ScanCB : public NimBLEScanCallbacks {
-      void onResult(const NimBLEAdvertisedDevice* d) override {
-        Serial.printf("  Found: \"%s\" @ %s (RSSI:%d)\n",
-          d->getName().c_str(),
-          d->getAddress().toString().c_str(),
-          d->getRSSI());
-      }
-      void onScanEnd(const NimBLEScanResults& results, int reason) override {
-        Serial.printf("Scan ended, reason=%d, total=%d\n", reason, results.getCount());
-      }
-    };
-    static ScanCB scanCB;
-
+    tprintln("BLE scan (5 sec)...");
     NimBLEScan* pScan = NimBLEDevice::getScan();
-    pScan->setScanCallbacks(&scanCB);
     pScan->setActiveScan(true);
-    pScan->setInterval(100);
-    pScan->setWindow(99);
     pScan->clearResults();
-
-    tprintln("Starting...");
-    bool started = pScan->start(5, false);
-    tprintf("start() returned: %s\n", started ? "true" : "false");
-
-    if (started) {
-      // Wait for scan to complete
-      delay(6000);
-      pScan->stop();
+    pScan->start(5, false);
+    delay(6000);
+    pScan->stop();
+    NimBLEScanResults r = pScan->getResults();
+    tprintf("Found %d\n", r.getCount());
+    for (int i = 0; i < r.getCount(); i++) {
+      const NimBLEAdvertisedDevice* d = r.getDevice(i);
+      if (d) tprintf("%s %s\n", d->getAddress().toString().c_str(), d->getName().c_str());
     }
-    tprintln("Done");
 #else
-    tprintln("BLE not compiled in");
+    tprintln("No BLE");
 #endif
 
   } else if (cmd == "bleinit") {
