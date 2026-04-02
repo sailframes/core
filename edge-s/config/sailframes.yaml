@@ -87,7 +87,7 @@ sync:
   method: "wifi"              # wifi or lte
   wifi_ssid: "YachtClub-WiFi"
   wifi_password: ""
-  aws_s3_bucket: "sailframes-data-prod"  # sailframes.com
+  aws_s3_bucket: "sailframes-fleet-data-prod"  # sailframes.com
   aws_region: "us-east-1"
   upload_on_connect: true     # Auto-upload when WiFi detected
   compress_before_upload: true

@@ -42,7 +42,17 @@
 #include <HTTPClient.h>
 #include <U8g2lib.h>
 #include <Adafruit_BNO08x.h>
+
+// NimBLE configuration - disable unused features to reduce size
+#define CONFIG_BT_NIMBLE_ROLE_CENTRAL 1
+#define CONFIG_BT_NIMBLE_ROLE_PERIPHERAL 0
+#define CONFIG_BT_NIMBLE_ROLE_OBSERVER 1
+#define CONFIG_BT_NIMBLE_ROLE_BROADCASTER 0
+#define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 1
+#define CONFIG_BT_NIMBLE_MAX_BONDS 1
+#define CONFIG_BT_NIMBLE_SVC_GAP_DEVICE_NAME "SailFrames-E1"
 #include <NimBLEDevice.h>
+#include <string>
 
 // ============================================================
 // PIN DEFINITIONS
@@ -285,21 +295,42 @@ bool scanForCalypso() {
   pScan->setActiveScan(true);
   pScan->setInterval(100);
   pScan->setWindow(99);
+  pScan->clearResults();
 
-  NimBLEScanResults results = pScan->start(WIND_SCAN_TIMEOUT_MS / 1000, false);
+  // NimBLE 2.x: start() is non-blocking, must wait for completion
+  if (!pScan->start(WIND_SCAN_TIMEOUT_MS / 1000, false)) {
+    Serial.println("[WIND] Scan failed to start");
+    windScanning = false;
+    return false;
+  }
+
+  // Wait for scan to complete
+  unsigned long scanStart = millis();
+  while (pScan->isScanning() && millis() - scanStart < WIND_SCAN_TIMEOUT_MS + 2000) {
+    delay(100);
+  }
+
+  NimBLEScanResults results = pScan->getResults();
+  Serial.printf("[WIND] Scan found %d devices\n", results.getCount());
 
   for (int i = 0; i < results.getCount(); i++) {
-    NimBLEAdvertisedDevice device = results.getDevice(i);
-    String name = device.getName().c_str();
-    name.toLowerCase();
+    const NimBLEAdvertisedDevice* pDevice = results.getDevice(i);
+    if (!pDevice) continue;
+
+    String name = pDevice->getName().c_str();
+    String nameLower = name;
+    nameLower.toLowerCase();
+
+    Serial.printf("[WIND]   %d: \"%s\" @ %s\n", i+1, name.c_str(),
+      pDevice->getAddress().toString().c_str());
 
     // Look for Calypso devices
-    if (name.indexOf("calypso") >= 0 || name.indexOf("ultrasonic") >= 0) {
-      Serial.printf("[WIND] Found: %s at %s\n",
-        device.getName().c_str(), device.getAddress().toString().c_str());
+    if (nameLower.indexOf("calypso") >= 0 || nameLower.indexOf("ultrasonic") >= 0) {
+      Serial.printf("[WIND] Found Calypso: %s at %s\n",
+        pDevice->getName().c_str(), pDevice->getAddress().toString().c_str());
 
-      strncpy(wind.deviceName, device.getName().c_str(), sizeof(wind.deviceName) - 1);
-      strncpy(wind.deviceAddr, device.getAddress().toString().c_str(), sizeof(wind.deviceAddr) - 1);
+      strncpy(wind.deviceName, pDevice->getName().c_str(), sizeof(wind.deviceName) - 1);
+      strncpy(wind.deviceAddr, pDevice->getAddress().toString().c_str(), sizeof(wind.deviceAddr) - 1);
 
       // Save MAC for faster reconnection
       saveWindMAC(wind.deviceAddr);
@@ -336,7 +367,10 @@ bool connectToCalypso() {
     pWindClient->setClientCallbacks(&windClientCallbacks);
   }
 
-  if (!pWindClient->connect(NimBLEAddress(targetAddr))) {
+  // NimBLE 2.x: NimBLEAddress requires std::string and address type
+  // Address type 1 = random (most BLE devices use random addresses)
+  NimBLEAddress addr(std::string(targetAddr), 1);
+  if (!pWindClient->connect(addr)) {
     Serial.println("[WIND] Connection failed");
     // Clear saved MAC if connection failed - might be wrong device
     if (strlen(config.wind_mac) > 0) {
@@ -2066,6 +2100,61 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("Wind sensor support not compiled in");
 #endif
 
+  } else if (cmd == "blescan") {
+#if ENABLE_WIND
+    tprintln("Scanning ALL BLE devices (5 sec)...");
+    tprintln("Devices will appear as found:");
+
+    // Use a simple scan callback class
+    class ScanCB : public NimBLEScanCallbacks {
+      void onResult(const NimBLEAdvertisedDevice* d) override {
+        Serial.printf("  Found: \"%s\" @ %s (RSSI:%d)\n",
+          d->getName().c_str(),
+          d->getAddress().toString().c_str(),
+          d->getRSSI());
+      }
+      void onScanEnd(const NimBLEScanResults& results, int reason) override {
+        Serial.printf("Scan ended, reason=%d, total=%d\n", reason, results.getCount());
+      }
+    };
+    static ScanCB scanCB;
+
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    pScan->setScanCallbacks(&scanCB);
+    pScan->setActiveScan(true);
+    pScan->setInterval(100);
+    pScan->setWindow(99);
+    pScan->clearResults();
+
+    tprintln("Starting...");
+    bool started = pScan->start(5, false);
+    tprintf("start() returned: %s\n", started ? "true" : "false");
+
+    if (started) {
+      // Wait for scan to complete
+      delay(6000);
+      pScan->stop();
+    }
+    tprintln("Done");
+#else
+    tprintln("BLE not compiled in");
+#endif
+
+  } else if (cmd == "bleinit") {
+#if ENABLE_WIND
+    tprintln("Reinitializing BLE...");
+    tprintln("Deinitializing first...");
+    NimBLEDevice::deinit(true);
+    delay(500);
+    tprintln("Calling NimBLEDevice::init()...");
+    NimBLEDevice::init("SailFrames-E1");
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    tprintf("BLE address: %s\n", NimBLEDevice::getAddress().toString().c_str());
+    tprintln("Done. Try 'blescan' now.");
+#else
+    tprintln("BLE not compiled in");
+#endif
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -2078,6 +2167,8 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  calreset   - Reset IMU calibration");
     tprintln("  wind       - Wind sensor info");
     tprintln("  windscan   - Scan for wind sensor");
+    tprintln("  blescan    - Scan ALL BLE devices");
+    tprintln("  bleinit    - Reinitialize BLE");
     tprintln("  ls, list   - List SD card files");
     tprintln("  cat <file> - Show file contents");
     tprintln("  upload     - Manual upload to S3");

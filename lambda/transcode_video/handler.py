@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 s3 = boto3.client('s3')
 mediaconvert = boto3.client('mediaconvert', endpoint_url=os.environ.get('MEDIACONVERT_ENDPOINT'))
 
-DATA_BUCKET = os.environ.get('DATA_BUCKET', 'sailframes-data-prod')
+DATA_BUCKET = os.environ.get('DATA_BUCKET', 'sailframes-fleet-data-prod')
 MEDIACONVERT_ROLE = os.environ.get('MEDIACONVERT_ROLE')
 CLOUDFRONT_DOMAIN = os.environ.get('CLOUDFRONT_DOMAIN', 'sailframes.com')
 

@@ -26,7 +26,7 @@ from datetime import datetime
 from urllib.parse import unquote
 
 s3 = boto3.client('s3')
-BUCKET = os.environ.get('BUCKET_NAME', 'sailframes-data-prod')
+BUCKET = os.environ.get('BUCKET_NAME', 'sailframes-fleet-data-prod')
 
 
 def lambda_handler(event, context):

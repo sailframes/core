@@ -14,7 +14,7 @@ set -e
 # Configuration
 CONFIG_FILE="${SAILFRAMES_CONFIG:-/etc/sailframes/sailframes.yaml}"
 DATA_DIR="${SAILFRAMES_DATA_DIR:-/mnt/sailframes-data}"
-S3_BUCKET="${SAILFRAMES_S3_BUCKET:-sailframes-data-prod}"
+S3_BUCKET="${SAILFRAMES_S3_BUCKET:-sailframes-fleet-data-prod}"
 SYNC_LOG="/var/log/sailframes/sync.log"
 SYNC_STATE="/var/lib/sailframes/last-sync"
 LOCK_FILE="/var/run/sailframes-sync.lock"

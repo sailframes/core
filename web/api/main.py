@@ -28,7 +28,7 @@ app.add_middleware(
 )
 
 # Configuration
-S3_BUCKET = os.environ.get("SAILFRAMES_BUCKET", "sailframes-data-prod")
+S3_BUCKET = os.environ.get("SAILFRAMES_BUCKET", "sailframes-fleet-data-prod")
 DATA_PREFIX = os.environ.get("SAILFRAMES_DATA_PREFIX", "processed")
 LOCAL_DATA_DIR = os.environ.get("SAILFRAMES_LOCAL_DATA", None)
 

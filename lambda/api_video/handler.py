@@ -15,7 +15,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3 = boto3.client('s3')
-DATA_BUCKET = os.environ.get('DATA_BUCKET', 'sailframes-data-prod')
+DATA_BUCKET = os.environ.get('DATA_BUCKET', 'sailframes-fleet-data-prod')
 CLOUDFRONT_DOMAIN = os.environ.get('CLOUDFRONT_DOMAIN', 'sailframes.com')
 
 
