@@ -38,6 +38,7 @@
 #include <SD.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <U8g2lib.h>
@@ -160,7 +161,7 @@ struct WiFiNetwork {
 struct Config {
   WiFiNetwork wifi[MAX_WIFI_NETWORKS];
   int wifi_count = 0;
-  char upload_url[256] = "";
+  char upload_url[256] = "https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/upload";
   char boat_id[16] = "E1";
   int gps_rate_hz = 10;
   char wind_mac[20] = "C3:09:6D:1E:8A:FC";  // Calypso Mini MAC (can override in config.txt)
@@ -1533,8 +1534,7 @@ void markUploaded(const char* filepath) {
 }
 
 // Upload a single file to S3 via HTTP PUT
-// Expects upload_url to be an API Gateway endpoint that returns a pre-signed S3 URL
-// Upload a single file to S3 via HTTP PUT
+// Expects upload_url to be an API Gateway endpoint
 bool uploadFile(const char* filepath) {
   uploadCount++;
   updateDisplay();
@@ -1564,6 +1564,10 @@ bool uploadFile(const char* filepath) {
   yield();
   delay(10);
 
+  // Use WiFiClientSecure for HTTPS
+  WiFiClientSecure client;
+  client.setInsecure();  // Skip certificate verification (AWS API Gateway is trusted)
+
   HTTPClient http;
   http.setTimeout(60000);  // 60 second timeout for larger files
   http.setReuse(false);    // Don't reuse connections
@@ -1578,7 +1582,7 @@ bool uploadFile(const char* filepath) {
   // Feed watchdog before network operation
   yield();
 
-  if (!http.begin(url)) {
+  if (!http.begin(client, url)) {
     Serial.printf("[UPLOAD] Failed to begin HTTP: %s\n", filepath);
     file.close();
     return false;
