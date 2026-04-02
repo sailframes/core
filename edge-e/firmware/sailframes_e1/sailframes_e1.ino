@@ -1548,8 +1548,8 @@ void updateDisplayD2() {
   if (wind.connected) strcat(statusStr, "C");
 #endif
 
-  snprintf(buf, sizeof(buf), "SAT %d/%d %s HDOP %.1f %s",
-    dispSats, dispView, fixStr, dispHdop, statusStr);
+  snprintf(buf, sizeof(buf), "%s %d/%d H%.1f %s",
+    fixStr, dispSats, dispView, dispHdop, statusStr);
   u8g2.drawStr(0, 55, buf);
 
   // Row 4: Pitch and warnings
