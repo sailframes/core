@@ -204,6 +204,7 @@ NimBLERemoteCharacteristic* pWindDirChar = nullptr;
 NimBLERemoteCharacteristic* pBatteryChar = nullptr;
 bool windScanning = false;
 bool windOK = false;
+bool bleInitialized = false;  // Track BLE init state for safe deinit
 unsigned long totalBytes = 0;
 char nmeaBuf[256];
 int nmeaIdx = 0;
@@ -433,6 +434,7 @@ void initWindSensor() {
 
   Serial.println("[WIND] Initializing BLE...");
   NimBLEDevice::init("SailFrames-E1");
+  bleInitialized = true;
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // Max power for range
 
   // Load saved MAC from SD
@@ -470,9 +472,9 @@ void logWind() {
   if (!windFile || !logging || !wind.newData) return;
 
   unsigned long e = millis() - logStart;
-  windFile.printf("%lu,%.2f,%.2f,%d,%d\n",
-    e, wind.speed_kts, wind.speed_mps, wind.angle_deg, wind.battery);
-  totalBytes += 40;
+  windFile.printf("%lu,%s,%.2f,%.2f,%d,%d\n",
+    e, gps.utc_time, wind.speed_kts, wind.speed_mps, wind.angle_deg, wind.battery);
+  totalBytes += 60;
   wind.newData = false;
 }
 
@@ -1327,12 +1329,12 @@ void startLogging() {
     navFile.println("ms,utc,lat,lon,alt,sog,cog,sat,hdop,fix");
     navFile.flush();
     if (imuFile) {
-      imuFile.println("ms,ax,ay,az,gx,gy,gz,heel,pitch");
+      imuFile.println("ms,utc,ax,ay,az,gx,gy,gz,heel,pitch");
       imuFile.flush();
     }
 #if ENABLE_WIND
     if (windFile) {
-      windFile.println("ms,aws_kts,aws_mps,awa_deg,battery");
+      windFile.println("ms,utc,aws_kts,aws_mps,awa_deg,battery");
       windFile.flush();
     }
 #endif
@@ -1366,10 +1368,10 @@ void logNav() {
 void logIMU() {
   if (!imuFile || !logging) return;
   unsigned long e = millis() - logStart;
-  imuFile.printf("%lu,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.1f,%.1f\n",
-    e, imu.accel_x, imu.accel_y, imu.accel_z,
+  imuFile.printf("%lu,%s,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.1f,%.1f\n",
+    e, gps.utc_time, imu.accel_x, imu.accel_y, imu.accel_z,
     imu.gyro_x, imu.gyro_y, imu.gyro_z, imu.heel, imu.pitch);
-  totalBytes += 100;
+  totalBytes += 120;
 }
 
 // ============================================================
@@ -1661,15 +1663,21 @@ bool uploadFile(const char* filepath) {
     return true;  // Mark as success so it gets .uploaded marker
   }
 
-  Serial.printf("[UPLOAD] Uploading %s (%u bytes)...\n", filepath, fileSize);
+  Serial.printf("[UPLOAD] Uploading %s (%u bytes)... Free heap: %u\n", filepath, fileSize, ESP.getFreeHeap());
 
   // Feed watchdog
   yield();
   delay(10);
 
+  // Check minimum heap for SSL (~45KB needed for TLS handshake)
+  if (ESP.getFreeHeap() < 45000) {
+    Serial.printf("[UPLOAD] Warning: Low heap (%u bytes), SSL may fail\n", ESP.getFreeHeap());
+  }
+
   // Use WiFiClientSecure for HTTPS
   WiFiClientSecure client;
   client.setInsecure();  // Skip certificate verification (AWS API Gateway is trusted)
+  client.setTimeout(30);  // 30 second socket timeout
 
   HTTPClient http;
   http.setTimeout(60000);  // 60 second timeout for larger files
@@ -1910,10 +1918,46 @@ void checkWiFiUpload() {
     if (uploadTotal > 0) {
       updateDisplay();
 
+#if ENABLE_WIND
+      // Deinitialize BLE to free memory for SSL operations (~50KB)
+      // WiFiClientSecure needs significant heap for TLS handshake
+      bool bleWasActive = bleInitialized;
+      if (bleWasActive) {
+        Serial.println("[UPLOAD] Deinitializing BLE to free memory for SSL...");
+        if (pWindClient && pWindClient->isConnected()) {
+          pWindClient->disconnect();
+        }
+        pWindClient = nullptr;
+        pWindSpeedChar = nullptr;
+        pWindDirChar = nullptr;
+        pBatteryChar = nullptr;
+        wind.connected = false;
+        NimBLEDevice::deinit(true);
+        bleInitialized = false;
+        delay(500);
+        Serial.printf("[UPLOAD] Free heap after BLE deinit: %u bytes\n", ESP.getFreeHeap());
+      }
+#endif
+
       // Upload all files in /sf directory
-      Serial.println("[UPLOAD] Starting upload...");
+      Serial.printf("[UPLOAD] Starting upload... (Free heap: %u bytes)\n", ESP.getFreeHeap());
       uploadDirectory("/sf");
       Serial.println("[UPLOAD] Done");
+
+#if ENABLE_WIND
+      // Reinitialize BLE if it was active before
+      if (bleWasActive) {
+        Serial.println("[UPLOAD] Reinitializing BLE...");
+        NimBLEDevice::init("SailFrames-E1");
+        bleInitialized = true;
+        NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+        // Try to reconnect to wind sensor
+        if (strlen(config.wind_mac) > 0) {
+          Serial.println("[UPLOAD] Reconnecting to wind sensor...");
+          initWindSensor();
+        }
+      }
+#endif
     } else {
       Serial.println("[UPLOAD] No new files to upload");
     }
@@ -1945,13 +1989,16 @@ void listDirOutput(const char* dirname, int depth, bool toTelnet) {
       tprintf("%s[DIR]  %s/\n", indent, file.name());
       char path[128];
       snprintf(path, sizeof(path), "%s/%s", dirname, file.name());
+      file.close();  // Close before recursing to free file descriptor
       listDirOutput(path, depth + 1, toTelnet);
     } else {
       tprintf("%s[FILE] %s (%lu bytes)\n", indent, file.name(), file.size());
+      file.close();  // Close file after reading info
     }
     file = root.openNextFile();
     yield();
   }
+  root.close();  // Close directory when done
 }
 
 // Process command from serial or telnet
@@ -1967,6 +2014,25 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("=== SD Card Contents ===");
     listDirOutput("/", 0, fromTelnet);
     tprintln("========================");
+
+  } else if (cmd == "lssf") {
+    if (!sdOK) {
+      tprintln("SD card not available");
+      return;
+    }
+    tprintln("=== /sf/ Contents ===");
+    if (SD.exists("/sf")) {
+      listDirOutput("/sf", 0, fromTelnet);
+    } else {
+      tprintln("/sf directory does not exist!");
+      tprintln("Creating /sf...");
+      if (SD.mkdir("/sf")) {
+        tprintln("Created /sf successfully");
+      } else {
+        tprintln("Failed to create /sf");
+      }
+    }
+    tprintf("Logging: %s\n", logging ? "ACTIVE" : "STOPPED");
 
   } else if (cmd == "status") {
     tprintln("=== Status ===");
@@ -2032,8 +2098,39 @@ void processCommand(String cmd, bool fromTelnet) {
     }
     tprintln("Starting manual upload...");
     if (wifiConnected || connectWiFi()) {
+#if ENABLE_WIND
+      // Deinitialize BLE to free memory for SSL
+      bool bleWasActive = bleInitialized;
+      if (bleWasActive) {
+        tprintln("Deinitializing BLE for SSL...");
+        if (pWindClient && pWindClient->isConnected()) {
+          pWindClient->disconnect();
+        }
+        pWindClient = nullptr;
+        pWindSpeedChar = nullptr;
+        pWindDirChar = nullptr;
+        pBatteryChar = nullptr;
+        wind.connected = false;
+        NimBLEDevice::deinit(true);
+        bleInitialized = false;
+        delay(500);
+      }
+#endif
+      tprintf("Free heap: %u bytes\n", ESP.getFreeHeap());
       uploadDirectory("/sf");
       tprintln("Upload complete");
+#if ENABLE_WIND
+      // Reinitialize BLE if needed
+      if (bleWasActive) {
+        tprintln("Reinitializing BLE...");
+        NimBLEDevice::init("SailFrames-E1");
+        bleInitialized = true;
+        NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+        if (strlen(config.wind_mac) > 0) {
+          initWindSensor();
+        }
+      }
+#endif
     }
 
   } else if (cmd == "wifi") {
@@ -2226,16 +2323,47 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("No BLE");
 #endif
 
+  } else if (cmd == "bledeinit") {
+#if ENABLE_WIND
+    if (!bleInitialized) {
+      tprintln("BLE not initialized");
+      return;
+    }
+    tprintln("Deinitializing BLE to free memory...");
+    tprintf("Heap before: %u bytes\n", ESP.getFreeHeap());
+    if (pWindClient && pWindClient->isConnected()) {
+      pWindClient->disconnect();
+    }
+    pWindClient = nullptr;
+    pWindSpeedChar = nullptr;
+    pWindDirChar = nullptr;
+    pBatteryChar = nullptr;
+    wind.connected = false;
+    NimBLEDevice::deinit(true);
+    bleInitialized = false;
+    delay(500);
+    tprintf("Heap after: %u bytes\n", ESP.getFreeHeap());
+    tprintln("BLE disabled. Run 'bleinit' to restart.");
+#else
+    tprintln("No BLE");
+#endif
+
   } else if (cmd == "bleinit") {
 #if ENABLE_WIND
     tprintln("Reinitializing BLE...");
-    tprintln("Deinitializing first...");
-    NimBLEDevice::deinit(true);
-    delay(500);
+    tprintf("Heap before: %u bytes\n", ESP.getFreeHeap());
+    if (bleInitialized) {
+      tprintln("Deinitializing first...");
+      NimBLEDevice::deinit(true);
+      bleInitialized = false;
+      delay(500);
+    }
     tprintln("Calling NimBLEDevice::init()...");
     NimBLEDevice::init("SailFrames-E1");
+    bleInitialized = true;
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
     tprintf("BLE address: %s\n", NimBLEDevice::getAddress().toString().c_str());
+    tprintf("Heap after: %u bytes\n", ESP.getFreeHeap());
     tprintln("Done. Try 'blescan' now.");
 #else
     tprintln("BLE not compiled in");
@@ -2263,6 +2391,75 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintf("Display mode: D%d\n", displayMode);
     updateDisplay();
 
+  } else if (cmd == "heap") {
+    tprintln("=== Memory Status ===");
+    tprintf("Free heap: %u bytes\n", ESP.getFreeHeap());
+    tprintf("Min free heap: %u bytes\n", ESP.getMinFreeHeap());
+    tprintf("Max alloc heap: %u bytes\n", ESP.getMaxAllocHeap());
+    tprintf("PSRAM: %u bytes free\n", ESP.getFreePsram());
+    tprintf("Sketch size: %u bytes\n", ESP.getSketchSize());
+    tprintf("Free sketch space: %u bytes\n", ESP.getFreeSketchSpace());
+    tprintln("SSL needs ~45KB free heap");
+
+  } else if (cmd == "testssl") {
+    tprintf("Free heap before test: %u bytes\n", ESP.getFreeHeap());
+    tprintln("Testing SSL to google.com:443...");
+    WiFiClientSecure client;
+    client.setInsecure();
+    client.setTimeout(10);  // 10 second timeout
+    if (client.connect("www.google.com", 443)) {
+      tprintln("Google SSL OK!");
+      client.stop();
+    } else {
+      tprintln("Google SSL FAILED");
+    }
+
+    tprintln("Testing SSL to AWS API Gateway...");
+    WiFiClientSecure client2;
+    client2.setInsecure();
+    client2.setTimeout(10);
+    if (client2.connect("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", 443)) {
+      tprintln("AWS SSL OK!");
+      client2.println("PUT /prod/upload?boat=E1&file=test.txt HTTP/1.1");
+      client2.println("Host: p9s9eia0t6.execute-api.us-east-1.amazonaws.com");
+      client2.println("Content-Type: text/plain");
+      client2.println("Content-Length: 4");
+      client2.println("Connection: close");
+      client2.println();
+      client2.print("test");
+      delay(2000);
+      while (client2.available()) {
+        String line = client2.readStringUntil('\n');
+        tprintf("%s\n", line.c_str());
+      }
+      client2.stop();
+    } else {
+      tprintln("AWS SSL FAILED");
+      char errBuf[128];
+      client2.lastError(errBuf, sizeof(errBuf));
+      tprintf("Error: %s\n", errBuf);
+    }
+
+    tprintln("Testing plain HTTP to httpbin...");
+    WiFiClient client3;
+    if (client3.connect("httpbin.org", 80)) {
+      tprintln("HTTP connected!");
+      client3.println("GET /get HTTP/1.1");
+      client3.println("Host: httpbin.org");
+      client3.println("Connection: close");
+      client3.println();
+      delay(1000);
+      int lines = 0;
+      while (client3.available() && lines < 5) {
+        String line = client3.readStringUntil('\n');
+        tprintf("%s\n", line.c_str());
+        lines++;
+      }
+      client3.stop();
+    } else {
+      tprintln("HTTP FAILED");
+    }
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -2276,9 +2473,12 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  wind       - Wind sensor info");
     tprintln("  windscan   - Scan for wind sensor");
     tprintln("  blescan    - Scan ALL BLE devices");
+    tprintln("  bledeinit  - Deinit BLE (free memory)");
     tprintln("  bleinit    - Reinitialize BLE");
     tprintln("  bleconnect <mac> - Connect to BLE MAC");
     tprintln("  display    - Toggle display mode (D1/D2)");
+    tprintln("  heap       - Show memory status");
+    tprintln("  testssl    - Test SSL connection");
     tprintln("  ls, list   - List SD card files");
     tprintln("  cat <file> - Show file contents");
     tprintln("  upload     - Manual upload to S3");

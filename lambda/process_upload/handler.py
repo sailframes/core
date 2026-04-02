@@ -194,7 +194,8 @@ def process_imu(csv_content: str, date: str = None) -> list:
 
     Supports two CSV formats:
     - S1: utc_time,heel_deg,pitch_deg,heading_deg,accel_x_mps2,accel_y_mps2,accel_z_mps2
-    - E1: ms,ax,ay,az,gx,gy,gz,heel,pitch
+    - E1 (new): ms,utc,ax,ay,az,gx,gy,gz,heel,pitch
+    - E1 (old): ms,ax,ay,az,gx,gy,gz,heel,pitch
 
     Args:
         csv_content: CSV data as string
@@ -210,6 +211,7 @@ def process_imu(csv_content: str, date: str = None) -> list:
     # Detect format based on column names
     first_row = rows[0]
     is_e1_format = 'ms' in first_row and 'ax' in first_row
+    has_utc = 'utc' in first_row  # New E1 format with GPS time
 
     # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
     TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
@@ -218,16 +220,32 @@ def process_imu(csv_content: str, date: str = None) -> list:
     by_second = defaultdict(list)
     for row in rows:
         if is_e1_format:
-            # E1 format: ms is milliseconds since boot (relative time only)
-            ms = row.get('ms', '')
-            if not ms:
-                continue
-            try:
-                sec = int(float(ms) // 1000)
-                # Use date + relative time offset
-                second = f"{date}T00:00:{sec:02d}" if sec < 60 else f"{date}T00:{sec//60:02d}:{sec%60:02d}"
-            except ValueError:
-                continue
+            if has_utc:
+                # New E1 format: utc is HHMMSS.mmm from GPS
+                utc_raw = row.get('utc', '')
+                if not utc_raw:
+                    continue
+                try:
+                    utc_float = float(utc_raw)
+                    hours = int(utc_float // 10000)
+                    minutes = int((utc_float % 10000) // 100)
+                    seconds = int(utc_float % 100)
+                    second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
+                except ValueError:
+                    continue
+            else:
+                # Old E1 format: ms is milliseconds since boot (relative time only)
+                ms = row.get('ms', '')
+                if not ms:
+                    continue
+                try:
+                    sec = int(float(ms) // 1000)
+                    hours = sec // 3600
+                    minutes = (sec % 3600) // 60
+                    secs = sec % 60
+                    second = f"{date}T{hours:02d}:{minutes:02d}:{secs:02d}"
+                except ValueError:
+                    continue
         else:
             # S1 format: utc_time is ISO timestamp
             ts = row.get('utc_time', '')
@@ -320,7 +338,8 @@ def process_wind(csv_content: str, date: str = None) -> list:
 
     Supports two CSV formats:
     - S1: utc_time,apparent_wind_speed_knots,apparent_wind_angle_deg,compass_heading_deg
-    - E1: ms,aws_kts,aws_mps,awa_deg,battery
+    - E1 (new): ms,utc,aws_kts,aws_mps,awa_deg,battery
+    - E1 (old): ms,aws_kts,aws_mps,awa_deg,battery
 
     Args:
         csv_content: CSV data as string
@@ -336,6 +355,7 @@ def process_wind(csv_content: str, date: str = None) -> list:
     # Detect format based on column names
     first_row = rows[0]
     is_e1_format = 'ms' in first_row and 'aws_kts' in first_row
+    has_utc = 'utc' in first_row  # New E1 format with GPS time
 
     # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
     TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
@@ -344,17 +364,32 @@ def process_wind(csv_content: str, date: str = None) -> list:
     if is_e1_format:
         by_second = defaultdict(list)
         for row in rows:
-            ms = row.get('ms', '')
-            if not ms:
-                continue
-            try:
-                sec = int(float(ms) // 1000)
-                hours = sec // 3600
-                minutes = (sec % 3600) // 60
-                seconds = sec % 60
-                second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
-            except ValueError:
-                continue
+            if has_utc:
+                # New E1 format: utc is HHMMSS.mmm from GPS
+                utc_raw = row.get('utc', '')
+                if not utc_raw:
+                    continue
+                try:
+                    utc_float = float(utc_raw)
+                    hours = int(utc_float // 10000)
+                    minutes = int((utc_float % 10000) // 100)
+                    seconds = int(utc_float % 100)
+                    second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
+                except ValueError:
+                    continue
+            else:
+                # Old E1 format: ms is milliseconds since boot
+                ms = row.get('ms', '')
+                if not ms:
+                    continue
+                try:
+                    sec = int(float(ms) // 1000)
+                    hours = sec // 3600
+                    minutes = (sec % 3600) // 60
+                    seconds = sec % 60
+                    second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
+                except ValueError:
+                    continue
             by_second[second].append(row)
 
         result = []
