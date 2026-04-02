@@ -161,7 +161,7 @@ struct WiFiNetwork {
 struct Config {
   WiFiNetwork wifi[MAX_WIFI_NETWORKS];
   int wifi_count = 0;
-  char upload_url[256] = "https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/upload";
+  char upload_url[256] = "https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/prod/upload";
   char boat_id[16] = "E1";
   int gps_rate_hz = 10;
   char wind_mac[20] = "C3:09:6D:1E:8A:FC";  // Calypso Mini MAC (can override in config.txt)
