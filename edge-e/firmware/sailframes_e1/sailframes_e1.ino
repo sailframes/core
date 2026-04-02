@@ -163,7 +163,7 @@ struct Config {
   char upload_url[256] = "";
   char boat_id[16] = "E1";
   int gps_rate_hz = 10;
-  char wind_mac[20] = "";   // Calypso MAC address (auto-saved after first scan)
+  char wind_mac[20] = "C3:09:6D:1E:8A:FC";  // Calypso Mini MAC (can override in config.txt)
   bool wind_enabled = true;
 } config;
 
@@ -2134,6 +2134,23 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("BLE not compiled in");
 #endif
 
+  } else if (cmd.startsWith("bleconnect ")) {
+#if ENABLE_WIND
+    String mac = cmd.substring(11);
+    mac.trim();
+    tprintf("Connecting to %s...\n", mac.c_str());
+    strncpy(wind.deviceAddr, mac.c_str(), sizeof(wind.deviceAddr) - 1);
+    strncpy(config.wind_mac, mac.c_str(), sizeof(config.wind_mac) - 1);
+    if (connectToCalypso()) {
+      tprintln("Connected! Saving MAC.");
+      saveWindMAC(mac.c_str());
+    } else {
+      tprintln("Connection failed");
+    }
+#else
+    tprintln("No BLE");
+#endif
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -2148,6 +2165,7 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  windscan   - Scan for wind sensor");
     tprintln("  blescan    - Scan ALL BLE devices");
     tprintln("  bleinit    - Reinitialize BLE");
+    tprintln("  bleconnect <mac> - Connect to BLE MAC");
     tprintln("  ls, list   - List SD card files");
     tprintln("  cat <file> - Show file contents");
     tprintln("  upload     - Manual upload to S3");
