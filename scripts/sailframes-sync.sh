@@ -144,14 +144,15 @@ upload_file() {
             return 1
         fi
 
-        # Extract presigned URL from response
+        # Extract presigned URL from response using jq
         local presigned_url
         local content_type
-        presigned_url=$(grep -o '"url":"[^"]*"' /tmp/presign_response.txt | cut -d'"' -f4)
-        content_type=$(grep -o '"content_type":"[^"]*"' /tmp/presign_response.txt | cut -d'"' -f4)
+        presigned_url=$(jq -r '.url // empty' /tmp/presign_response.txt 2>/dev/null)
+        content_type=$(jq -r '.content_type // "application/octet-stream"' /tmp/presign_response.txt 2>/dev/null)
 
         if [ -z "$presigned_url" ]; then
             log "ERROR" "    FAILED to parse presigned URL"
+            cat /tmp/presign_response.txt | head -c 200
             return 1
         fi
 
