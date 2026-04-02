@@ -1375,11 +1375,15 @@ void logIMU() {
 // ============================================================
 // DISPLAY
 // ============================================================
-void updateDisplay() {
+
+// Display mode: 1 = D1 (original), 2 = D2 (sailing data)
+int displayMode = 2;
+
+// D1: Original display (SOG/COG, HEEL/MAG, status bar)
+void updateDisplayD1() {
   if (!oledOK) return;
 
   char buf[32];
-
   u8g2.clearBuffer();
 
   // Check for problems first
@@ -1429,28 +1433,25 @@ void updateDisplay() {
   snprintf(buf, sizeof(buf), "%03d", (int)imu.heading);
   u8g2.drawStr(73, 50, buf);
 
-  // Row 3: Status + Pitch + satellites + HDOP (small font)
+  // Row 3: Status bar
   u8g2.setFont(u8g2_font_5x7_tr);
   int dispSats = (gps.satellites >= 0 && gps.satellites <= 50) ? gps.satellites : 0;
   int dispView = (satsInView >= 0 && satsInView <= 60) ? satsInView : 0;
-  if (dispView < dispSats) dispView = dispSats;  // In view can't be less than used
+  if (dispView < dispSats) dispView = dispSats;
   float dispHdop = (gps.hdop >= 0 && gps.hdop < 50) ? gps.hdop : 99.9;
   const char* fixStr = "---";
   if (gps.fix_quality == 1) fixStr = "GPS";
   else if (gps.fix_quality == 2) fixStr = "SBAS";
 
-  // Build status indicators
   char statusStr[8] = "";
   if (uploading) strcat(statusStr, "U");
   else if (wifiConnected) strcat(statusStr, "W");
 #if ENABLE_WIND
-  if (wind.connected) strcat(statusStr, "C");  // C for Calypso
+  if (wind.connected) strcat(statusStr, "C");
 #endif
 
-  // Status + data on bottom row (show wind if connected, else show pitch)
 #if ENABLE_WIND
   if (wind.connected && wind.lastUpdate > 0 && millis() - wind.lastUpdate < 5000) {
-    // Show wind speed and direction when connected
     snprintf(buf, sizeof(buf), "%s%s W%.0f@%d %d/%d %s",
       config.boat_id, statusStr, wind.speed_kts, wind.angle_deg,
       dispSats, dispView, fixStr);
@@ -1465,6 +1466,111 @@ void updateDisplay() {
   u8g2.drawStr(1, 64, buf);
 
   u8g2.sendBuffer();
+}
+
+// D2: Sailing data display (AWS/AWA, TWS/TWA, SOG/COG, HEEL/MAG, SAT/HDOP)
+void updateDisplayD2() {
+  if (!oledOK) return;
+
+  char buf[32];
+  u8g2.clearBuffer();
+
+  // Calculate true wind from apparent wind + boat speed
+  float aws = 0, awa = 0, tws = 0, twa = 0;
+#if ENABLE_WIND
+  if (wind.connected && wind.lastUpdate > 0 && millis() - wind.lastUpdate < 5000) {
+    aws = wind.speed_kts;
+    awa = wind.angle_deg;
+    // Convert AWA to radians (-180 to 180)
+    float awaRad = awa * PI / 180.0;
+    if (awaRad > PI) awaRad -= 2 * PI;
+    // True wind calculation
+    float sog = gps.speed_kts;
+    // TWS = sqrt(AWS² + SOG² - 2*AWS*SOG*cos(AWA))
+    tws = sqrt(aws*aws + sog*sog + 2*aws*sog*cos(awaRad));
+    // TWA = atan2(AWS*sin(AWA), AWS*cos(AWA) + SOG)
+    float twaRad = atan2(aws * sin(awaRad), aws * cos(awaRad) + sog);
+    twa = twaRad * 180.0 / PI;
+    if (twa < 0) twa += 360;
+  }
+#endif
+
+  // Row 1: AWS and AWA (apparent wind)
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(0, 7, "AWS");
+  u8g2.drawStr(32, 7, "AWA");
+  u8g2.drawStr(64, 7, "TWS");
+  u8g2.drawStr(96, 7, "TWA");
+
+  u8g2.setFont(u8g2_font_helvB10_tr);
+  snprintf(buf, sizeof(buf), "%.0f", aws);
+  u8g2.drawStr(0, 19, buf);
+  snprintf(buf, sizeof(buf), "%03d", (int)awa);
+  u8g2.drawStr(32, 19, buf);
+  snprintf(buf, sizeof(buf), "%.0f", tws);
+  u8g2.drawStr(64, 19, buf);
+  snprintf(buf, sizeof(buf), "%03d", (int)twa);
+  u8g2.drawStr(96, 19, buf);
+
+  // Row 2: SOG, COG, HEEL, MAG
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(0, 30, "SOG");
+  u8g2.drawStr(32, 30, "COG");
+  u8g2.drawStr(64, 30, "HEL");
+  u8g2.drawStr(96, 30, "MAG");
+
+  u8g2.setFont(u8g2_font_helvB10_tr);
+  snprintf(buf, sizeof(buf), "%.1f", gps.speed_kts);
+  u8g2.drawStr(0, 42, buf);
+  snprintf(buf, sizeof(buf), "%03d", (int)gps.course);
+  u8g2.drawStr(32, 42, buf);
+  snprintf(buf, sizeof(buf), "%+.0f", imu.heel);
+  u8g2.drawStr(64, 42, buf);
+  snprintf(buf, sizeof(buf), "%03d", (int)imu.heading);
+  u8g2.drawStr(96, 42, buf);
+
+  // Row 3: SAT info, HDOP, status
+  u8g2.setFont(u8g2_font_5x7_tr);
+  int dispSats = (gps.satellites >= 0 && gps.satellites <= 50) ? gps.satellites : 0;
+  int dispView = (satsInView >= 0 && satsInView <= 60) ? satsInView : 0;
+  if (dispView < dispSats) dispView = dispSats;
+  float dispHdop = (gps.hdop >= 0 && gps.hdop < 50) ? gps.hdop : 99.9;
+
+  const char* fixStr = "---";
+  if (gps.fix_quality == 1) fixStr = "GPS";
+  else if (gps.fix_quality == 2) fixStr = "SBA";
+
+  char statusStr[8] = "";
+  if (logging) strcat(statusStr, "L");
+  if (uploading) strcat(statusStr, "U");
+  else if (wifiConnected) strcat(statusStr, "W");
+#if ENABLE_WIND
+  if (wind.connected) strcat(statusStr, "C");
+#endif
+
+  snprintf(buf, sizeof(buf), "SAT %d/%d %s HDOP %.1f %s",
+    dispSats, dispView, fixStr, dispHdop, statusStr);
+  u8g2.drawStr(0, 55, buf);
+
+  // Row 4: Pitch and warnings
+  snprintf(buf, sizeof(buf), "P%+.0f", imu.pitch);
+  u8g2.drawStr(0, 64, buf);
+
+  // Warning indicators
+  if (!sdOK) u8g2.drawStr(30, 64, "!SD");
+  if (!imuOK) u8g2.drawStr(55, 64, "!IMU");
+  if (lastValidGPS > 0 && millis() - lastValidGPS > 60000) u8g2.drawStr(85, 64, "!GPS");
+
+  u8g2.sendBuffer();
+}
+
+// Main display router
+void updateDisplay() {
+  if (displayMode == 1) {
+    updateDisplayD1();
+  } else {
+    updateDisplayD2();
+  }
 }
 
 // ============================================================
@@ -2155,6 +2261,11 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("No BLE");
 #endif
 
+  } else if (cmd == "display") {
+    displayMode = (displayMode == 1) ? 2 : 1;
+    tprintf("Display mode: D%d\n", displayMode);
+    updateDisplay();
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -2170,6 +2281,7 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  blescan    - Scan ALL BLE devices");
     tprintln("  bleinit    - Reinitialize BLE");
     tprintln("  bleconnect <mac> - Connect to BLE MAC");
+    tprintln("  display    - Toggle display mode (D1/D2)");
     tprintln("  ls, list   - List SD card files");
     tprintln("  cat <file> - Show file contents");
     tprintln("  upload     - Manual upload to S3");
