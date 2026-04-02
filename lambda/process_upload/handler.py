@@ -89,15 +89,41 @@ def process_file(bucket: str, key: str):
         logger.warning(f"Unknown sensor type: {sensor_type}")
         return
 
-    # Upload processed JSON
+    # Merge with existing processed JSON (don't overwrite)
     output_key = f"processed/{device_id}/{date}/{sensor_type}.json"
+
+    # Try to load existing data
+    existing_data = []
+    try:
+        response = s3.get_object(Bucket=bucket, Key=output_key)
+        existing_data = json.loads(response['Body'].read().decode('utf-8'))
+        logger.info(f"Loaded {len(existing_data)} existing records from {output_key}")
+    except s3.exceptions.NoSuchKey:
+        pass
+    except Exception as e:
+        logger.warning(f"Could not load existing data: {e}")
+
+    # Merge: combine existing + new, dedupe by timestamp, sort
+    all_data = existing_data + data
+    seen = set()
+    merged = []
+    for item in all_data:
+        t = item.get('t', '')
+        if t and t not in seen:
+            seen.add(t)
+            merged.append(item)
+    merged.sort(key=lambda x: x.get('t', ''))
+
+    logger.info(f"Merged: {len(existing_data)} existing + {len(data)} new = {len(merged)} total")
+
+    # Upload merged JSON
     s3.put_object(
         Bucket=bucket,
         Key=output_key,
-        Body=json.dumps(data, default=str),
+        Body=json.dumps(merged, default=str),
         ContentType='application/json'
     )
-    logger.info(f"Wrote {len(data)} records to {output_key}")
+    logger.info(f"Wrote {len(merged)} records to {output_key}")
 
     # Update manifest
     update_manifest(bucket, device_id, date, sensor_type, data)

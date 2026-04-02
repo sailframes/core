@@ -1255,35 +1255,53 @@ void tprintln(const char* msg) {
 }
 
 // ============================================================
+// SESSION COUNTER (for fallback folder naming)
+// ============================================================
+int getNextSessionNumber() {
+  int n = 1;
+  File f = SD.open("/sf/session.txt", FILE_READ);
+  if (f) {
+    n = f.parseInt() + 1;
+    f.close();
+  }
+  f = SD.open("/sf/session.txt", FILE_WRITE);
+  if (f) {
+    f.print(n);
+    f.close();
+  }
+  return n;
+}
+
+// ============================================================
 // START LOGGING
 // ============================================================
 void startLogging() {
   Serial.println("[LOG] Starting logging...");
 
-  // Use millis-based timestamp if no GPS date available
-  char dd[24], ds[16], ts[12];
+  // Folder naming: GPS datetime preferred, session counter as fallback
+  char dd[32], ds[20], ts[12];
   bool hasGpsDate = (strlen(gps.date) >= 6 && gps.date[0] != '0');
+  bool hasGpsTime = (strlen(gps.utc_time) >= 6 && gps.utc_time[0] != '0');
 
-  if (hasGpsDate) {
-    // GPS date format is DDMMYY, convert to YYYYMMDD
-    snprintf(dd, sizeof(dd), "/sf/20%c%c%c%c%c%c",
-      gps.date[4], gps.date[5], gps.date[2], gps.date[3], gps.date[0], gps.date[1]);
+  if (hasGpsDate && hasGpsTime) {
+    // Best case: GPS date + time as folder name (e.g., /sf/20260402_163325/)
+    snprintf(dd, sizeof(dd), "/sf/20%c%c%c%c%c%c_%c%c%c%c%c%c",
+      gps.date[4], gps.date[5], gps.date[2], gps.date[3], gps.date[0], gps.date[1],
+      gps.utc_time[0], gps.utc_time[1], gps.utc_time[2],
+      gps.utc_time[3], gps.utc_time[4], gps.utc_time[5]);
     snprintf(ds, sizeof(ds), "20%c%c%c%c%c%c",
       gps.date[4], gps.date[5], gps.date[2], gps.date[3], gps.date[0], gps.date[1]);
-  } else {
-    // Fallback to boot-based folder
-    unsigned long bootMs = millis();
-    snprintf(dd, sizeof(dd), "/sf/boot_%lu", bootMs / 1000);
-    snprintf(ds, sizeof(ds), "boot%lu", bootMs / 1000);
-    Serial.printf("[LOG] No GPS date, using boot timestamp: %s\n", dd);
-  }
-
-  if (strlen(gps.utc_time) >= 6 && gps.utc_time[0] != '0') {
     snprintf(ts, sizeof(ts), "%c%c%c%c%c%c",
       gps.utc_time[0], gps.utc_time[1], gps.utc_time[2],
       gps.utc_time[3], gps.utc_time[4], gps.utc_time[5]);
   } else {
+    // Fallback: sequential session number (e.g., /sf/session_001/)
+    int sessionNum = getNextSessionNumber();
+    snprintf(dd, sizeof(dd), "/sf/session_%03d", sessionNum);
+    snprintf(ds, sizeof(ds), "s%03d", sessionNum);
+    // Use millis for timestamp portion
     snprintf(ts, sizeof(ts), "%06lu", (millis() / 1000) % 1000000);
+    Serial.printf("[LOG] No GPS datetime, using session_%03d\n", sessionNum);
   }
 
   // Create directories
