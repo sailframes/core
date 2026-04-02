@@ -1495,41 +1495,41 @@ void updateDisplayD2() {
   }
 #endif
 
-  // Row 1: AWS and AWA (apparent wind)
+  // Row 1: Wind data (AWS, AWA, TWS, TWA) - larger font
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.drawStr(0, 7, "AWS");
   u8g2.drawStr(32, 7, "AWA");
   u8g2.drawStr(64, 7, "TWS");
   u8g2.drawStr(96, 7, "TWA");
 
-  u8g2.setFont(u8g2_font_helvB10_tr);
+  u8g2.setFont(u8g2_font_helvB14_tr);
   snprintf(buf, sizeof(buf), "%.0f", aws);
-  u8g2.drawStr(0, 19, buf);
+  u8g2.drawStr(0, 24, buf);
   snprintf(buf, sizeof(buf), "%03d", (int)awa);
-  u8g2.drawStr(32, 19, buf);
+  u8g2.drawStr(32, 24, buf);
   snprintf(buf, sizeof(buf), "%.0f", tws);
-  u8g2.drawStr(64, 19, buf);
+  u8g2.drawStr(64, 24, buf);
   snprintf(buf, sizeof(buf), "%03d", (int)twa);
-  u8g2.drawStr(96, 19, buf);
+  u8g2.drawStr(96, 24, buf);
 
-  // Row 2: SOG, COG, HEEL, MAG
+  // Row 2: Nav data (SOG, COG, HEEL, MAG) - larger font
   u8g2.setFont(u8g2_font_5x7_tr);
-  u8g2.drawStr(0, 30, "SOG");
-  u8g2.drawStr(32, 30, "COG");
-  u8g2.drawStr(64, 30, "HEL");
-  u8g2.drawStr(96, 30, "MAG");
+  u8g2.drawStr(0, 33, "SOG");
+  u8g2.drawStr(32, 33, "COG");
+  u8g2.drawStr(64, 33, "HEL");
+  u8g2.drawStr(96, 33, "MAG");
 
-  u8g2.setFont(u8g2_font_helvB10_tr);
+  u8g2.setFont(u8g2_font_helvB14_tr);
   snprintf(buf, sizeof(buf), "%.1f", gps.speed_kts);
-  u8g2.drawStr(0, 42, buf);
+  u8g2.drawStr(0, 50, buf);
   snprintf(buf, sizeof(buf), "%03d", (int)gps.course);
-  u8g2.drawStr(32, 42, buf);
+  u8g2.drawStr(32, 50, buf);
   snprintf(buf, sizeof(buf), "%+.0f", imu.heel);
-  u8g2.drawStr(64, 42, buf);
+  u8g2.drawStr(64, 50, buf);
   snprintf(buf, sizeof(buf), "%03d", (int)imu.heading);
-  u8g2.drawStr(96, 42, buf);
+  u8g2.drawStr(96, 50, buf);
 
-  // Row 3: SAT info, HDOP, status
+  // Row 3: Status line with pitch
   u8g2.setFont(u8g2_font_5x7_tr);
   int dispSats = (gps.satellites >= 0 && gps.satellites <= 50) ? gps.satellites : 0;
   int dispView = (satsInView >= 0 && satsInView <= 60) ? satsInView : 0;
@@ -1548,18 +1548,15 @@ void updateDisplayD2() {
   if (wind.connected) strcat(statusStr, "C");
 #endif
 
-  snprintf(buf, sizeof(buf), "%s %d/%d H%.1f %s",
-    fixStr, dispSats, dispView, dispHdop, statusStr);
-  u8g2.drawStr(0, 55, buf);
-
-  // Row 4: Pitch and warnings
-  snprintf(buf, sizeof(buf), "P%+.0f", imu.pitch);
-  u8g2.drawStr(0, 64, buf);
-
   // Warning indicators
-  if (!sdOK) u8g2.drawStr(30, 64, "!SD");
-  if (!imuOK) u8g2.drawStr(55, 64, "!IMU");
-  if (lastValidGPS > 0 && millis() - lastValidGPS > 60000) u8g2.drawStr(85, 64, "!GPS");
+  char warnStr[16] = "";
+  if (!sdOK) strcat(warnStr, "!SD ");
+  if (!imuOK) strcat(warnStr, "!IMU ");
+  if (lastValidGPS > 0 && millis() - lastValidGPS > 60000) strcat(warnStr, "!GPS");
+
+  snprintf(buf, sizeof(buf), "%s %d/%d H%.1f P%+.0f %s%s",
+    fixStr, dispSats, dispView, dispHdop, imu.pitch, statusStr, warnStr);
+  u8g2.drawStr(0, 62, buf);
 
   u8g2.sendBuffer();
 }
