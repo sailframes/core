@@ -63,7 +63,7 @@
 #define SD_CS_PIN     5
 #define SDA_PIN       21
 #define SCL_PIN       22
-#define LED_PIN       2
+#define LED_PIN       -1  // Disabled - GPIO2 conflicts with WiFi PHY
 
 // Battery monitoring (PowerBoost 1000C)
 #define BATT_VOLTAGE_PIN  34   // ADC pin for voltage divider
@@ -72,7 +72,7 @@
 // ============================================================
 // CONFIGURATION
 // ============================================================
-#define GPS_BAUD      460800
+#define GPS_BAUD      460800  // LG290P configured rate
 #define SERIAL_BAUD   115200
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT 64
@@ -502,15 +502,23 @@ void setup() {
   Serial.println("  SailFrames E1 v2.0 — PPK Logger");
   Serial.println("=================================");
 
-  pinMode(LED_PIN, OUTPUT);
+  // Initialize WiFi FIRST before any peripherals touch GPIO2
+  // This must happen before Wire, SPI, or any other peripheral init
+  pinMode(2, INPUT);  // Release GPIO2
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(100);
+  Serial.println("[WIFI] PHY initialized early");
 
-  // Battery monitoring (PowerBoost 1000C)
-  setupBattery();
-  updateBattery();  // Initial reading
-  Serial.printf("[BATT] Initial: %.2fV (%d%%)\n", battery.voltage, battery.percent);
-  if (battery.critical) {
-    Serial.println("[BATT] WARNING: Battery critical on startup!");
-  }
+  if (LED_PIN >= 0) pinMode(LED_PIN, OUTPUT);
+
+  // Battery monitoring (PowerBoost 1000C) - DISABLED: battery unplugged
+  // setupBattery();
+  // updateBattery();  // Initial reading
+  // Serial.printf("[BATT] Initial: %.2fV (%d%%)\n", battery.voltage, battery.percent);
+  // if (battery.critical) {
+  //   Serial.println("[BATT] WARNING: Battery critical on startup!");
+  // }
 
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);  // 100kHz for SSD1309 stability
@@ -631,8 +639,30 @@ void setup() {
 
   // GPS
   Serial2.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  Serial.printf("[GPS] UART2 at %d baud\n", GPS_BAUD);
-  delay(1000);
+  Serial.printf("[GPS] UART2 at %d baud (RX=GPIO%d, TX=GPIO%d)\n", GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
+
+  // Diagnostic: check for incoming data
+  Serial.println("[GPS] Checking for data (2 sec)...");
+  delay(100);
+  unsigned long testStart = millis();
+  int byteCount = 0;
+  while (millis() - testStart < 2000) {
+    while (Serial2.available()) {
+      char c = Serial2.read();
+      byteCount++;
+      if (byteCount <= 100) Serial.print(c);  // Print first 100 chars
+    }
+    delay(1);
+  }
+  Serial.printf("\n[GPS] Received %d bytes in 2 sec\n", byteCount);
+  if (byteCount == 0) {
+    Serial.println("[GPS] WARNING: No data received! Check:");
+    Serial.println("[GPS]   - Wiring: GPS TXD3 -> ESP32 GPIO16");
+    Serial.println("[GPS]   - Baud rate: try 115200 or 460800");
+    Serial.println("[GPS]   - GPS power and antenna");
+  }
+
+  delay(500);
   configureLG290P();
 
   // Wait for fix
@@ -1972,6 +2002,25 @@ bool connectWiFi() {
     return false;
   }
 
+  // Scan for networks first
+  Serial.println("[WIFI] Scanning...");
+  int n = WiFi.scanNetworks();
+  Serial.printf("[WIFI] Found %d networks:\n", n);
+  for (int i = 0; i < n && i < 10; i++) {
+    wifi_auth_mode_t auth = WiFi.encryptionType(i);
+    const char* authStr =
+      auth == WIFI_AUTH_OPEN ? "OPEN" :
+      auth == WIFI_AUTH_WEP ? "WEP" :
+      auth == WIFI_AUTH_WPA_PSK ? "WPA" :
+      auth == WIFI_AUTH_WPA2_PSK ? "WPA2" :
+      auth == WIFI_AUTH_WPA_WPA2_PSK ? "WPA/WPA2" :
+      auth == WIFI_AUTH_WPA3_PSK ? "WPA3" :
+      auth == WIFI_AUTH_WPA2_WPA3_PSK ? "WPA2/WPA3" : "OTHER";
+    Serial.printf("[WIFI]   %d: %s (%d dBm) %s ch%d\n",
+      i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), authStr, WiFi.channel(i));
+  }
+  WiFi.scanDelete();
+
   // Try each configured network
   for (int i = 0; i < config.wifi_count; i++) {
     if (strlen(config.wifi[i].ssid) == 0) continue;
@@ -1992,12 +2041,33 @@ bool connectWiFi() {
       u8g2.sendBuffer();
     }
 
+    Serial.printf("[WIFI] Credentials: SSID='%s' PASS='%s'\n",
+      config.wifi[i].ssid, config.wifi[i].pass);
+
+    // Ensure clean state before connecting
+    WiFi.disconnect(true);
+    delay(100);
+    WiFi.persistent(false);  // Don't save to flash
+    WiFi.setAutoReconnect(false);
     WiFi.begin(config.wifi[i].ssid, config.wifi[i].pass);
 
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts++ < 20) {
+    while (WiFi.status() != WL_CONNECTED && attempts++ < 30) {  // Increased to 30
       delay(500);
       Serial.print(".");
+      if (attempts % 10 == 0) {
+        // Print WiFi status for debugging
+        int status = WiFi.status();
+        const char* statusStr =
+          status == WL_IDLE_STATUS ? "IDLE" :
+          status == WL_NO_SSID_AVAIL ? "NO_SSID" :
+          status == WL_SCAN_COMPLETED ? "SCAN_DONE" :
+          status == WL_CONNECTED ? "CONNECTED" :
+          status == WL_CONNECT_FAILED ? "FAILED" :
+          status == WL_CONNECTION_LOST ? "LOST" :
+          status == WL_DISCONNECTED ? "DISCONNECTED" : "UNKNOWN";
+        Serial.printf(" [%s] ", statusStr);
+      }
       yield();  // Feed watchdog
     }
     Serial.println();
@@ -2712,7 +2782,7 @@ void loop() {
     if (!uploading) {  // Don't override upload display
       updateDisplay();
     }
-    if (logging) digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    if (logging && LED_PIN >= 0) digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     lastDisp = now;
   }
 
@@ -2733,11 +2803,11 @@ void loop() {
     lastWifiCheck = now;
   }
 
-  // Battery monitoring (every 10 seconds)
-  static unsigned long lastBattCheck = 0;
-  if (now - lastBattCheck >= 10000) {
-    updateBattery();
-    handleLowBattery();  // Will shut down if critical
-    lastBattCheck = now;
-  }
+  // Battery monitoring (every 10 seconds) - DISABLED: battery unplugged
+  // static unsigned long lastBattCheck = 0;
+  // if (now - lastBattCheck >= 10000) {
+  //   updateBattery();
+  //   handleLowBattery();  // Will shut down if critical
+  //   lastBattCheck = now;
+  // }
 }
