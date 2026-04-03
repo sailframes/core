@@ -37,6 +37,25 @@ def lambda_handler(event, context):
     return {'statusCode': 200, 'body': 'OK'}
 
 
+def extract_start_time_from_filename(filename: str) -> str:
+    """Extract start time (HHMMSS) from E1 filename.
+
+    E1 filenames: E1_boot24_163325_nav.csv or E1_20260402_163325_nav.csv
+    Returns HHMMSS string (e.g., '163325') or empty string if not found.
+    """
+    import re
+    # Match 6 digits that look like a time (HHMMSS)
+    # In E1_boot24_163325_nav.csv, the time is the third part
+    parts = filename.replace('.csv', '').split('_')
+    for part in parts:
+        if len(part) == 6 and part.isdigit():
+            # Validate it looks like a time (HH < 24, MM < 60, SS < 60)
+            hh, mm, ss = int(part[:2]), int(part[2:4]), int(part[4:6])
+            if hh < 24 and mm < 60 and ss < 60:
+                return part
+    return ''
+
+
 def process_file(bucket: str, key: str):
     """Process a single CSV file.
 
@@ -51,6 +70,7 @@ def process_file(bucket: str, key: str):
         device_id = parts[1]
         date = parts[2]
         sensor_type = parts[3]
+        filename = parts[4]
     elif len(parts) == 4:
         # E1 format: raw/{device}/{date}/{file}.csv
         device_id = parts[1]
@@ -72,19 +92,23 @@ def process_file(bucket: str, key: str):
         logger.warning(f"Invalid path structure: {key}")
         return
 
+    # Extract start time from filename for old E1 format fallback
+    start_time = extract_start_time_from_filename(filename)
+    logger.info(f"Extracted start time from filename: {start_time}")
+
     # Download CSV
     response = s3.get_object(Bucket=bucket, Key=key)
     csv_content = response['Body'].read().decode('utf-8')
 
-    # Parse and downsample (pass date for E1 timestamp generation)
+    # Parse and downsample (pass date and start_time for E1 timestamp generation)
     if sensor_type == 'gps':
-        data = process_gps(csv_content, date)
+        data = process_gps(csv_content, date, start_time)
     elif sensor_type == 'imu':
-        data = process_imu(csv_content, date)
+        data = process_imu(csv_content, date, start_time)
     elif sensor_type == 'pressure':
         data = process_pressure(csv_content)
     elif sensor_type == 'wind':
-        data = process_wind(csv_content, date)
+        data = process_wind(csv_content, date, start_time)
     else:
         logger.warning(f"Unknown sensor type: {sensor_type}")
         return
@@ -129,7 +153,7 @@ def process_file(bucket: str, key: str):
     update_manifest(bucket, device_id, date, sensor_type, data)
 
 
-def process_gps(csv_content: str, date: str = None) -> list:
+def process_gps(csv_content: str, date: str = None, start_time: str = None) -> list:
     """Downsample GPS from 10Hz to 1Hz, keeping max speed per second.
 
     Supports two CSV formats:
@@ -139,6 +163,7 @@ def process_gps(csv_content: str, date: str = None) -> list:
     Args:
         csv_content: CSV data as string
         date: Date string (YYYY-MM-DD) for E1 timestamp generation
+        start_time: Start time (HHMMSS) from filename for old E1 format
     """
     from datetime import timedelta
 
@@ -215,7 +240,7 @@ def process_gps(csv_content: str, date: str = None) -> list:
     return result
 
 
-def process_imu(csv_content: str, date: str = None) -> list:
+def process_imu(csv_content: str, date: str = None, start_time: str = None) -> list:
     """Downsample IMU from 50Hz to 1Hz, averaging values.
 
     Supports two CSV formats:
@@ -226,6 +251,7 @@ def process_imu(csv_content: str, date: str = None) -> list:
     Args:
         csv_content: CSV data as string
         date: Date string (YYYY-MM-DD) for E1 timestamp generation
+        start_time: Start time (HHMMSS) from filename for old E1 format
     """
     from datetime import timedelta
 
@@ -241,6 +267,11 @@ def process_imu(csv_content: str, date: str = None) -> list:
 
     # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
     TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
+
+    # Parse start_time for old E1 format
+    base_seconds = 0
+    if start_time and len(start_time) == 6:
+        base_seconds = int(start_time[:2]) * 3600 + int(start_time[2:4]) * 60 + int(start_time[4:6])
 
     # Group by second
     by_second = defaultdict(list)
@@ -260,15 +291,16 @@ def process_imu(csv_content: str, date: str = None) -> list:
                 except ValueError:
                     continue
             else:
-                # Old E1 format: ms is milliseconds since boot (relative time only)
+                # Old E1 format: ms is milliseconds since boot, add to start_time from filename
                 ms = row.get('ms', '')
                 if not ms:
                     continue
                 try:
-                    sec = int(float(ms) // 1000)
-                    hours = sec // 3600
-                    minutes = (sec % 3600) // 60
-                    secs = sec % 60
+                    sec_offset = int(float(ms) // 1000)
+                    total_sec = base_seconds + sec_offset
+                    hours = (total_sec // 3600) % 24
+                    minutes = (total_sec % 3600) // 60
+                    secs = total_sec % 60
                     second = f"{date}T{hours:02d}:{minutes:02d}:{secs:02d}"
                 except ValueError:
                     continue
@@ -359,7 +391,7 @@ def process_pressure(csv_content: str) -> list:
     return result
 
 
-def process_wind(csv_content: str, date: str = None) -> list:
+def process_wind(csv_content: str, date: str = None, start_time: str = None) -> list:
     """Process wind data (already 1Hz, minimal transformation).
 
     Supports two CSV formats:
@@ -370,6 +402,7 @@ def process_wind(csv_content: str, date: str = None) -> list:
     Args:
         csv_content: CSV data as string
         date: Date string (YYYY-MM-DD) for E1 timestamp generation
+        start_time: Start time (HHMMSS) from filename for old E1 format
     """
     from datetime import timedelta
 
@@ -385,6 +418,11 @@ def process_wind(csv_content: str, date: str = None) -> list:
 
     # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
     TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
+
+    # Parse start_time for old E1 format
+    base_seconds = 0
+    if start_time and len(start_time) == 6:
+        base_seconds = int(start_time[:2]) * 3600 + int(start_time[2:4]) * 60 + int(start_time[4:6])
 
     # Group by second for E1 (may have multiple samples)
     if is_e1_format:
@@ -404,15 +442,16 @@ def process_wind(csv_content: str, date: str = None) -> list:
                 except ValueError:
                     continue
             else:
-                # Old E1 format: ms is milliseconds since boot
+                # Old E1 format: ms is milliseconds since boot, add to start_time from filename
                 ms = row.get('ms', '')
                 if not ms:
                     continue
                 try:
-                    sec = int(float(ms) // 1000)
-                    hours = sec // 3600
-                    minutes = (sec % 3600) // 60
-                    seconds = sec % 60
+                    sec_offset = int(float(ms) // 1000)
+                    total_sec = base_seconds + sec_offset
+                    hours = (total_sec // 3600) % 24
+                    minutes = (total_sec % 3600) // 60
+                    seconds = total_sec % 60
                     second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
                 except ValueError:
                     continue
