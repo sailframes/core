@@ -53,12 +53,13 @@ def error_response(status: int, message: str) -> dict:
 
 
 def get_video_streams(device_id: str, date: str) -> dict:
-    """Get HLS stream info for all cameras."""
+    """Get video stream info - supports HLS playlists or direct video files."""
     streams = {}
 
     # Try to get correct times from session manifest
     manifest_times = get_manifest_video_times(device_id, date)
 
+    # First try HLS streams (transcoded videos)
     for camera in ['cockpit', 'sails']:
         prefix = f"hls/{device_id}/{date}/{camera}/"
 
@@ -88,7 +89,53 @@ def get_video_streams(device_id: str, date: str) -> dict:
             'duration_seconds': duration
         }
 
+    # If no HLS streams, check for direct video files from manifest
+    if not streams:
+        streams = get_direct_video_streams(device_id, date)
+
     return streams
+
+
+def get_direct_video_streams(device_id: str, date: str) -> dict:
+    """Get direct video file URLs from manifest (for non-transcoded videos)."""
+    manifest_key = f"processed/{device_id}/{date}/manifest.json"
+    try:
+        response = s3.get_object(Bucket=DATA_BUCKET, Key=manifest_key)
+        manifest = json.loads(response['Body'].read())
+        videos = manifest.get('videos', [])
+
+        if not videos:
+            return {}
+
+        streams = {}
+        for i, video in enumerate(videos):
+            # Generate presigned URL for direct access
+            video_key = video.get('url', '')
+            if not video_key:
+                continue
+
+            try:
+                presigned_url = s3.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': DATA_BUCKET, 'Key': video_key},
+                    ExpiresIn=3600  # 1 hour
+                )
+            except Exception as e:
+                logger.warning(f"Could not generate presigned URL for {video_key}: {e}")
+                continue
+
+            camera_name = f"video_{i+1}"
+            streams[camera_name] = {
+                'direct_url': presigned_url,
+                'filename': video.get('filename', ''),
+                'start_time': video.get('start_time'),
+                'duration_seconds': video.get('duration_sec', 0)
+            }
+
+        return streams
+    except Exception as e:
+        logger.warning(f"Could not read manifest for direct videos: {e}")
+        return {}
 
 
 def get_manifest_video_times(device_id: str, date: str) -> dict:

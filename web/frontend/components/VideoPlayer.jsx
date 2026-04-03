@@ -13,27 +13,38 @@ export default function VideoPlayer({ session, currentTime, onTimeChange }) {
     if (!session) return;
     fetch(`${API_URL}/api/video/${session.device_id}/${session.date}`)
       .then((r) => r.json())
-      .then((data) => setVideoInfo(data.cameras || {}))
+      .then((data) => setVideoInfo(data.streams || data.cameras || {}))
       .catch(() => setVideoInfo(null));
   }, [session]);
 
-  // Initialize HLS
+  // Initialize video (HLS or direct)
   useEffect(() => {
     const video = videoRef.current;
     const cam = videoInfo?.[activeCamera];
-    if (!video || !cam?.playlist_url) return;
+    if (!video || !cam) return;
 
+    // Clean up previous HLS instance
     if (hlsRef.current) {
       hlsRef.current.destroy();
+      hlsRef.current = null;
     }
 
-    if (Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true });
-      hls.loadSource(cam.playlist_url);
-      hls.attachMedia(video);
-      hlsRef.current = hls;
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = cam.playlist_url;
+    // Direct video URL (e.g., MP4/LRV files)
+    if (cam.direct_url) {
+      video.src = cam.direct_url;
+      return;
+    }
+
+    // HLS playlist
+    if (cam.playlist_url) {
+      if (Hls.isSupported()) {
+        const hls = new Hls({ enableWorker: true });
+        hls.loadSource(cam.playlist_url);
+        hls.attachMedia(video);
+        hlsRef.current = hls;
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = cam.playlist_url;
+      }
     }
 
     return () => {
