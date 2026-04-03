@@ -20,39 +20,21 @@ class VideoPlayer {
     }
 
     _setupControls() {
-        // Sync video on any time change (scrubbing, chart clicks, etc.)
-        window.timeController.addEventListener('time-change', (e) => {
-            // Only seek when paused (during playback, drift correction handles it)
-            if (!this.isPlaying && e.detail.time) {
-                this._seekVideos(e.detail.time);
-            }
+        // Listen directly to TimeController events for reliable sync
+        window.timeController.addEventListener('play', () => {
+            console.log('TimeController play event');
+            this._playAll();
         });
 
-        // Play/pause with main controls
-        const btnPlay = document.getElementById('btn-play');
-        if (btnPlay) {
-            btnPlay.addEventListener('click', () => {
-                // Small delay to let TimeController state update
-                setTimeout(() => {
-                    if (window.timeController.isPlaying()) {
-                        this._playAll();
-                    } else {
-                        this._pauseAll();
-                    }
-                }, 50);
-            });
-        }
+        window.timeController.addEventListener('pause', () => {
+            console.log('TimeController pause event');
+            this._pauseAll();
+        });
 
-        // Keyboard space bar
-        document.addEventListener('keydown', (e) => {
-            if (e.code === 'Space' && e.target.tagName !== 'INPUT') {
-                setTimeout(() => {
-                    if (window.timeController.isPlaying()) {
-                        this._playAll();
-                    } else {
-                        this._pauseAll();
-                    }
-                }, 50);
+        // Sync video on any time change (scrubbing, chart clicks, etc.)
+        window.timeController.addEventListener('time-change', (e) => {
+            if (e.detail.time) {
+                this._seekVideos(e.detail.time);
             }
         });
 
@@ -170,34 +152,27 @@ class VideoPlayer {
 
     /**
      * Initialize direct video playback (MP4/LRV files)
+     * Maps all direct videos to the cockpit video element
      */
     _initDirect(camera, streamInfo) {
-        const video = this.videoElements[camera];
-        if (!video) {
-            // For direct videos, use the cockpit video element for the first video
-            const cockpitVideo = this.videoElements['cockpit'];
-            if (cockpitVideo) {
-                this._setupDirectVideo(cockpitVideo, camera, streamInfo);
-            }
-            return;
-        }
-        this._setupDirectVideo(video, camera, streamInfo);
-    }
+        // Use cockpit video element for all direct videos (only one video element available)
+        const video = this.videoElements['cockpit'];
+        if (!video) return;
 
-    _setupDirectVideo(video, camera, streamInfo) {
+        // Map this camera to cockpit element for playback sync
+        this.videoElements[camera] = video;
         this.videosReady[camera] = false;
+
+        // Update streamInfo to use cockpit for seeking
+        this.streamInfo['cockpit'] = streamInfo;
 
         video.src = streamInfo.direct_url;
         video.load();
 
-        video.addEventListener('loadedmetadata', () => {
-            console.log(`Direct video ready: ${camera}`);
+        const onLoaded = () => {
+            console.log(`Direct video ready: ${camera}, duration: ${video.duration}s`);
             this.videosReady[camera] = true;
-
-            // Store stream info for this camera
-            if (!this.streamInfo[camera]) {
-                this.streamInfo[camera] = streamInfo;
-            }
+            this.videosReady['cockpit'] = true;
 
             // Initial seek to current timeline position
             const currentTime = window.timeController?.getCurrentTime();
@@ -206,9 +181,13 @@ class VideoPlayer {
                 const offsetSeconds = (currentTime.getTime() - streamStart) / 1000;
                 if (offsetSeconds >= 0 && offsetSeconds <= video.duration) {
                     video.currentTime = offsetSeconds;
+                    console.log(`Initial seek to ${offsetSeconds.toFixed(1)}s`);
                 }
             }
-        });
+            video.removeEventListener('loadedmetadata', onLoaded);
+        };
+
+        video.addEventListener('loadedmetadata', onLoaded);
 
         video.addEventListener('error', (e) => {
             console.error(`Video error ${camera}:`, video.error?.message || 'Unknown error');
@@ -218,28 +197,29 @@ class VideoPlayer {
     _seekVideos(time, force = false) {
         if (!time || !this.streamInfo) return;
 
-        for (const [camera, info] of Object.entries(this.streamInfo)) {
-            if (!info || !info.start_time) continue;
+        // Use cockpit video element directly since all videos map to it
+        const video = this.videoElements['cockpit'];
+        const info = this.streamInfo['cockpit'];
 
-            const video = this.videoElements[camera];
-            if (!video || !this.videosReady[camera]) continue;
+        if (!video || !info || !info.start_time) return;
+        if (!this.videosReady['cockpit']) return;
 
-            const streamStart = new Date(info.start_time).getTime();
-            const offsetSeconds = (time.getTime() - streamStart) / 1000;
+        const streamStart = new Date(info.start_time).getTime();
+        const offsetSeconds = (time.getTime() - streamStart) / 1000;
 
-            if (offsetSeconds >= 0 && video.duration && offsetSeconds <= video.duration) {
-                // Only seek if there's significant difference or forced
-                const diff = Math.abs(video.currentTime - offsetSeconds);
-                if (force || diff > 0.5) {
-                    video.currentTime = offsetSeconds;
-                    console.log(`Seek ${camera} to ${offsetSeconds.toFixed(1)}s (diff: ${diff.toFixed(1)}s)`);
-                }
+        if (video.duration && offsetSeconds >= 0 && offsetSeconds <= video.duration) {
+            // Only seek if difference > 0.5s (avoid micro-seeks during playback)
+            const diff = Math.abs(video.currentTime - offsetSeconds);
+            if (force || diff > 0.5) {
+                video.currentTime = offsetSeconds;
             }
         }
     }
 
     _playAll() {
         this.isPlaying = true;
+        const video = this.videoElements['cockpit'];
+        if (!video || !this.videosReady['cockpit']) return;
 
         // Sync position before playing
         const currentTime = window.timeController.getCurrentTime();
@@ -247,11 +227,7 @@ class VideoPlayer {
             this._seekVideos(currentTime, true);
         }
 
-        Object.entries(this.videoElements).forEach(([camera, video]) => {
-            if (video && this.videosReady[camera]) {
-                video.play().catch(e => console.warn(`Play failed ${camera}:`, e.message));
-            }
-        });
+        video.play().catch(e => console.warn('Video play failed:', e.message));
 
         // Start periodic drift check
         this._startDriftCheck();
@@ -261,9 +237,8 @@ class VideoPlayer {
         this.isPlaying = false;
         this._stopDriftCheck();
 
-        Object.values(this.videoElements).forEach(video => {
-            if (video) video.pause();
-        });
+        const video = this.videoElements['cockpit'];
+        if (video) video.pause();
     }
 
     _startDriftCheck() {
@@ -274,25 +249,21 @@ class VideoPlayer {
             if (!this.isPlaying) return;
 
             const currentTime = window.timeController.getCurrentTime();
-            if (!currentTime || !this.streamInfo) return;
+            const video = this.videoElements['cockpit'];
+            const info = this.streamInfo?.['cockpit'];
 
-            // Check each video for drift
-            for (const [camera, info] of Object.entries(this.streamInfo)) {
-                if (!info || !info.start_time) continue;
+            if (!currentTime || !video || !info?.start_time) return;
+            if (video.paused) return;
 
-                const video = this.videoElements[camera];
-                if (!video || !this.videosReady[camera] || video.paused) continue;
+            const streamStart = new Date(info.start_time).getTime();
+            const expectedOffset = (currentTime.getTime() - streamStart) / 1000;
+            const actualOffset = video.currentTime;
+            const drift = Math.abs(expectedOffset - actualOffset);
 
-                const streamStart = new Date(info.start_time).getTime();
-                const expectedOffset = (currentTime.getTime() - streamStart) / 1000;
-                const actualOffset = video.currentTime;
-                const drift = Math.abs(expectedOffset - actualOffset);
-
-                // If drift > 1 second, correct it
-                if (drift > 1 && expectedOffset >= 0 && expectedOffset <= video.duration) {
-                    console.log(`Correcting ${camera} drift: ${drift.toFixed(1)}s`);
-                    video.currentTime = expectedOffset;
-                }
+            // If drift > 1 second, correct it
+            if (drift > 1 && expectedOffset >= 0 && expectedOffset <= video.duration) {
+                console.log(`Correcting drift: ${drift.toFixed(1)}s`);
+                video.currentTime = expectedOffset;
             }
         }, 2000);
     }
@@ -305,9 +276,8 @@ class VideoPlayer {
     }
 
     _setPlaybackRate(rate) {
-        Object.values(this.videoElements).forEach(video => {
-            if (video) video.playbackRate = rate;
-        });
+        const video = this.videoElements['cockpit'];
+        if (video) video.playbackRate = rate;
     }
 
     /**
