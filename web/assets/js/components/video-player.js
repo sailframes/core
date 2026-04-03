@@ -219,17 +219,31 @@ class VideoPlayer {
     _playAll() {
         this.isPlaying = true;
         const video = this.videoElements['cockpit'];
-        if (!video || !this.videosReady['cockpit']) return;
+        const info = this.streamInfo?.['cockpit'];
+        if (!video || !this.videosReady['cockpit'] || !info) return;
 
-        // Sync position before playing
         const currentTime = window.timeController.getCurrentTime();
-        if (currentTime) {
-            this._seekVideos(currentTime, true);
+        if (!currentTime) return;
+
+        const videoStart = new Date(info.start_time).getTime();
+        const offsetSeconds = (currentTime.getTime() - videoStart) / 1000;
+
+        // If timeline is before video start, don't play video yet
+        if (offsetSeconds < 0) {
+            console.log(`Timeline before video start, waiting ${(-offsetSeconds).toFixed(0)}s`);
+            video.currentTime = 0;
+            video.pause();
+        } else if (offsetSeconds <= video.duration) {
+            // Timeline is within video range - seek and play
+            video.currentTime = offsetSeconds;
+            video.play().catch(e => console.warn('Video play failed:', e.message));
+        } else {
+            // Timeline is past video end
+            video.currentTime = video.duration;
+            video.pause();
         }
 
-        video.play().catch(e => console.warn('Video play failed:', e.message));
-
-        // Start periodic drift check
+        // Start periodic sync check
         this._startDriftCheck();
     }
 
@@ -244,7 +258,7 @@ class VideoPlayer {
     _startDriftCheck() {
         this._stopDriftCheck();
 
-        // Check every 2 seconds for drift
+        // Check every 500ms for sync
         this.syncInterval = setInterval(() => {
             if (!this.isPlaying) return;
 
@@ -253,19 +267,44 @@ class VideoPlayer {
             const info = this.streamInfo?.['cockpit'];
 
             if (!currentTime || !video || !info?.start_time) return;
-            if (video.paused) return;
 
-            const streamStart = new Date(info.start_time).getTime();
-            const expectedOffset = (currentTime.getTime() - streamStart) / 1000;
+            const videoStart = new Date(info.start_time).getTime();
+            const expectedOffset = (currentTime.getTime() - videoStart) / 1000;
+
+            // Timeline is before video start - keep video paused at 0
+            if (expectedOffset < 0) {
+                if (!video.paused) {
+                    video.pause();
+                    video.currentTime = 0;
+                }
+                return;
+            }
+
+            // Timeline is past video end - pause at end
+            if (expectedOffset > video.duration) {
+                if (!video.paused) {
+                    video.pause();
+                    video.currentTime = video.duration;
+                }
+                return;
+            }
+
+            // Timeline is within video range
+            // Start video if it was waiting
+            if (video.paused) {
+                video.currentTime = expectedOffset;
+                video.play().catch(e => console.warn('Video play failed:', e.message));
+                return;
+            }
+
+            // Check for drift and correct
             const actualOffset = video.currentTime;
             const drift = Math.abs(expectedOffset - actualOffset);
-
-            // If drift > 1 second, correct it
-            if (drift > 1 && expectedOffset >= 0 && expectedOffset <= video.duration) {
+            if (drift > 1) {
                 console.log(`Correcting drift: ${drift.toFixed(1)}s`);
                 video.currentTime = expectedOffset;
             }
-        }, 2000);
+        }, 500);
     }
 
     _stopDriftCheck() {
