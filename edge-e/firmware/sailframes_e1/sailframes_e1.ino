@@ -65,6 +65,10 @@
 #define SCL_PIN       22
 #define LED_PIN       2
 
+// Battery monitoring (PowerBoost 1000C)
+#define BATT_VOLTAGE_PIN  34   // ADC pin for voltage divider
+#define LOW_BATT_PIN      35   // LBO pin from PowerBoost (LOW = critical)
+
 // ============================================================
 // CONFIGURATION
 // ============================================================
@@ -139,6 +143,14 @@ struct WindData {
   char deviceName[32] = "";
   char deviceAddr[20] = "";
 } wind;
+
+struct BatteryData {
+  float voltage = 0;        // Battery voltage (3.0-4.2V for LiPo)
+  int percent = 0;          // Estimated percentage (0-100)
+  bool critical = false;    // LBO pin triggered (< 3.2V)
+  bool valid = false;       // Have we read the battery yet?
+  unsigned long lastRead = 0;
+} battery;
 
 struct RTCM3Parser {
   enum State { WAIT_SYNC, READ_HEADER, READ_PAYLOAD };
@@ -491,6 +503,15 @@ void setup() {
   Serial.println("=================================");
 
   pinMode(LED_PIN, OUTPUT);
+
+  // Battery monitoring (PowerBoost 1000C)
+  setupBattery();
+  updateBattery();  // Initial reading
+  Serial.printf("[BATT] Initial: %.2fV (%d%%)\n", battery.voltage, battery.percent);
+  if (battery.critical) {
+    Serial.println("[BATT] WARNING: Battery critical on startup!");
+  }
+
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);  // 100kHz for SSD1309 stability
 
@@ -875,6 +896,105 @@ void parseNMEA(const char* s) {
         }
       }
     }
+  }
+}
+
+// ============================================================
+// BATTERY MONITORING (PowerBoost 1000C)
+// ============================================================
+// Voltage divider: 2x 200Ω resistors, ratio = 2.0
+// TODO: Replace with 100kΩ resistors to reduce idle current
+const float BATT_DIVIDER_RATIO = 2.0;
+
+void setupBattery() {
+  pinMode(LOW_BATT_PIN, INPUT_PULLUP);
+  analogReadResolution(12);  // 12-bit ADC (0-4095)
+  analogSetAttenuation(ADC_11db);  // Full 0-3.3V range
+  Serial.println("[BATT] Battery monitoring initialized");
+}
+
+float readBatteryVoltage() {
+  // Average multiple readings to reduce noise
+  int sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += analogRead(BATT_VOLTAGE_PIN);
+    delayMicroseconds(100);
+  }
+  float raw = sum / 10.0;
+  float voltage = (raw / 4095.0) * 3.3 * BATT_DIVIDER_RATIO;
+  return voltage;
+}
+
+int getBatteryPercent(float voltage) {
+  // LiPo discharge curve (approximate linear mapping)
+  // 4.2V = 100%, 3.7V = ~50%, 3.0V = 0%
+  if (voltage >= 4.2) return 100;
+  if (voltage <= 3.0) return 0;
+  return (int)((voltage - 3.0) / 1.2 * 100);
+}
+
+bool isBatteryCritical() {
+  // PowerBoost LBO goes LOW when battery < 3.2V
+  return digitalRead(LOW_BATT_PIN) == LOW;
+}
+
+void updateBattery() {
+  battery.voltage = readBatteryVoltage();
+  battery.percent = getBatteryPercent(battery.voltage);
+  battery.critical = isBatteryCritical();
+  battery.valid = true;
+  battery.lastRead = millis();
+}
+
+void handleLowBattery() {
+  if (!battery.critical) return;
+
+  Serial.println("[BATT] CRITICAL LOW BATTERY - Shutting down!");
+
+  // Flush and close all open files
+  if (logging) {
+    if (navFile) { navFile.flush(); navFile.close(); }
+    if (imuFile) { imuFile.flush(); imuFile.close(); }
+    if (rawFile) { rawFile.flush(); rawFile.close(); }
+    if (windFile) { windFile.flush(); windFile.close(); }
+    logging = false;
+  }
+
+  // Display warning
+  if (oledOK) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_helvB14_tr);
+    u8g2.drawStr(10, 25, "LOW BATTERY");
+    u8g2.drawStr(5, 50, "SHUTTING DOWN");
+    u8g2.sendBuffer();
+    delay(3000);
+  }
+
+  // Enter deep sleep to preserve remaining power
+  esp_deep_sleep_start();
+}
+
+// Draw battery icon in top-right corner (24x10 pixels)
+void drawBatteryIcon(int x, int y) {
+  if (!battery.valid) return;
+
+  int barWidth = map(battery.percent, 0, 100, 0, 18);
+  barWidth = constrain(barWidth, 0, 18);
+
+  // Battery outline
+  u8g2.drawFrame(x, y, 22, 10);
+  // Battery tip
+  u8g2.drawBox(x + 22, y + 3, 2, 4);
+  // Fill level
+  if (barWidth > 0) {
+    u8g2.drawBox(x + 2, y + 2, barWidth, 6);
+  }
+
+  // Blink if critical
+  if (battery.critical && (millis() / 500) % 2 == 0) {
+    u8g2.setDrawColor(0);
+    u8g2.drawBox(x + 2, y + 2, 18, 6);
+    u8g2.setDrawColor(1);
   }
 }
 
@@ -1485,6 +1605,9 @@ void updateDisplayD1() {
 #endif
   u8g2.drawStr(1, 64, buf);
 
+  // Battery icon in top-right corner
+  drawBatteryIcon(104, 0);
+
   u8g2.sendBuffer();
 }
 
@@ -1574,9 +1697,20 @@ void updateDisplayD2() {
   if (!imuOK) strcat(warnStr, "!IMU ");
   if (lastValidGPS > 0 && millis() - lastValidGPS > 60000) strcat(warnStr, "!GPS");
 
-  snprintf(buf, sizeof(buf), "%s %d/%d H%.1f P%+.0f %s%s",
-    fixStr, dispSats, dispView, dispHdop, imu.pitch, statusStr, warnStr);
+  // Battery indicator takes some space, shorten status line
+  snprintf(buf, sizeof(buf), "%s %d/%d H%.1f P%+.0f %s",
+    fixStr, dispSats, dispView, dispHdop, imu.pitch, statusStr);
   u8g2.drawStr(0, 62, buf);
+
+  // Battery icon in top-right corner
+  drawBatteryIcon(104, 0);
+
+  // Show battery % below icon if space permits
+  if (battery.valid) {
+    u8g2.setFont(u8g2_font_4x6_tr);
+    snprintf(buf, sizeof(buf), "%d%%", battery.percent);
+    u8g2.drawStr(106, 16, buf);
+  }
 
   u8g2.sendBuffer();
 }
@@ -2591,5 +2725,13 @@ void loop() {
   if (!wifiConnected && now - lastWifiCheck >= 60000) {
     checkWiFiUpload();
     lastWifiCheck = now;
+  }
+
+  // Battery monitoring (every 10 seconds)
+  static unsigned long lastBattCheck = 0;
+  if (now - lastBattCheck >= 10000) {
+    updateBattery();
+    handleLowBattery();  // Will shut down if critical
+    lastBattCheck = now;
   }
 }
