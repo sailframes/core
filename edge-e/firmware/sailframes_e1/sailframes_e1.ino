@@ -907,7 +907,9 @@ void parseNMEA(const char* s) {
 const float BATT_DIVIDER_RATIO = 2.0;
 
 void setupBattery() {
-  pinMode(LOW_BATT_PIN, INPUT_PULLUP);
+  // GPIO35 is input-only, no internal pull-up available
+  // PowerBoost LBO has external pull-up on the board
+  pinMode(LOW_BATT_PIN, INPUT);
   analogReadResolution(12);  // 12-bit ADC (0-4095)
   analogSetAttenuation(ADC_11db);  // Full 0-3.3V range
   Serial.println("[BATT] Battery monitoring initialized");
@@ -935,7 +937,11 @@ int getBatteryPercent(float voltage) {
 
 bool isBatteryCritical() {
   // PowerBoost LBO goes LOW when battery < 3.2V
-  return digitalRead(LOW_BATT_PIN) == LOW;
+  // Only consider critical if voltage is also measurable (> 0.5V)
+  // This prevents false shutdown when battery hardware not connected
+  bool lboLow = digitalRead(LOW_BATT_PIN) == LOW;
+  bool voltageValid = battery.voltage > 0.5;
+  return lboLow && voltageValid;
 }
 
 void updateBattery() {
