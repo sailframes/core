@@ -81,8 +81,8 @@ class VideoPlayer {
             const data = await response.json();
             this.streamInfo = data.streams;
 
-            // Check if any streams available
-            const hasStreams = Object.values(this.streamInfo).some(s => s && s.playlist_url);
+            // Check if any streams available (HLS or direct)
+            const hasStreams = Object.values(this.streamInfo).some(s => s && (s.playlist_url || s.direct_url));
             if (!hasStreams) {
                 this.videoContainer.style.display = 'none';
                 return;
@@ -91,10 +91,12 @@ class VideoPlayer {
             // Use block for compact layout, flex for full layout
             this.videoContainer.style.display = this.videoContainer.classList.contains('video-compact') ? 'block' : 'flex';
 
-            // Initialize HLS for each stream
+            // Initialize video for each stream (HLS or direct)
             for (const [camera, info] of Object.entries(this.streamInfo)) {
                 if (info && info.playlist_url) {
                     this._initHLS(camera, info);
+                } else if (info && info.direct_url) {
+                    this._initDirect(camera, info);
                 }
             }
         } catch (error) {
@@ -164,6 +166,53 @@ class VideoPlayer {
                 this.videosReady[camera] = true;
             });
         }
+    }
+
+    /**
+     * Initialize direct video playback (MP4/LRV files)
+     */
+    _initDirect(camera, streamInfo) {
+        const video = this.videoElements[camera];
+        if (!video) {
+            // For direct videos, use the cockpit video element for the first video
+            const cockpitVideo = this.videoElements['cockpit'];
+            if (cockpitVideo) {
+                this._setupDirectVideo(cockpitVideo, camera, streamInfo);
+            }
+            return;
+        }
+        this._setupDirectVideo(video, camera, streamInfo);
+    }
+
+    _setupDirectVideo(video, camera, streamInfo) {
+        this.videosReady[camera] = false;
+
+        video.src = streamInfo.direct_url;
+        video.load();
+
+        video.addEventListener('loadedmetadata', () => {
+            console.log(`Direct video ready: ${camera}`);
+            this.videosReady[camera] = true;
+
+            // Store stream info for this camera
+            if (!this.streamInfo[camera]) {
+                this.streamInfo[camera] = streamInfo;
+            }
+
+            // Initial seek to current timeline position
+            const currentTime = window.timeController?.getCurrentTime();
+            if (currentTime && streamInfo.start_time) {
+                const streamStart = new Date(streamInfo.start_time).getTime();
+                const offsetSeconds = (currentTime.getTime() - streamStart) / 1000;
+                if (offsetSeconds >= 0 && offsetSeconds <= video.duration) {
+                    video.currentTime = offsetSeconds;
+                }
+            }
+        });
+
+        video.addEventListener('error', (e) => {
+            console.error(`Video error ${camera}:`, video.error?.message || 'Unknown error');
+        });
     }
 
     _seekVideos(time, force = false) {
