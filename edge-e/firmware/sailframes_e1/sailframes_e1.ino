@@ -43,6 +43,7 @@
 #include <HTTPClient.h>
 #include <U8g2lib.h>
 #include <Adafruit_BNO08x.h>
+#include <esp_sleep.h>
 
 // NimBLE configuration - disable unused features to reduce size
 #define CONFIG_BT_NIMBLE_ROLE_CENTRAL 1
@@ -68,6 +69,9 @@
 // Battery monitoring (PowerBoost 1000C)
 #define BATT_VOLTAGE_PIN  34   // ADC pin for voltage divider
 #define LOW_BATT_PIN      35   // LBO pin from PowerBoost (LOW = critical)
+
+// Power button for deep sleep
+#define POWER_BTN_PIN     13   // Momentary button to GND, internal pullup
 
 // ============================================================
 // CONFIGURATION
@@ -178,6 +182,11 @@ struct Config {
   int gps_rate_hz = 10;
   char wind_mac[20] = "C3:09:6D:1E:8A:FC";  // Calypso Mini MAC (can override in config.txt)
   bool wind_enabled = true;
+  // Recording thresholds
+  float start_speed_knots = 1.5;
+  float stop_speed_knots = 0.5;
+  int start_delay_sec = 10;
+  int stop_delay_sec = 180;
 } config;
 
 // ============================================================
@@ -221,6 +230,26 @@ unsigned long totalBytes = 0;
 unsigned long rtcmFrameCount = 0;  // Count RTCM3 frames for debugging
 char nmeaBuf[256];
 int nmeaIdx = 0;
+
+// ============================================================
+// GPS SPEED-TRIGGERED RECORDING
+// ============================================================
+enum RecordState { REC_IDLE, REC_ARMED, REC_RECORDING, REC_STOPPING };
+RecordState recState = REC_IDLE;
+unsigned long armStartTime = 0;      // when speed first exceeded start threshold
+unsigned long stopStartTime = 0;     // when speed first dropped below stop threshold
+int sessionCount = 0;                // increments each recording session
+
+// Recording thresholds (configurable via config.txt)
+float startSpeedKnots = 1.5;         // Start recording above this speed
+float stopSpeedKnots = 0.5;          // Stop recording below this speed
+unsigned long startDelayMs = 10000;  // 10 seconds sustained before start
+unsigned long stopDelayMs = 180000;  // 3 minutes sustained before stop
+
+// Dual-core upload
+volatile bool triggerUpload = false;
+SemaphoreHandle_t sdMutex = NULL;
+TaskHandle_t uploadTaskHandle = NULL;
 
 // ============================================================
 // WIND SENSOR (CALYPSO BLE)
@@ -500,8 +529,26 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(500);
   Serial.println("\n=================================");
-  Serial.println("  SailFrames E1 v2.0 — PPK Logger");
+  Serial.println("  SailFrames E1 v2.1 — PPK Logger");
+  Serial.println("  Power Button + Auto Recording");
   Serial.println("=================================");
+
+  // Check wake reason
+  esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
+  if (wakeReason == ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("[PWR] Woke from deep sleep via button");
+  } else {
+    Serial.println("[PWR] Normal boot / power cycle");
+  }
+
+  // Power button setup (GPIO13 with internal pullup)
+  pinMode(POWER_BTN_PIN, INPUT_PULLUP);
+
+  // Create SD mutex for dual-core safety
+  sdMutex = xSemaphoreCreateMutex();
+  if (sdMutex == NULL) {
+    Serial.println("[ERR] Failed to create SD mutex!");
+  }
 
   // Initialize WiFi FIRST before any peripherals touch GPIO2
   // This must happen before Wire, SPI, or any other peripheral init
@@ -666,49 +713,16 @@ void setup() {
   delay(500);
   configureLG290P();
 
-  // Wait for fix
-  Serial.println("[GPS] Waiting for fix...");
-  unsigned long t0 = millis();
-  while (!gps.valid && millis() - t0 < GPS_FIX_TIMEOUT_MS) {
-    readGPS();
-    if (oledOK && millis() - lastDisp > 1000) {
-      char buf[32];
-      int dots = ((millis() - t0) / 500) % 4;
-      char dotStr[5] = "";
-      for (int i = 0; i < dots; i++) strcat(dotStr, ".");
-
-      u8g2.clearBuffer();
-      u8g2.setFont(u8g2_font_6x10_tr);
-      u8g2.drawStr(0, 10, "SailFrames E1");
-      snprintf(buf, sizeof(buf), "GPS: Searching%s", dotStr);
-      u8g2.drawStr(0, 22, buf);
-      snprintf(buf, sizeof(buf), "SAT: %d", gps.satellites);
-      u8g2.drawStr(0, 34, buf);
-      snprintf(buf, sizeof(buf), "HDOP: %.1f", gps.hdop);
-      u8g2.drawStr(0, 46, buf);
-      snprintf(buf, sizeof(buf), "Elapsed: %ds", (int)((millis() - t0) / 1000));
-      u8g2.drawStr(0, 58, buf);
-      u8g2.sendBuffer();
-      lastDisp = millis();
-    }
-  }
-
-  Serial.printf("[GPS] %s — SAT:%d HDOP:%.1f\n",
-    gps.valid ? "FIX" : "TIMEOUT", gps.satellites, gps.hdop);
+  // Don't block waiting for GPS fix - let main loop handle it
+  // This allows WiFi/telnet access while GPS is searching
+  Serial.println("[GPS] Will acquire fix in background...");
 
   // Initialize wind sensor (Calypso BLE)
 #if ENABLE_WIND
   initWindSensor();
 #endif
 
-  // Start logging immediately if SD is OK (don't wait for GPS fix)
-  if (sdOK) {
-    startLogging();
-  } else {
-    Serial.println("[LOG] Cannot start logging - SD card not available");
-  }
-
-  // Connect to WiFi at boot (for OTA and telnet)
+  // Connect to WiFi EARLY (for OTA and telnet access during GPS search)
   if (config.wifi_count > 0) {
     Serial.println("[WIFI] Connecting at boot...");
     if (oledOK) {
@@ -719,6 +733,33 @@ void setup() {
     }
     connectWiFi();
   }
+
+  // Apply recording thresholds from config
+  startSpeedKnots = config.start_speed_knots;
+  stopSpeedKnots = config.stop_speed_knots;
+  startDelayMs = config.start_delay_sec * 1000UL;
+  stopDelayMs = config.stop_delay_sec * 1000UL;
+  Serial.printf("[REC] Thresholds: start>%.1f kt (%ds), stop<%.1f kt (%ds)\n",
+    startSpeedKnots, config.start_delay_sec, stopSpeedKnots, config.stop_delay_sec);
+
+  // DON'T start logging immediately - GPS speed state machine controls this
+  // Recording will auto-start when GPS speed > threshold
+  recState = REC_IDLE;
+  Serial.println("[REC] Auto-recording enabled - waiting for GPS speed trigger");
+
+  // Create upload task on Core 0 (sensor reading stays on Core 1)
+  xTaskCreatePinnedToCore(
+    uploadTaskFunc,     // Function
+    "uploadTask",       // Name
+    8192,               // Stack size
+    NULL,               // Parameters
+    1,                  // Priority
+    &uploadTaskHandle,  // Handle
+    0                   // Core 0
+  );
+
+  Serial.println("[SETUP] Complete - WiFi/telnet available, GPS acquiring in background");
+  Serial.println("[SETUP] Press and hold button >2s to shutdown");
 }
 
 // ============================================================
@@ -1251,6 +1292,11 @@ void loadConfig() {
     else if (k == "gps_rate_hz") config.gps_rate_hz = v.toInt();
     else if (k == "wind_enabled") config.wind_enabled = (v == "true" || v == "1");
     else if (k == "wind_mac") v.toCharArray(config.wind_mac, sizeof(config.wind_mac));
+    // Recording thresholds
+    else if (k == "start_speed_knots") config.start_speed_knots = v.toFloat();
+    else if (k == "stop_speed_knots") config.stop_speed_knots = v.toFloat();
+    else if (k == "start_delay_sec") config.start_delay_sec = v.toInt();
+    else if (k == "stop_delay_sec") config.stop_delay_sec = v.toInt();
   }
   f.close();
 
@@ -1634,26 +1680,20 @@ void updateDisplayD1() {
   if (gps.fix_quality == 1) fixStr = "GPS";
   else if (gps.fix_quality == 2) fixStr = "SBAS";
 
-  char statusStr[8] = "";
-  if (uploading) strcat(statusStr, "U");
-  else if (wifiConnected) strcat(statusStr, "W");
+  // Recording state
+  const char* recStr = getRecStateStr();
+
+  char statusStr[16] = "";
+  strcat(statusStr, recStr);
+  if (uploading) strcat(statusStr, " UP");
+  else if (wifiConnected) strcat(statusStr, " W");
 #if ENABLE_WIND
-  if (wind.connected) strcat(statusStr, "C");
+  if (wind.connected) strcat(statusStr, " C");
 #endif
 
-#if ENABLE_WIND
-  if (wind.connected && wind.lastUpdate > 0 && millis() - wind.lastUpdate < 5000) {
-    snprintf(buf, sizeof(buf), "%s%s W%.0f@%d %d/%d %s",
-      config.boat_id, statusStr, wind.speed_kts, wind.angle_deg,
-      dispSats, dispView, fixStr);
-  } else {
-    snprintf(buf, sizeof(buf), "%s%s P%+.0f %d/%d %s H%.1f",
-      config.boat_id, statusStr, imu.pitch, dispSats, dispView, fixStr, dispHdop);
-  }
-#else
-  snprintf(buf, sizeof(buf), "%s%s P%+.0f %d/%d %s H%.1f",
-    config.boat_id, statusStr, imu.pitch, dispSats, dispView, fixStr, dispHdop);
-#endif
+  // Status line with recording state
+  snprintf(buf, sizeof(buf), "%s %s %d/%d",
+    config.boat_id, statusStr, dispSats, dispView);
   u8g2.drawStr(1, 64, buf);
 
   // Battery icon in top-right corner
@@ -1734,12 +1774,15 @@ void updateDisplayD2() {
   if (gps.fix_quality == 1) fixStr = "GPS";
   else if (gps.fix_quality == 2) fixStr = "SBA";
 
-  char statusStr[8] = "";
-  if (logging) strcat(statusStr, "L");
-  if (uploading) strcat(statusStr, "U");
-  else if (wifiConnected) strcat(statusStr, "W");
+  // Recording state indicator
+  const char* recStr = getRecStateStr();
+
+  char statusStr[16] = "";
+  strcat(statusStr, recStr);
+  if (uploading) strcat(statusStr, " UP");
+  else if (wifiConnected) strcat(statusStr, " W");
 #if ENABLE_WIND
-  if (wind.connected) strcat(statusStr, "C");
+  if (wind.connected) strcat(statusStr, " C");
 #endif
 
   // Warning indicators
@@ -1748,9 +1791,9 @@ void updateDisplayD2() {
   if (!imuOK) strcat(warnStr, "!IMU ");
   if (lastValidGPS > 0 && millis() - lastValidGPS > 60000) strcat(warnStr, "!GPS");
 
-  // Battery indicator takes some space, shorten status line
-  snprintf(buf, sizeof(buf), "%s %d/%d H%.1f P%+.0f %s",
-    fixStr, dispSats, dispView, dispHdop, imu.pitch, statusStr);
+  // Status line with recording state
+  snprintf(buf, sizeof(buf), "%s %d/%d %.1f %s",
+    fixStr, dispSats, dispView, dispHdop, statusStr);
   u8g2.drawStr(0, 62, buf);
 
   // Battery icon in top-right corner
@@ -1957,9 +2000,25 @@ void uploadDirectory(const char* dirname) {
   yield();
   delay(10);
 
-  File root = SD.open(dirname);
-  if (!root || !root.isDirectory()) return;
+  Serial.printf("[UPLOAD] Opening dir: %s\n", dirname);
+  Serial.printf("[UPLOAD] Heap: %u, Stack: %u\n", ESP.getFreeHeap(), uxTaskGetStackHighWaterMark(NULL));
 
+  File root = SD.open(dirname);
+  if (!root) {
+    Serial.printf("[UPLOAD] Failed to open dir: %s\n", dirname);
+    return;
+  }
+  if (!root.isDirectory()) {
+    Serial.printf("[UPLOAD] Not a directory: %s\n", dirname);
+    root.close();
+    return;
+  }
+
+  Serial.println("[UPLOAD] Dir opened OK");
+  yield();
+  delay(50);
+
+  Serial.println("[UPLOAD] Getting first file...");
   File file = root.openNextFile();
   while (file) {
     // Feed watchdog on each iteration
@@ -2163,23 +2222,13 @@ void checkWiFiUpload() {
       updateDisplay();
 
 #if ENABLE_WIND
-      // Deinitialize BLE to free memory for SSL operations (~50KB)
-      // WiFiClientSecure needs significant heap for TLS handshake
-      bool bleWasActive = bleInitialized;
-      if (bleWasActive) {
-        Serial.println("[UPLOAD] Deinitializing BLE to free memory for SSL...");
-        if (pWindClient && pWindClient->isConnected()) {
-          pWindClient->disconnect();
-        }
-        pWindClient = nullptr;
-        pWindSpeedChar = nullptr;
-        pWindDirChar = nullptr;
-        pBatteryChar = nullptr;
+      // Skip BLE deinit - it can crash when WiFi is active (shared radio)
+      // Just disconnect if connected
+      if (bleInitialized && pWindClient && pWindClient->isConnected()) {
+        Serial.println("[UPLOAD] Disconnecting wind sensor for upload...");
+        pWindClient->disconnect();
         wind.connected = false;
-        NimBLEDevice::deinit(true);
-        bleInitialized = false;
-        delay(500);
-        Serial.printf("[UPLOAD] Free heap after BLE deinit: %u bytes\n", ESP.getFreeHeap());
+        delay(100);
       }
 #endif
 
@@ -2189,17 +2238,10 @@ void checkWiFiUpload() {
       Serial.println("[UPLOAD] Done");
 
 #if ENABLE_WIND
-      // Reinitialize BLE if it was active before
-      if (bleWasActive) {
-        Serial.println("[UPLOAD] Reinitializing BLE...");
-        NimBLEDevice::init("SailFrames-E1");
-        bleInitialized = true;
-        NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-        // Try to reconnect to wind sensor
-        if (strlen(config.wind_mac) > 0) {
-          Serial.println("[UPLOAD] Reconnecting to wind sensor...");
-          initWindSensor();
-        }
+      // Reconnect to wind sensor if it was disconnected
+      if (bleInitialized && !wind.connected && strlen(config.wind_mac) > 0) {
+        Serial.println("[UPLOAD] Reconnecting to wind sensor...");
+        initWindSensor();
       }
 #endif
     } else {
@@ -2343,36 +2385,27 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("Starting manual upload...");
     if (wifiConnected || connectWiFi()) {
 #if ENABLE_WIND
-      // Deinitialize BLE to free memory for SSL
-      bool bleWasActive = bleInitialized;
-      if (bleWasActive) {
-        tprintln("Deinitializing BLE for SSL...");
-        if (pWindClient && pWindClient->isConnected()) {
-          pWindClient->disconnect();
-        }
-        pWindClient = nullptr;
-        pWindSpeedChar = nullptr;
-        pWindDirChar = nullptr;
-        pBatteryChar = nullptr;
+      // Skip BLE deinit - it can crash when WiFi is active (shared radio)
+      // Just disconnect if connected, but don't call deinit()
+      if (bleInitialized && pWindClient && pWindClient->isConnected()) {
+        tprintln("Disconnecting wind sensor for upload...");
+        pWindClient->disconnect();
         wind.connected = false;
-        NimBLEDevice::deinit(true);
-        bleInitialized = false;
-        delay(500);
+        delay(100);
       }
 #endif
       tprintf("Free heap: %u bytes\n", ESP.getFreeHeap());
+      tprintf("Stack high water: %u bytes\n", uxTaskGetStackHighWaterMark(NULL));
+      tprintln("Calling uploadDirectory...");
+      yield();
+      delay(100);
       uploadDirectory("/sf");
       tprintln("Upload complete");
 #if ENABLE_WIND
-      // Reinitialize BLE if needed
-      if (bleWasActive) {
-        tprintln("Reinitializing BLE...");
-        NimBLEDevice::init("SailFrames-E1");
-        bleInitialized = true;
-        NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-        if (strlen(config.wind_mac) > 0) {
-          initWindSensor();
-        }
+      // Reconnect to wind sensor if it was disconnected
+      if (bleInitialized && !wind.connected && strlen(config.wind_mac) > 0) {
+        tprintln("Reconnecting to wind sensor...");
+        initWindSensor();
       }
 #endif
     }
@@ -2704,6 +2737,56 @@ void processCommand(String cmd, bool fromTelnet) {
       tprintln("HTTP FAILED");
     }
 
+  } else if (cmd == "rec" || cmd == "startrec") {
+    // Manual start recording
+    if (logging) {
+      tprintln("Already recording");
+    } else if (!sdOK) {
+      tprintln("SD card not available");
+    } else {
+      tprintln("Starting recording manually...");
+      sessionCount++;
+      if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000))) {
+        startLogging();
+        xSemaphoreGive(sdMutex);
+      }
+      recState = REC_RECORDING;
+      tprintf("Recording session %d started\n", sessionCount);
+    }
+
+  } else if (cmd == "stoprec") {
+    // Manual stop recording
+    if (!logging) {
+      tprintln("Not recording");
+    } else {
+      tprintln("Stopping recording...");
+      if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000))) {
+        navFile.flush(); navFile.close();
+        imuFile.flush(); imuFile.close();
+        rawFile.flush(); rawFile.close();
+        if (windFile) { windFile.flush(); windFile.close(); }
+        xSemaphoreGive(sdMutex);
+      }
+      logging = false;
+      recState = REC_IDLE;
+      tprintf("Recording session %d stopped\n", sessionCount);
+    }
+
+  } else if (cmd == "recstate") {
+    // Show recording state
+    tprintln("=== Recording State ===");
+    tprintf("State: %s\n", getRecStateStr());
+    tprintf("Logging: %s\n", logging ? "YES" : "NO");
+    tprintf("Session: %d\n", sessionCount);
+    tprintf("Speed: %.1f kt\n", gps.speed_kts);
+    tprintf("Start threshold: >%.1f kt for %d sec\n", config.start_speed_knots, config.start_delay_sec);
+    tprintf("Stop threshold: <%.1f kt for %d sec\n", config.stop_speed_knots, config.stop_delay_sec);
+
+  } else if (cmd == "shutdown") {
+    tprintln("Shutting down...");
+    delay(500);
+    shutdownCleanly();
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -2714,6 +2797,9 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  imutest    - Test IMU axes (5 sec)");
     tprintln("  cal        - Calibrate IMU (set level)");
     tprintln("  calreset   - Reset IMU calibration");
+    tprintln("  rec        - Manual start recording");
+    tprintln("  stoprec    - Manual stop recording");
+    tprintln("  recstate   - Show recording state");
     tprintln("  wind       - Wind sensor info");
     tprintln("  windscan   - Scan for wind sensor");
     tprintln("  blescan    - Scan ALL BLE devices");
@@ -2729,6 +2815,7 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  cleanup    - Delete uploaded files");
     tprintln("  wifi       - Connect to WiFi");
     tprintln("  disconnect - Disconnect WiFi");
+    tprintln("  shutdown   - Clean shutdown (deep sleep)");
     tprintln("  reboot     - Restart device");
     tprintln("  help       - Show this help");
     tprintln("================");
@@ -2750,10 +2837,179 @@ void handleSerialCommand() {
 }
 
 // ============================================================
+// POWER BUTTON HANDLING
+// ============================================================
+void shutdownCleanly() {
+  Serial.println("[PWR] Shutdown initiated...");
+
+  // Stop logging and close files
+  if (logging) {
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000))) {
+      navFile.flush(); navFile.close();
+      imuFile.flush(); imuFile.close();
+      rawFile.flush(); rawFile.close();
+      if (windFile) { windFile.flush(); windFile.close(); }
+      xSemaphoreGive(sdMutex);
+    }
+    logging = false;
+  }
+
+  // Visual confirmation on OLED
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_helvB14_tr);
+  u8g2.drawStr(15, 35, "SHUTDOWN");
+  u8g2.sendBuffer();
+  delay(1500);
+
+  u8g2.clearBuffer();
+  u8g2.sendBuffer();  // Turn off OLED
+
+  Serial.println("[PWR] Entering deep sleep...");
+  delay(100);
+
+  // Configure wake on button press (LOW = pressed)
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_13, 0);
+  esp_deep_sleep_start();
+}
+
+void checkPowerButton() {
+  if (digitalRead(POWER_BTN_PIN) == LOW) {
+    unsigned long pressStart = millis();
+    // Wait for button release or 2 second hold
+    while (digitalRead(POWER_BTN_PIN) == LOW) {
+      if (millis() - pressStart > 2000) {
+        shutdownCleanly();
+        // Never returns
+      }
+      delay(10);
+    }
+  }
+}
+
+// ============================================================
+// GPS SPEED-TRIGGERED RECORDING STATE MACHINE
+// ============================================================
+void updateRecordingState() {
+  float speed = gps.speed_kts;
+  unsigned long now = millis();
+
+  // Use config values
+  float startThresh = config.start_speed_knots;
+  float stopThresh = config.stop_speed_knots;
+  unsigned long startDelay = config.start_delay_sec * 1000UL;
+  unsigned long stopDelay = config.stop_delay_sec * 1000UL;
+
+  switch (recState) {
+    case REC_IDLE:
+      if (gps.valid && speed > startThresh) {
+        recState = REC_ARMED;
+        armStartTime = now;
+        Serial.printf("[REC] Arming... speed=%.1f kt\n", speed);
+      }
+      break;
+
+    case REC_ARMED:
+      if (speed <= startThresh) {
+        // Speed dropped, reset
+        recState = REC_IDLE;
+        Serial.println("[REC] Speed dropped, back to idle");
+      } else if (now - armStartTime >= startDelay) {
+        // Sustained speed — start recording
+        sessionCount++;
+        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000))) {
+          startLogging();
+          xSemaphoreGive(sdMutex);
+        }
+        recState = REC_RECORDING;
+        Serial.printf("[REC] Recording STARTED — session %d\n", sessionCount);
+      }
+      break;
+
+    case REC_RECORDING:
+      if (speed < stopThresh) {
+        recState = REC_STOPPING;
+        stopStartTime = now;
+        Serial.printf("[REC] Speed low, stopping timer started... speed=%.1f kt\n", speed);
+      }
+      break;
+
+    case REC_STOPPING:
+      if (speed >= stopThresh) {
+        // Speed picked up, keep recording
+        recState = REC_RECORDING;
+        Serial.println("[REC] Speed recovered, continuing recording");
+      } else if (now - stopStartTime >= stopDelay) {
+        // Sustained slow — stop recording
+        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000))) {
+          navFile.flush(); navFile.close();
+          imuFile.flush(); imuFile.close();
+          rawFile.flush(); rawFile.close();
+          if (windFile) { windFile.flush(); windFile.close(); }
+          xSemaphoreGive(sdMutex);
+        }
+        logging = false;
+        recState = REC_IDLE;
+        Serial.printf("[REC] Recording STOPPED — session %d complete\n", sessionCount);
+
+        // Trigger Wi-Fi upload of completed files (on Core 0)
+        triggerUpload = true;
+      }
+      break;
+  }
+}
+
+const char* getRecStateStr() {
+  switch (recState) {
+    case REC_IDLE: return gps.valid ? "READY" : "NO GPS";
+    case REC_ARMED: return "ARMING";
+    case REC_RECORDING: return "REC";
+    case REC_STOPPING: return "STOPPING";
+    default: return "?";
+  }
+}
+
+// ============================================================
+// UPLOAD TASK (RUNS ON CORE 0)
+// ============================================================
+void uploadTaskFunc(void* param) {
+  Serial.println("[UPLOAD] Task started on Core 0");
+
+  while (true) {
+    if (triggerUpload && !logging) {
+      triggerUpload = false;
+      Serial.println("[UPLOAD] Upload triggered, attempting connection...");
+
+      // Try to connect to WiFi
+      if (!wifiConnected) {
+        connectWiFi();
+      }
+
+      if (wifiConnected) {
+        Serial.printf("[UPLOAD] Connected, heap: %u bytes\n", ESP.getFreeHeap());
+
+        // Count and upload files
+        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000))) {
+          uploadDirectory("/sf");
+          xSemaphoreGive(sdMutex);
+        }
+        Serial.println("[UPLOAD] Upload complete");
+      } else {
+        Serial.println("[UPLOAD] WiFi connection failed");
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5000));  // Check every 5 seconds
+  }
+}
+
+// ============================================================
 // MAIN LOOP
 // ============================================================
 void loop() {
   unsigned long now = millis();
+
+  // Check power button (hold >2s to shutdown)
+  checkPowerButton();
 
   // Handle OTA updates (highest priority)
   if (wifiConnected) {
@@ -2768,6 +3024,9 @@ void loop() {
   handleSerialCommand();
 
   readGPS();
+
+  // Update GPS speed-triggered recording state machine
+  updateRecordingState();
 
   if (now - lastIMU >= IMU_INTERVAL_MS) {
     readIMU();
