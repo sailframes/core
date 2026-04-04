@@ -63,7 +63,7 @@
 #define SD_CS_PIN     5
 #define SDA_PIN       21
 #define SCL_PIN       22
-#define LED_PIN       -1  // Disabled - GPIO2 conflicts with WiFi PHY
+#define LED_PIN       2   // Built-in LED blinks during logging
 
 // Battery monitoring (PowerBoost 1000C)
 #define BATT_VOLTAGE_PIN  34   // ADC pin for voltage divider
@@ -218,6 +218,7 @@ bool windScanning = false;
 bool windOK = false;
 bool bleInitialized = false;  // Track BLE init state for safe deinit
 unsigned long totalBytes = 0;
+unsigned long rtcmFrameCount = 0;  // Count RTCM3 frames for debugging
 char nmeaBuf[256];
 int nmeaIdx = 0;
 
@@ -733,19 +734,20 @@ void configureLG290P() {
   sendPQTM("PQTMCFGMSGRATE,W,GSV,1,0");   // Satellites in view
 
   // RTCM3 MSM7 — full pseudorange + phase + doppler + CNR
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1077,1,0");  // GPS
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1087,1,0");  // GLONASS
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1097,1,0");  // Galileo
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1127,1,0");  // BeiDou
+  // Note: LG290P uses "RTCM1077" format (not "RTCM3-1077")
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1077,1,0");  // GPS MSM7
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1087,1,0");  // GLONASS MSM7
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1097,1,0");  // Galileo MSM7
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1127,1,0");  // BeiDou MSM7
 
   // Ephemeris (needed for RINEX conversion)
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1019,1,0");  // GPS eph
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1020,1,0");  // GLONASS eph
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1042,1,0");  // BeiDou eph
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1046,1,0");  // Galileo eph
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1019,1,0");  // GPS eph
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1020,1,0");  // GLONASS eph
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1042,1,0");  // BeiDou eph
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1046,1,0");  // Galileo eph
 
   // Station reference position
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1006,10,0");
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM1006,10,0");
 
   // Fix rate
   char cmd[64];
@@ -804,6 +806,7 @@ void readGPS() {
         if (rawFile && logging)
           rawFile.write(rtcm.frameBuf, rtcm.frameTotal);
         totalBytes += rtcm.frameTotal;
+        rtcmFrameCount++;
         rtcm.state = RTCM3Parser::WAIT_SYNC;
       }
       continue;
@@ -1078,6 +1081,12 @@ void readIMU() {
           // Apply calibration offsets
           imu.heel -= imuHeelOffset;
           imu.pitch -= imuPitchOffset;
+
+          // Normalize to -180 to +180 range
+          while (imu.heel > 180) imu.heel -= 360;
+          while (imu.heel < -180) imu.heel += 360;
+          while (imu.pitch > 180) imu.pitch -= 360;
+          while (imu.pitch < -180) imu.pitch += 360;
           break;
 
         case SH2_ROTATION_VECTOR: {
@@ -1128,6 +1137,12 @@ void readIMU() {
       // Apply calibration offsets
       imu.heel -= imuHeelOffset;
       imu.pitch -= imuPitchOffset;
+
+      // Normalize to -180 to +180 range
+      while (imu.heel > 180) imu.heel -= 360;
+      while (imu.heel < -180) imu.heel += 360;
+      while (imu.pitch > 180) imu.pitch -= 360;
+      while (imu.pitch < -180) imu.pitch += 360;
     }
   }
 }
@@ -2047,6 +2062,7 @@ bool connectWiFi() {
     // Ensure clean state before connecting
     WiFi.disconnect(true);
     delay(100);
+    WiFi.mode(WIFI_STA);
     WiFi.persistent(false);  // Don't save to flash
     WiFi.setAutoReconnect(false);
     WiFi.begin(config.wifi[i].ssid, config.wifi[i].pass);
@@ -2272,7 +2288,7 @@ void processCommand(String cmd, bool fromTelnet) {
       imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE", imu.heel, imu.pitch);
     tprintf("SD:  %s\n", sdOK ? "OK" : "FAILED");
     tprintf("Logging: %s\n", logging ? "YES" : "NO");
-    tprintf("Data: %lu KB\n", totalBytes / 1024);
+    tprintf("Data: %lu KB, RTCM: %lu frames\n", totalBytes / 1024, rtcmFrameCount);
     tprintf("WiFi: %s\n", wifiConnected ? connectedSSID : "disconnected");
     if (wifiConnected) {
       tprintf("IP: %s\n", WiFi.localIP().toString().c_str());
