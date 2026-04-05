@@ -115,8 +115,25 @@ sync via chrony, the Pi clock syncs within seconds of boot.
 | IMU | GY-BNO08X (BNO085) | I2C (GPIO21 SDA, GPIO22 SCL) @ 0x4A | Heel/pitch, use GAME_ROTATION_VECTOR mode |
 | Display | HiLetgo 2.42" SSD1309 OLED | I2C (shared bus) yellow | Status display |
 | Storage | microSD breakout + 16GB card | SPI (GPIO23 MOSI, 19 MISO, 18 CLK, 5 CS) | CSV + raw binary for PPK |
-| Power | 18650 battery shield + Samsung 30Q cells | 5V from shield to ESP32 VIN | 2-cell configuration |
+| Power | Adafruit PowerBoost 1000C + 18650 cells | 5V output to ESP32 VIN | Hardware power switch on EN pin |
 | Enclosure | YETLEBOX IP67 ABS 5.9"×3.9"×2.8" clear lid | — | Daily install/remove |
+
+### E1 Power Management
+
+**Hardware power switch:** A slide switch on the PowerBoost 1000C EN (enable) pin
+controls power to the entire system. This replaces software deep sleep which had
+issues with immediate wake-up and GPS staying powered.
+
+**Battery monitoring:** GPIO34 reads battery voltage via voltage divider (2x 200Ω,
+ratio 2.0). GPIO35 reads PowerBoost LBO (Low Battery Output) pin for critical
+battery warning.
+
+| Pin | Function | Notes |
+|-----|----------|-------|
+| GPIO34 | Battery voltage (ADC) | Via 2:1 voltage divider |
+| GPIO35 | Low battery warning | PowerBoost LBO pin, active low |
+
+**Battery percentage displayed** on OLED instead of heading (MAG replaced with BAT).
 
 ### E1 Wiring Summary
 
@@ -148,8 +165,11 @@ SD Card (SPI):
   GND  → GND
   (Pin order on board silkscreen: 3V3, CS, MOSI, CLK, MISO, GND)
 
-Power:
-  18650 shield 5V → ESP32 VIN
+Power + Battery Monitoring:
+  PowerBoost 1000C 5V → ESP32 VIN
+  PowerBoost BAT → voltage divider (2x 200Ω) → GPIO34 (ADC)
+  PowerBoost LBO → GPIO35 (low battery warning)
+  Slide switch on PowerBoost EN pin (hardware power control)
   ESP32 3V3 → all sensors
 ```
 
@@ -168,25 +188,53 @@ Power:
 
 ### E1 Firmware (sailframes_e1.ino)
 
-- NMEA parsing (GGA/RMC sentences from LG290P)
+- NMEA parsing (GGA/RMC/GSA/GSV sentences from LG290P)
+- RTCM3 binary parsing and logging for PPK post-processing
 - BNO085 reading at 20Hz with heel/pitch calculation
-- SD logging: CSV (human-readable) + raw RTCM3 binary (for PPK post-processing)
-- OLED status display (fix quality, satellites, heel, recording status)
+- SD logging: CSV (human-readable) + raw RTCM3 binary (`.rtcm3` files)
+- OLED status display: satellites (in fix/in view), heel, battery %, recording status
+- Battery monitoring via ADC (voltage divider on GPIO34)
 - Wi-Fi auto-upload to AWS S3 on yacht club network detection
+- GPS speed-triggered auto-recording (starts >2kt, stops after 5min <0.5kt)
+- Power button recording control (short press toggles recording)
 - Configuration loaded from SD card `config.txt`
-- **Libraries:** Adafruit SSD1306 + GFX (OLED), NimBLE-Arduino (wind sensor BLE), ESP32 by Espressif Systems board support
+- **Libraries:** U8g2 (OLED), NimBLE-Arduino (wind sensor BLE), ESP32 by Espressif Systems
 - **Arduino IDE:** ESP32 board support installed (v3.3.7)
 
-**Serial Commands:**
+**OLED Display Layout:**
+- Line 1: Satellites (in fix / in view), HDOP
+- Line 2: Speed (kt), Course (°)
+- Line 3: Heel (°), Pitch (°), Battery (%)
+- Line 4: Recording status, session info
+
+**Serial/Telnet Commands:**
 | Command | Description |
 |---------|-------------|
 | `start` | Start recording session |
 | `stop` | Stop recording session |
 | `upload` | Manually trigger Wi-Fi upload |
 | `clearmarkers` | Delete `.uploaded` marker files to retry failed uploads |
-| `status` | Show current sensor status |
+| `status` | Show current sensor status (GPS, IMU, SD, WiFi, RTCM frame count) |
 | `gps` | Show GPS debug info |
+| `gpsraw` | Show raw GPS data stream (10 seconds) |
+| `gpscfg` | Reconfigure LG290P (resend PQTM commands) |
 | `config` | Show current configuration |
+
+**E1 SD Card Directory Structure:**
+```
+/sf/
+├── 20260405_225030/                    # Session folder (GPS datetime)
+│   ├── E1_20260405_225030_nav.csv      # Parsed NMEA (lat,lon,sog,cog,sat,hdop,fix)
+│   ├── E1_20260405_225030_imu.csv      # IMU (heel,pitch,accel,gyro)
+│   ├── E1_20260405_225030_raw.rtcm3    # Raw RTCM3 binary for PPK
+│   └── E1_20260405_225030_wind.csv     # Wind sensor data (if enabled)
+├── session_001/                         # Fallback if no GPS datetime
+│   └── ...
+└── config.txt                           # Device configuration
+```
+
+Session folders use GPS datetime when available (`YYYYMMDD_HHMMSS`), falling back
+to sequential `session_NNN` if GPS date/time is not valid at recording start.
 
 ### E1 Wi-Fi Upload Architecture
 
@@ -216,13 +264,19 @@ The E1 uses a two-tier upload strategy to handle API Gateway's 29-second timeout
 
 ### E1 BLE/Wi-Fi Radio Conflict
 
-**Critical:** ESP32 shares a single radio for both BLE and Wi-Fi. Running both
-simultaneously causes TLS handshake failures and connection timeouts.
+**Issue:** ESP32's shared radio and **TLS memory requirements** (~40-50KB heap for
+SSL buffers) cause conflicts when running BLE + Wi-Fi + HTTPS simultaneously.
 
 **Symptoms:**
 - HTTP error -1 (CONNECTION_REFUSED/TIMEOUT) during uploads
-- TLS failures even with good Wi-Fi signal
-- Intermittent connection drops
+- TLS handshake failures even with good Wi-Fi signal
+- Heap exhaustion crashes
+
+**Current behavior:** BLE is fully deinitialized before Wi-Fi uploads, then
+reinitialized after. This is conservative but reliable.
+
+**Note:** Plain HTTP (no TLS) has much lower memory pressure and may work with
+BLE still active. Future optimization: skip BLE deinit when upload_url uses HTTP.
 
 **Solution — BLE deinit sequence before Wi-Fi operations:**
 ```cpp
@@ -346,16 +400,31 @@ $PQTMHOT*                              # Hot restart
 **Firmware syntax note (AANR01A06S):** The `PQTMCFGMSGRATE` command uses TWO
 parameters (message, rate) — NOT three. Adding an offset parameter causes `ERROR,1`.
 
-**E1 firmware only configures NMEA at runtime** — RTCM3 config is pre-saved in NVM:
+**E1 firmware configures both NMEA and RTCM3 at boot:**
 ```cpp
 void configureLG290P() {
+    // NMEA messages
     sendPQTM("PQTMCFGMSGRATE,W,GGA,1");
     sendPQTM("PQTMCFGMSGRATE,W,RMC,1");
     sendPQTM("PQTMCFGMSGRATE,W,GSA,1");
     sendPQTM("PQTMCFGMSGRATE,W,GSV,1");
-    // RTCM3 already configured via QGNSS and saved to NVM
+
+    // RTCM3 MSM7 for PPK (configured at every boot, saved to NVM)
+    sendPQTM("PQTMCFGRTCM,W,7,0,-90,07,06,1,0");  // Enable MSM7
+    sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1019,1");    // GPS ephemeris
+    sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1020,1");    // GLONASS ephemeris
+    sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1042,1");    // BeiDou ephemeris
+    sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1046,1");    // Galileo ephemeris
+    sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1006,10");   // Station reference
+
+    sendPQTM("PQTMSAVEPAR");  // Save to NVM
+    sendPQTM("PQTMHOT");      // Hot restart
 }
 ```
+
+The firmware sends RTCM configuration at every boot to ensure PPK data is captured
+regardless of prior QGNSS configuration state. Commands and responses are logged
+to Serial for debugging.
 
 **RTCM3 messages output after configuration:**
 | RTCM3 ID | Content | Rate |
@@ -867,6 +936,15 @@ contract or data schema, update this file so other sessions pick it up.
     a hard 29-second timeout. Large file uploads fail with HTTP -3 (SEND_PAYLOAD_FAILED).
     Solution: use presigned S3 URLs for files ≥1MB.
 
+16. **E1 GPS session folder naming** — Session folders use GPS date/time when available
+    (e.g., `/sf/20260405_225030/`). The validation checks: (a) year portion of date
+    is not "00" (default), and (b) GPS has valid fix. Previously failed for days 1-9
+    of month and times 00:00-09:59 UTC due to incorrect first-character check.
+
+17. **E1 deep sleep removed** — Software deep sleep had issues: button still pressed
+    caused immediate wake, GPS module stayed powered. Replaced with hardware slide
+    switch on PowerBoost 1000C EN pin for reliable power control.
+
 ---
 
 ## Weather Data Integration
@@ -932,7 +1010,15 @@ Competitive analysis is maintained separately.
   - Added `clearmarkers` command to retry failed uploads
   - Documented LG290P RTCM3 configuration via QGNSS (PyGPSClient has limited support)
   - Added NimBLEDevice::deinit(false) requirement (deinit(true) causes heap corruption)
+- April 5, 2026: E1 power management and RTCM3 fixes
+  - Removed software deep sleep (replaced with hardware power switch on PowerBoost EN pin)
+  - Enabled battery monitoring (GPIO34 ADC via voltage divider, GPIO35 LBO warning)
+  - OLED display: battery % instead of MAG heading, satellites show "in fix/in view"
+  - Firmware now sends RTCM3 configuration commands at boot (not relying on QGNSS pre-config)
+  - Fixed GPS session folder naming for days 1-9 and times 00:00-09:59 UTC
+  - Added `sendPQTM()` response logging for debugging configuration issues
+  - Clarified BLE/WiFi conflict is specifically about TLS memory pressure
 
 ---
 
-*Last updated: April 4, 2026 — E1 Wi-Fi upload fixes, presigned S3 URLs, LG290P RTCM3 config*
+*Last updated: April 5, 2026 — E1 power management, battery monitoring, RTCM3 boot config*

@@ -43,8 +43,6 @@
 #include <HTTPClient.h>
 #include <U8g2lib.h>
 #include <Adafruit_BNO08x.h>
-#include <esp_sleep.h>
-
 // NimBLE configuration - disable unused features to reduce size
 #define CONFIG_BT_NIMBLE_ROLE_CENTRAL 1
 #define CONFIG_BT_NIMBLE_ROLE_PERIPHERAL 0
@@ -70,8 +68,8 @@
 #define BATT_VOLTAGE_PIN  34   // ADC pin for voltage divider
 #define LOW_BATT_PIN      35   // LBO pin from PowerBoost (LOW = critical)
 
-// Power button for deep sleep
-#define POWER_BTN_PIN     13   // Momentary button to GND, internal pullup
+// Power control: Use hardware slide switch on PowerBoost 1000C EN pin
+// No software deep sleep - hardware switch cuts all power when OFF
 
 // ============================================================
 // CONFIGURATION
@@ -112,9 +110,27 @@ void sendPQTM(const char* body) {
   char buf[128];
   snprintf(buf, sizeof(buf), "$%s*%02X\r\n", body, cs);
   Serial2.print(buf);
-  Serial.print("[CMD] ");
-  Serial.print(buf);
-  delay(100);
+  Serial.printf("[CMD] %s", buf);
+
+  // Wait for and print response
+  delay(150);
+  char resp[256];
+  int idx = 0;
+  unsigned long start = millis();
+  while (millis() - start < 200 && idx < (int)sizeof(resp) - 1) {
+    if (Serial2.available()) {
+      char c = Serial2.read();
+      if (c == '\n' || c == '\r') {
+        if (idx > 0) break;  // End of response line
+      } else {
+        resp[idx++] = c;
+      }
+    }
+  }
+  resp[idx] = '\0';
+  if (idx > 0) {
+    Serial.printf("[RSP] %s\n", resp);
+  }
 }
 
 // ============================================================
@@ -205,6 +221,8 @@ bool otaInProgress = false;
 char connectedSSID[64] = "";
 int uploadCount = 0, uploadTotal = 0;
 int satsInView = 0;
+// GSV constellation counts (satellites in view per system)
+int gsvGP = 0, gsvGL = 0, gsvGA = 0, gsvGB = 0, gsvGQ = 0, gsvGI = 0;
 unsigned long lastValidGPS = 0;  // Track when we last had a valid fix
 
 // IMU calibration offsets (stored on SD card)
@@ -228,6 +246,7 @@ bool windOK = false;
 bool bleInitialized = false;  // Track BLE init state for safe deinit
 unsigned long totalBytes = 0;
 unsigned long rtcmFrameCount = 0;  // Count RTCM3 frames for debugging
+unsigned long rtcmSyncCount = 0;   // Count 0xD3 sync bytes seen (debug)
 char nmeaBuf[256];
 int nmeaIdx = 0;
 
@@ -530,19 +549,8 @@ void setup() {
   delay(500);
   Serial.println("\n=================================");
   Serial.println("  SailFrames E1 v2.1 — PPK Logger");
-  Serial.println("  Power Button + Auto Recording");
+  Serial.println("  Hardware Power Switch Edition");
   Serial.println("=================================");
-
-  // Check wake reason
-  esp_sleep_wakeup_cause_t wakeReason = esp_sleep_get_wakeup_cause();
-  if (wakeReason == ESP_SLEEP_WAKEUP_EXT0) {
-    Serial.println("[PWR] Woke from deep sleep via button");
-  } else {
-    Serial.println("[PWR] Normal boot / power cycle");
-  }
-
-  // Power button setup (GPIO13 with internal pullup)
-  pinMode(POWER_BTN_PIN, INPUT_PULLUP);
 
   // Create SD mutex for dual-core safety
   sdMutex = xSemaphoreCreateMutex();
@@ -560,13 +568,13 @@ void setup() {
 
   if (LED_PIN >= 0) pinMode(LED_PIN, OUTPUT);
 
-  // Battery monitoring (PowerBoost 1000C) - DISABLED: battery unplugged
-  // setupBattery();
-  // updateBattery();  // Initial reading
-  // Serial.printf("[BATT] Initial: %.2fV (%d%%)\n", battery.voltage, battery.percent);
-  // if (battery.critical) {
-  //   Serial.println("[BATT] WARNING: Battery critical on startup!");
-  // }
+  // Battery monitoring (PowerBoost 1000C)
+  setupBattery();
+  updateBattery();  // Initial reading
+  Serial.printf("[BATT] Initial: %.2fV (%d%%)\n", battery.voltage, battery.percent);
+  if (battery.critical) {
+    Serial.println("[BATT] WARNING: Battery critical on startup!");
+  }
 
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);  // 100kHz for SSD1309 stability
@@ -765,46 +773,62 @@ void setup() {
 // ============================================================
 // CONFIGURE LG290P FOR PPK
 // ============================================================
+// RTCM3 MSM7 + ephemeris configuration is done via QGNSS and saved to NVM.
+// See LG290P_CONFIG_UPDATES.md for QGNSS configuration steps.
+// This function only configures NMEA messages and fix rate at runtime.
+//
+// Saved NVM config (via QGNSS):
+//   - MSM7: 1077 (GPS), 1087 (GLO), 1097 (GAL), 1127 (BDS)
+//   - Ephemeris: 1019, 1020, 1042, 1046
+//   - Station ref: 1006 (every 10 epochs)
+// ============================================================
 void configureLG290P() {
-  Serial.println("[GPS] Configuring LG290P for NMEA + RTCM3...");
+  Serial.println("[GPS] Configuring LG290P...");
 
-  // First, ensure NMEA messages are enabled (essential for position data)
-  sendPQTM("PQTMCFGMSGRATE,W,GGA,1,0");   // Position + fix quality
-  sendPQTM("PQTMCFGMSGRATE,W,RMC,1,0");   // Speed + course + date
-  sendPQTM("PQTMCFGMSGRATE,W,GSA,1,0");   // Satellites used
-  sendPQTM("PQTMCFGMSGRATE,W,GSV,1,0");   // Satellites in view
+  // NMEA messages (essential for position data parsing)
+  // Syntax: PQTMCFGMSGRATE,W,<msg>,<rate> — NO offset parameter on AANR01A06S
+  sendPQTM("PQTMCFGMSGRATE,W,GGA,1");   // Position + fix quality
+  sendPQTM("PQTMCFGMSGRATE,W,RMC,1");   // Speed + course + date
+  sendPQTM("PQTMCFGMSGRATE,W,GSA,1");   // Satellites used
+  sendPQTM("PQTMCFGMSGRATE,W,GSV,1");   // Satellites in view
 
-  // RTCM3 MSM7 — full pseudorange + phase + doppler + CNR
-  // Note: LG290P uses "RTCM1077" format (not "RTCM3-1077")
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1077,1,0");  // GPS MSM7
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1087,1,0");  // GLONASS MSM7
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1097,1,0");  // Galileo MSM7
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1127,1,0");  // BeiDou MSM7
+  // RTCM3 MSM7 configuration for PPK
+  // Use PQTMCFGRTCM to enable MSM7 globally (not PQTMCFGMSGRATE for individual messages)
+  // Parameters: MSMType=7, Reserved=0, ElevMask=-90, GNSSMask=07, SigMask=06, Smoothing=1, Reserved=0
+  Serial.println("[GPS] Enabling RTCM3 MSM7...");
+  sendPQTM("PQTMCFGRTCM,W,7,0,-90,07,06,1,0");
 
-  // Ephemeris (needed for RINEX conversion)
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1019,1,0");  // GPS eph
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1020,1,0");  // GLONASS eph
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1042,1,0");  // BeiDou eph
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1046,1,0");  // Galileo eph
+  // Ephemeris messages — use rate only, NO offset parameter
+  Serial.println("[GPS] Enabling ephemeris messages...");
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1019,1");  // GPS ephemeris
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1020,1");  // GLONASS ephemeris
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1042,1");  // BeiDou ephemeris
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1046,1");  // Galileo ephemeris
 
-  // Station reference position
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM1006,10,0");
+  // Station reference position every 10 epochs
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1006,10");
 
-  // Fix rate
+  // Fix rate (ms per fix)
   char cmd[64];
   snprintf(cmd, sizeof(cmd), "PQTMCFGFIXRATE,W,%d", 1000 / config.gps_rate_hz);
   sendPQTM(cmd);
 
-  // Save + restart
+  // Save configuration to NVM
+  Serial.println("[GPS] Saving to NVM...");
   sendPQTM("PQTMSAVEPAR");
-  delay(200);
+  delay(500);
+
+  // Hot restart to apply all changes
+  Serial.println("[GPS] Restarting module...");
   sendPQTM("PQTMHOT");
   delay(2000);
   while (Serial2.available()) Serial2.read();
 
-  Serial.println("[GPS] Configured:");
-  Serial.println("[GPS]   MSM7: GPS/GLO/GAL/BDS");
-  Serial.println("[GPS]   Ephemeris: GPS/GLO/BDS/GAL");
+  Serial.println("[GPS] Configuration complete:");
+  Serial.println("[GPS]   NMEA: GGA, RMC, GSA, GSV");
+  Serial.println("[GPS]   RTCM3: MSM7 (1077/1087/1097/1127)");
+  Serial.println("[GPS]   Ephemeris: 1019, 1020, 1042, 1046");
+  Serial.println("[GPS]   Station ref: 1006 (every 10 epochs)");
   Serial.printf("[GPS]   Rate: %d Hz\n", config.gps_rate_hz);
 }
 
@@ -815,12 +839,15 @@ void readGPS() {
   while (Serial2.available()) {
     uint8_t c = Serial2.read();
 
-    // RTCM3 sync
-    if (c == 0xD3 && rtcm.state == RTCM3Parser::WAIT_SYNC) {
-      rtcm.state = RTCM3Parser::READ_HEADER;
-      rtcm.header[0] = c;
-      rtcm.headerIdx = 1;
-      continue;
+    // RTCM3 sync - count all 0xD3 bytes for debugging
+    if (c == 0xD3) {
+      rtcmSyncCount++;
+      if (rtcm.state == RTCM3Parser::WAIT_SYNC) {
+        rtcm.state = RTCM3Parser::READ_HEADER;
+        rtcm.header[0] = c;
+        rtcm.headerIdx = 1;
+        continue;
+      }
     }
 
     if (rtcm.state == RTCM3Parser::READ_HEADER) {
@@ -938,7 +965,7 @@ void parseNMEA(const char* s) {
     }
     if (getField(s, 9, f, sizeof(f))) strncpy(gps.date, f, sizeof(gps.date) - 1);
   } else if (strstr(s, "GSV")) {
-    // GSV sentences: GPGSV (GPS), GLGSV (GLONASS), GAGSV (Galileo), GBGSV (BeiDou)
+    // GSV sentences: GPGSV (GPS), GLGSV (GLONASS), GAGSV (Galileo), GBGSV (BeiDou), GNGSV (combined)
     // Field 1 = total messages, Field 2 = message number, Field 3 = total sats in view
     // Only parse if sentence looks valid (starts with $G and has reasonable length)
     if (s[0] == '$' && s[1] == 'G' && strlen(s) > 20) {
@@ -950,21 +977,23 @@ void parseNMEA(const char* s) {
             int count = atoi(f);
             // Sanity check: count should be 0-50
             if (count >= 0 && count <= 50) {
-              // Track each constellation separately, sum them up
-              static int gpCount = 0, glCount = 0, gaCount = 0, gbCount = 0;
-
+              // Track each constellation separately (global vars for status display)
               if (strstr(s, "GPGSV")) {
-                gpCount = count;
+                gsvGP = count;
               } else if (strstr(s, "GLGSV")) {
-                glCount = count;
+                gsvGL = count;
               } else if (strstr(s, "GAGSV")) {
-                gaCount = count;
+                gsvGA = count;
               } else if (strstr(s, "GBGSV")) {
-                gbCount = count;
+                gsvGB = count;
+              } else if (strstr(s, "GQGSV")) {
+                gsvGQ = count;  // QZSS
+              } else if (strstr(s, "GIGSV")) {
+                gsvGI = count;  // NavIC
               }
 
               // Sum all constellations
-              satsInView = gpCount + glCount + gaCount + gbCount;
+              satsInView = gsvGP + gsvGL + gsvGA + gsvGB + gsvGQ + gsvGI;
             }
           }
         }
@@ -997,7 +1026,16 @@ float readBatteryVoltage() {
     delayMicroseconds(100);
   }
   float raw = sum / 10.0;
-  float voltage = (raw / 4095.0) * 3.3 * BATT_DIVIDER_RATIO;
+  float adcVoltage = (raw / 4095.0) * 3.3;  // Voltage at ADC pin
+  float voltage = adcVoltage * BATT_DIVIDER_RATIO;  // Actual battery voltage
+
+  // Debug: print every 10 seconds (controlled by caller)
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug >= 10000) {
+    Serial.printf("[BATT] ADC raw=%.0f, ADC voltage=%.2fV, Battery=%.2fV (%d%%)\n",
+                  raw, adcVoltage, voltage, getBatteryPercent(voltage));
+    lastDebug = millis();
+  }
   return voltage;
 }
 
@@ -1029,9 +1067,9 @@ void updateBattery() {
 void handleLowBattery() {
   if (!battery.critical) return;
 
-  Serial.println("[BATT] CRITICAL LOW BATTERY - Shutting down!");
+  Serial.println("[BATT] CRITICAL LOW BATTERY - Please flip power switch OFF!");
 
-  // Flush and close all open files
+  // Flush and close all open files to prevent corruption
   if (logging) {
     if (navFile) { navFile.flush(); navFile.close(); }
     if (imuFile) { imuFile.flush(); imuFile.close(); }
@@ -1040,41 +1078,38 @@ void handleLowBattery() {
     logging = false;
   }
 
-  // Display warning
+  // Display warning - user must flip hardware power switch
   if (oledOK) {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_helvB14_tr);
-    u8g2.drawStr(10, 25, "LOW BATTERY");
-    u8g2.drawStr(5, 50, "SHUTTING DOWN");
+    u8g2.drawStr(10, 20, "LOW BATTERY");
+    u8g2.setFont(u8g2_font_helvR10_tr);
+    u8g2.drawStr(5, 45, "Flip power switch");
+    u8g2.drawStr(25, 60, "to OFF");
     u8g2.sendBuffer();
-    delay(3000);
   }
 
-  // Enter deep sleep to preserve remaining power
-  esp_deep_sleep_start();
+  // Halt here - user must use hardware switch
+  while (true) {
+    delay(1000);
+  }
 }
 
-// Draw battery icon in top-right corner (24x10 pixels)
-void drawBatteryIcon(int x, int y) {
+// Draw battery percentage in top-right corner
+void drawBatteryPercent(int x, int y) {
   if (!battery.valid) return;
 
-  int barWidth = map(battery.percent, 0, 100, 0, 18);
-  barWidth = constrain(barWidth, 0, 18);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d%%", battery.percent);
 
-  // Battery outline
-  u8g2.drawFrame(x, y, 22, 10);
-  // Battery tip
-  u8g2.drawBox(x + 22, y + 3, 2, 4);
-  // Fill level
-  if (barWidth > 0) {
-    u8g2.drawBox(x + 2, y + 2, barWidth, 6);
-  }
+  // Use small font for battery %
+  u8g2.setFont(u8g2_font_helvR08_tr);
 
   // Blink if critical
   if (battery.critical && (millis() / 500) % 2 == 0) {
-    u8g2.setDrawColor(0);
-    u8g2.drawBox(x + 2, y + 2, 18, 6);
-    u8g2.setDrawColor(1);
+    // Don't draw (blink off)
+  } else {
+    u8g2.drawStr(x, y + 8, buf);
   }
 }
 
@@ -1497,8 +1532,11 @@ void startLogging() {
 
   // Folder naming: GPS datetime preferred, session counter as fallback
   char dd[32], ds[20], ts[12];
-  bool hasGpsDate = (strlen(gps.date) >= 6 && gps.date[0] != '0');
-  bool hasGpsTime = (strlen(gps.utc_time) >= 6 && gps.utc_time[0] != '0');
+  // Check for valid GPS date: year portion (chars 4-5) must not be "00" (default)
+  // Date format is DDMMYY, so "050426" = April 5, 2026
+  bool hasGpsDate = (strlen(gps.date) >= 6 && (gps.date[4] != '0' || gps.date[5] != '0'));
+  // Check for valid GPS time: must have a fix and time length OK
+  bool hasGpsTime = gps.valid && (strlen(gps.utc_time) >= 6);
 
   if (hasGpsDate && hasGpsTime) {
     // Best case: GPS date + time as folder name (e.g., /sf/20260402_163325/)
@@ -1535,7 +1573,7 @@ void startLogging() {
   char np[64], ip[64], rp[64], wp[64];
   snprintf(np, sizeof(np), "%s/%s_%s_%s_nav.csv", dd, config.boat_id, ds, ts);
   snprintf(ip, sizeof(ip), "%s/%s_%s_%s_imu.csv", dd, config.boat_id, ds, ts);
-  snprintf(rp, sizeof(rp), "%s/%s_%s_%s.rtcm3", dd, config.boat_id, ds, ts);
+  snprintf(rp, sizeof(rp), "%s/%s_%s_%s_raw.rtcm3", dd, config.boat_id, ds, ts);
   snprintf(wp, sizeof(wp), "%s/%s_%s_%s_wind.csv", dd, config.boat_id, ds, ts);
 
   Serial.printf("[LOG] Opening NAV: %s\n", np);
@@ -1651,7 +1689,7 @@ void updateDisplayD1() {
     u8g2.drawStr(70, 26, "COG");
   }
   u8g2.drawStr(6, 52, "HEEL");
-  u8g2.drawStr(70, 52, "MAG");
+  u8g2.drawStr(70, 52, "BAT");
   u8g2.setFontDirection(0);  // Reset to normal
 
   // Row 1: SOG and COG (larger font) - skip if warning shown
@@ -1663,18 +1701,18 @@ void updateDisplayD1() {
     u8g2.drawStr(73, 24, buf);
   }
 
-  // Row 2: Heel and Magnetic heading (larger font)
+  // Row 2: Heel and Battery % (larger font)
   u8g2.setFont(u8g2_font_helvB18_tr);
   snprintf(buf, sizeof(buf), "%+.0f", imu.heel);
   u8g2.drawStr(9, 50, buf);
-  snprintf(buf, sizeof(buf), "%03d", (int)imu.heading);
+  snprintf(buf, sizeof(buf), "%d%%", battery.percent);
   u8g2.drawStr(73, 50, buf);
 
   // Row 3: Status bar
   u8g2.setFont(u8g2_font_5x7_tr);
   int dispSats = (gps.satellites >= 0 && gps.satellites <= 50) ? gps.satellites : 0;
   int dispView = (satsInView >= 0 && satsInView <= 60) ? satsInView : 0;
-  if (dispView < dispSats) dispView = dispSats;
+  // Show actual values (satsInView may be < dispSats if GLGSV/GAGSV not enabled)
   float dispHdop = (gps.hdop >= 0 && gps.hdop < 50) ? gps.hdop : 99.9;
   const char* fixStr = "---";
   if (gps.fix_quality == 1) fixStr = "GPS";
@@ -1696,13 +1734,10 @@ void updateDisplayD1() {
     config.boat_id, statusStr, dispSats, dispView);
   u8g2.drawStr(1, 64, buf);
 
-  // Battery icon in top-right corner
-  drawBatteryIcon(104, 0);
-
   u8g2.sendBuffer();
 }
 
-// D2: Sailing data display (AWS/AWA, TWS/TWA, SOG/COG, HEEL/MAG, SAT/HDOP)
+// D2: Sailing data display (AWS/AWA, TWS/TWA, SOG/COG, HEEL/BAT, SAT/HDOP)
 void updateDisplayD2() {
   if (!oledOK) return;
 
@@ -1746,12 +1781,12 @@ void updateDisplayD2() {
   snprintf(buf, sizeof(buf), "%03d", (int)twa);
   u8g2.drawStr(96, 24, buf);
 
-  // Row 2: Nav data (SOG, COG, HEEL, MAG) - larger font
+  // Row 2: Nav data (SOG, COG, HEEL, BAT) - larger font
   u8g2.setFont(u8g2_font_5x7_tr);
   u8g2.drawStr(0, 33, "SOG");
   u8g2.drawStr(32, 33, "COG");
   u8g2.drawStr(64, 33, "HEL");
-  u8g2.drawStr(96, 33, "MAG");
+  u8g2.drawStr(96, 33, "BAT");
 
   u8g2.setFont(u8g2_font_helvB14_tr);
   snprintf(buf, sizeof(buf), "%.1f", gps.speed_kts);
@@ -1760,14 +1795,14 @@ void updateDisplayD2() {
   u8g2.drawStr(32, 50, buf);
   snprintf(buf, sizeof(buf), "%+.0f", imu.heel);
   u8g2.drawStr(64, 50, buf);
-  snprintf(buf, sizeof(buf), "%03d", (int)imu.heading);
+  snprintf(buf, sizeof(buf), "%d%%", battery.percent);
   u8g2.drawStr(96, 50, buf);
 
   // Row 3: Status line with pitch
   u8g2.setFont(u8g2_font_5x7_tr);
   int dispSats = (gps.satellites >= 0 && gps.satellites <= 50) ? gps.satellites : 0;
   int dispView = (satsInView >= 0 && satsInView <= 60) ? satsInView : 0;
-  if (dispView < dispSats) dispView = dispSats;
+  // Show actual values (satsInView may be < dispSats if GLGSV/GAGSV not enabled)
   float dispHdop = (gps.hdop >= 0 && gps.hdop < 50) ? gps.hdop : 99.9;
 
   const char* fixStr = "---";
@@ -1795,16 +1830,6 @@ void updateDisplayD2() {
   snprintf(buf, sizeof(buf), "%s %d/%d %.1f %s",
     fixStr, dispSats, dispView, dispHdop, statusStr);
   u8g2.drawStr(0, 62, buf);
-
-  // Battery icon in top-right corner
-  drawBatteryIcon(104, 0);
-
-  // Show battery % below icon if space permits
-  if (battery.valid) {
-    u8g2.setFont(u8g2_font_4x6_tr);
-    snprintf(buf, sizeof(buf), "%d%%", battery.percent);
-    u8g2.drawStr(106, 16, buf);
-  }
 
   u8g2.sendBuffer();
 }
@@ -1884,8 +1909,149 @@ void markUploaded(const char* filepath) {
   }
 }
 
-// Upload a single file to S3 via HTTP PUT
-// Expects upload_url to be an API Gateway endpoint
+// Threshold for using presigned URL (1MB) - larger files bypass API Gateway
+#define PRESIGN_THRESHOLD 1000000
+
+// Extract presigned URL from JSON response
+// Returns empty string if not found
+String extractPresignedUrl(const String& json) {
+  // Try with space: "url": "
+  int urlStart = json.indexOf("\"url\": \"");
+  if (urlStart >= 0) {
+    urlStart += 8;  // Skip past "url": "
+  } else {
+    // Try without space: "url":"
+    urlStart = json.indexOf("\"url\":\"");
+    if (urlStart >= 0) {
+      urlStart += 7;  // Skip past "url":"
+    }
+  }
+  if (urlStart < 0) return "";
+  int urlEnd = json.indexOf("\"", urlStart);
+  if (urlEnd < 0) return "";
+  return json.substring(urlStart, urlEnd);
+}
+
+// Upload directly to S3 using presigned URL (for large files)
+bool uploadToS3Presigned(const char* filepath, File& file, size_t fileSize, const String& presignedUrl) {
+  Serial.println("[UPLOAD] Using presigned S3 URL (direct upload)");
+  Serial.printf("[UPLOAD] File size: %u bytes, heap: %u\n", fileSize, ESP.getFreeHeap());
+
+  // Convert HTTPS to HTTP - S3 supports both, HTTP is faster (no TLS overhead)
+  String httpUrl = presignedUrl;
+  if (httpUrl.startsWith("https://")) {
+    httpUrl = "http://" + httpUrl.substring(8);
+    Serial.println("[UPLOAD] Using HTTP (no TLS) for faster upload");
+  }
+
+  WiFiClient s3Client;  // Plain HTTP, no TLS
+  s3Client.setTimeout(300);  // 5 minute timeout for large files
+
+  HTTPClient s3Http;
+  s3Http.setTimeout(300000);  // 5 minute timeout
+  s3Http.setReuse(false);
+
+  // Connect to S3
+  Serial.println("[UPLOAD] Connecting to S3...");
+  if (!s3Http.begin(s3Client, httpUrl)) {
+    Serial.println("[UPLOAD] Failed to begin S3 HTTP");
+    return false;
+  }
+
+  // Determine content type
+  String contentType = "application/octet-stream";
+  if (String(filepath).endsWith(".csv")) {
+    contentType = "text/csv";
+  }
+  s3Http.addHeader("Content-Type", contentType);
+  s3Http.addHeader("Content-Length", String(fileSize));
+
+  yield();
+
+  Serial.printf("[UPLOAD] Starting PUT (%u bytes)...\n", fileSize);
+  unsigned long startTime = millis();
+
+  // Upload file directly to S3
+  int httpCode = s3Http.sendRequest("PUT", &file, fileSize);
+
+  unsigned long elapsed = (millis() - startTime) / 1000;
+  Serial.printf("[UPLOAD] Request completed in %lu sec, heap: %u\n", elapsed, ESP.getFreeHeap());
+
+  String response = s3Http.getString();
+  s3Http.end();
+
+  if (httpCode == 200 || httpCode == 201 || httpCode == 204) {
+    Serial.printf("[UPLOAD] S3 Success: %s (HTTP %d)\n", filepath, httpCode);
+    return true;
+  } else {
+    Serial.printf("[UPLOAD] S3 Failed: %s (HTTP %d)\n", filepath, httpCode);
+    if (response.length() > 0 && response.length() < 500) {
+      Serial.printf("[UPLOAD] S3 Response: %s\n", response.c_str());
+    }
+    return false;
+  }
+}
+
+// Request presigned URL from API Gateway
+String requestPresignedUrl(const char* filepath, size_t fileSize) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(30);
+
+  HTTPClient http;
+  http.setTimeout(30000);
+  http.setReuse(false);
+
+  // Build presign request URL
+  String url = String(config.upload_url);
+  url += "?boat=";
+  url += config.boat_id;
+  url += "&file=";
+  url += filepath;
+  url += "&presign=1&size=";
+  url += String(fileSize);
+
+  Serial.println("[UPLOAD] Requesting presigned URL...");
+
+  if (!http.begin(client, url)) {
+    Serial.println("[UPLOAD] Failed to begin presign request");
+    return "";
+  }
+
+  // Use POST with empty body (API Gateway only accepts POST/PUT)
+  http.addHeader("Content-Type", "application/octet-stream");
+  http.addHeader("Content-Length", "0");
+  int httpCode = http.POST("");
+
+  if (httpCode != 200) {
+    Serial.printf("[UPLOAD] Presign request failed: HTTP %d\n", httpCode);
+    http.end();
+    return "";
+  }
+
+  String response = http.getString();
+  http.end();
+
+  Serial.printf("[UPLOAD] Response length: %d\n", response.length());
+  if (response.length() < 500) {
+    Serial.printf("[UPLOAD] Response: %s\n", response.c_str());
+  } else {
+    Serial.printf("[UPLOAD] Response (first 200): %.200s\n", response.c_str());
+  }
+
+  String presignedUrl = extractPresignedUrl(response);
+  if (presignedUrl.length() == 0) {
+    Serial.println("[UPLOAD] Failed to parse presigned URL from response");
+    return "";
+  }
+
+  Serial.printf("[UPLOAD] Got presigned URL (%d chars)\n", presignedUrl.length());
+  return presignedUrl;
+}
+
+// Upload a single file to S3
+// Small files (<1MB): Direct upload via API Gateway
+// Large files (>=1MB): Request presigned URL, upload directly to S3
 bool uploadFile(const char* filepath) {
   uploadCount++;
   updateDisplay();
@@ -1893,6 +2059,12 @@ bool uploadFile(const char* filepath) {
   // Feed watchdog before file operations
   yield();
   delay(10);
+
+  // Verify WiFi is still connected
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("[UPLOAD] WiFi disconnected, skipping: %s\n", filepath);
+    return false;
+  }
 
   File file = SD.open(filepath, FILE_READ);
   if (!file) {
@@ -1920,14 +2092,28 @@ bool uploadFile(const char* filepath) {
     Serial.printf("[UPLOAD] Warning: Low heap (%u bytes), SSL may fail\n", ESP.getFreeHeap());
   }
 
-  // Use WiFiClientSecure for HTTPS
+  bool success = false;
+
+  // Large files: Use presigned URL for direct S3 upload (bypasses API Gateway timeout)
+  if (fileSize >= PRESIGN_THRESHOLD) {
+    String presignedUrl = requestPresignedUrl(filepath, fileSize);
+    if (presignedUrl.length() > 0) {
+      success = uploadToS3Presigned(filepath, file, fileSize, presignedUrl);
+    }
+    file.close();
+    yield();
+    delay(50);
+    return success;
+  }
+
+  // Small files: Direct upload via API Gateway
   WiFiClientSecure client;
-  client.setInsecure();  // Skip certificate verification (AWS API Gateway is trusted)
-  client.setTimeout(30);  // 30 second socket timeout
+  client.setInsecure();
+  client.setTimeout(30);
 
   HTTPClient http;
-  http.setTimeout(60000);  // 60 second timeout for larger files
-  http.setReuse(false);    // Don't reuse connections
+  http.setTimeout(60000);
+  http.setReuse(false);
 
   // Build the upload URL with filename as query param
   String url = String(config.upload_url);
@@ -1936,8 +2122,9 @@ bool uploadFile(const char* filepath) {
   url += "&file=";
   url += filepath;
 
-  // Feed watchdog before network operation
   yield();
+
+  Serial.printf("[UPLOAD] Direct upload via API Gateway\n");
 
   if (!http.begin(client, url)) {
     Serial.printf("[UPLOAD] Failed to begin HTTP: %s\n", filepath);
@@ -1948,7 +2135,6 @@ bool uploadFile(const char* filepath) {
   http.addHeader("Content-Type", "application/octet-stream");
   http.addHeader("Content-Length", String(fileSize));
 
-  // Feed watchdog
   yield();
 
   int httpCode = http.sendRequest("PUT", &file, fileSize);
@@ -1956,7 +2142,6 @@ bool uploadFile(const char* filepath) {
   file.close();
   http.end();
 
-  // Feed watchdog after network operation
   yield();
   delay(50);
 
@@ -1964,7 +2149,14 @@ bool uploadFile(const char* filepath) {
     Serial.printf("[UPLOAD] Success: %s (HTTP %d)\n", filepath, httpCode);
     return true;
   } else {
-    Serial.printf("[UPLOAD] Failed: %s (HTTP %d)\n", filepath, httpCode);
+    const char* errMsg = "";
+    if (httpCode == -1) errMsg = "CONNECTION_REFUSED/TIMEOUT";
+    else if (httpCode == -2) errMsg = "SEND_HEADER_FAILED";
+    else if (httpCode == -3) errMsg = "SEND_PAYLOAD_FAILED";
+    else if (httpCode == -4) errMsg = "NOT_CONNECTED";
+    else if (httpCode == -5) errMsg = "CONNECTION_LOST";
+    else if (httpCode == -11) errMsg = "READ_TIMEOUT";
+    Serial.printf("[UPLOAD] Failed: %s (HTTP %d %s)\n", filepath, httpCode, errMsg);
     return false;
   }
 }
@@ -2199,18 +2391,67 @@ void checkWiFiUpload() {
     return;
   }
 
-  // Try to connect to any available WiFi
+#if ENABLE_WIND
+  // BLE interferes with WiFi TLS - must fully deinit BLE before upload
+  if (bleInitialized) {
+    Serial.println("[UPLOAD] Preparing for upload (BLE/WiFi radio conflict)...");
+
+    // Disconnect BLE
+    if (pWindClient && pWindClient->isConnected()) {
+      Serial.println("[UPLOAD] Disconnecting wind sensor...");
+      pWindClient->disconnect();
+      delay(100);
+    }
+
+    // Deinit BLE
+    Serial.println("[UPLOAD] Deinitializing BLE...");
+    wind.connected = false;
+    // Don't null pointers before deinit - let NimBLE clean up
+    NimBLEDevice::deinit(false);  // false = don't clear all, just deinit
+    // Now safe to null pointers
+    pWindClient = nullptr;
+    pWindSpeedChar = nullptr;
+    pWindDirChar = nullptr;
+    pBatteryChar = nullptr;
+    bleInitialized = false;
+    delay(500);
+    Serial.printf("[UPLOAD] BLE deinit done, heap: %u bytes\n", ESP.getFreeHeap());
+  }
+#endif
+
+  // Connect to WiFi (BLE is now fully off)
   if (connectWiFi()) {
     // Give system time to stabilize after WiFi connect
     Serial.println("[UPLOAD] Waiting for connection to stabilize...");
     for (int i = 0; i < 30; i++) {
       delay(100);
       yield();
-      ArduinoOTA.handle();  // Keep OTA responsive
+      ArduinoOTA.handle();
     }
 
     uploading = true;
     uploadCount = 0;
+
+    // Test connectivity before uploading
+    Serial.println("[UPLOAD] Testing TLS connectivity...");
+    Serial.printf("[UPLOAD] Free heap: %u bytes\n", ESP.getFreeHeap());
+    WiFiClientSecure testClient;
+    testClient.setInsecure();
+    testClient.setTimeout(30);
+    if (testClient.connect("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", 443)) {
+      Serial.println("[UPLOAD] Connection test OK");
+      testClient.stop();
+    } else {
+      Serial.println("[UPLOAD] Connection test FAILED - aborting upload");
+      uploading = false;
+#if ENABLE_WIND
+      if (config.wind_enabled && strlen(config.wind_mac) > 0) {
+        Serial.println("[UPLOAD] Reinitializing wind sensor...");
+        initWindSensor();
+      }
+#endif
+      return;
+    }
 
     // Count files to upload
     Serial.println("[UPLOAD] Counting files...");
@@ -2221,36 +2462,25 @@ void checkWiFiUpload() {
     if (uploadTotal > 0) {
       updateDisplay();
 
-#if ENABLE_WIND
-      // Skip BLE deinit - it can crash when WiFi is active (shared radio)
-      // Just disconnect if connected
-      if (bleInitialized && pWindClient && pWindClient->isConnected()) {
-        Serial.println("[UPLOAD] Disconnecting wind sensor for upload...");
-        pWindClient->disconnect();
-        wind.connected = false;
-        delay(100);
-      }
-#endif
-
       // Upload all files in /sf directory
       Serial.printf("[UPLOAD] Starting upload... (Free heap: %u bytes)\n", ESP.getFreeHeap());
       uploadDirectory("/sf");
       Serial.println("[UPLOAD] Done");
 
-#if ENABLE_WIND
-      // Reconnect to wind sensor if it was disconnected
-      if (bleInitialized && !wind.connected && strlen(config.wind_mac) > 0) {
-        Serial.println("[UPLOAD] Reconnecting to wind sensor...");
-        initWindSensor();
-      }
-#endif
     } else {
       Serial.println("[UPLOAD] No new files to upload");
     }
 
     uploading = false;
-    // Keep WiFi connected for OTA and telnet
     Serial.println("[UPLOAD] Complete, WiFi stays connected for OTA/telnet");
+
+#if ENABLE_WIND
+    // Reinitialize BLE and reconnect to wind sensor
+    if (config.wind_enabled && strlen(config.wind_mac) > 0) {
+      Serial.println("[UPLOAD] Reinitializing wind sensor...");
+      initWindSensor();
+    }
+#endif
   }
 
   // Reset stationary timer to avoid rapid retries
@@ -2330,7 +2560,7 @@ void processCommand(String cmd, bool fromTelnet) {
       imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE", imu.heel, imu.pitch);
     tprintf("SD:  %s\n", sdOK ? "OK" : "FAILED");
     tprintf("Logging: %s\n", logging ? "YES" : "NO");
-    tprintf("Data: %lu KB, RTCM: %lu frames\n", totalBytes / 1024, rtcmFrameCount);
+    tprintf("Data: %lu KB, RTCM: %lu frames (0xD3: %lu)\n", totalBytes / 1024, rtcmFrameCount, rtcmSyncCount);
     tprintf("WiFi: %s\n", wifiConnected ? connectedSSID : "disconnected");
     if (wifiConnected) {
       tprintf("IP: %s\n", WiFi.localIP().toString().c_str());
@@ -2383,28 +2613,104 @@ void processCommand(String cmd, bool fromTelnet) {
       return;
     }
     tprintln("Starting manual upload...");
-    if (wifiConnected || connectWiFi()) {
+
 #if ENABLE_WIND
-      // Skip BLE deinit - it can crash when WiFi is active (shared radio)
-      // Just disconnect if connected, but don't call deinit()
-      if (bleInitialized && pWindClient && pWindClient->isConnected()) {
-        tprintln("Disconnecting wind sensor for upload...");
+    // BLE interferes with WiFi TLS - must fully deinit BLE
+    // Disconnect WiFi first, then deinit BLE, then reconnect WiFi
+    if (bleInitialized) {
+      tprintln("Preparing for upload (BLE/WiFi radio conflict)...");
+
+      // Step 1: Disconnect BLE
+      if (pWindClient && pWindClient->isConnected()) {
+        tprintln("Disconnecting wind sensor...");
         pWindClient->disconnect();
-        wind.connected = false;
         delay(100);
       }
+
+      // Step 2: Disconnect WiFi if connected
+      if (wifiConnected || WiFi.status() == WL_CONNECTED) {
+        tprintln("Disconnecting WiFi...");
+        WiFi.disconnect(true);
+        wifiConnected = false;
+        delay(200);
+      }
+
+      // Step 3: Deinit BLE (safe now that WiFi is disconnected)
+      tprintln("Deinitializing BLE...");
+      wind.connected = false;
+      // Don't null pointers before deinit - let NimBLE clean up
+      NimBLEDevice::deinit(false);  // false = don't clear all, just deinit
+      // Now safe to null pointers
+      pWindClient = nullptr;
+      pWindSpeedChar = nullptr;
+      pWindDirChar = nullptr;
+      pBatteryChar = nullptr;
+      bleInitialized = false;
+      delay(500);
+      tprintf("BLE deinit done, heap: %u bytes\n", ESP.getFreeHeap());
+    }
 #endif
+
+    // Now connect WiFi (BLE is fully off)
+    tprintln("Connecting to WiFi...");
+    if (connectWiFi()) {
+      tprintf("Connected to: %s, IP: %s\n", connectedSSID, WiFi.localIP().toString().c_str());
       tprintf("Free heap: %u bytes\n", ESP.getFreeHeap());
       tprintf("Stack high water: %u bytes\n", uxTaskGetStackHighWaterMark(NULL));
+
+      // Test connectivity - first check DNS
+      tprintln("Testing DNS resolution...");
+      IPAddress ip;
+      if (!WiFi.hostByName("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", ip)) {
+        tprintln("DNS resolution FAILED");
+#if ENABLE_WIND
+        if (config.wind_enabled && strlen(config.wind_mac) > 0) {
+          tprintln("Reinitializing wind sensor...");
+          initWindSensor();
+        }
+#endif
+        return;
+      }
+      tprintf("DNS OK: %s\n", ip.toString().c_str());
+
+      // Test TLS directly to AWS (skip intermediate tests now that BLE is off)
+      tprintln("Testing TLS to AWS API Gateway...");
+      tprintf("Free heap: %u bytes\n", ESP.getFreeHeap());
+      WiFiClientSecure testClient;
+      testClient.setInsecure();
+      testClient.setTimeout(30);
+      if (testClient.connect("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", 443)) {
+        tprintln("AWS TLS OK");
+        testClient.stop();
+      } else {
+        tprintf("AWS TLS FAILED (heap: %u)\n", ESP.getFreeHeap());
+#if ENABLE_WIND
+        // Reinit BLE and reconnect to wind sensor
+        if (config.wind_enabled && strlen(config.wind_mac) > 0) {
+          tprintln("Reinitializing wind sensor...");
+          initWindSensor();
+        }
+#endif
+        return;
+      }
+
       tprintln("Calling uploadDirectory...");
       yield();
       delay(100);
       uploadDirectory("/sf");
       tprintln("Upload complete");
 #if ENABLE_WIND
-      // Reconnect to wind sensor if it was disconnected
-      if (bleInitialized && !wind.connected && strlen(config.wind_mac) > 0) {
-        tprintln("Reconnecting to wind sensor...");
+      // Reinitialize BLE and reconnect to wind sensor
+      if (config.wind_enabled && strlen(config.wind_mac) > 0) {
+        tprintln("Reinitializing wind sensor...");
+        initWindSensor();
+      }
+#endif
+    } else {
+#if ENABLE_WIND
+      // WiFi failed, reinit BLE
+      if (config.wind_enabled && strlen(config.wind_mac) > 0) {
+        tprintln("WiFi failed, reinitializing wind sensor...");
         initWindSensor();
       }
 #endif
@@ -2442,8 +2748,12 @@ void processCommand(String cmd, bool fromTelnet) {
   } else if (cmd == "gps") {
     tprintln("=== GPS Details ===");
     tprintf("Fix: %s (quality %d)\n", gps.valid ? "YES" : "NO", gps.fix_quality);
-    int dispView = (satsInView < gps.satellites) ? gps.satellites : satsInView;
-    tprintf("Satellites: %d used / %d in view\n", gps.satellites, dispView);
+    tprintf("Satellites in fix: %d\n", gps.satellites);
+    tprintf("Satellites in view: %d (GP:%d GL:%d GA:%d GB:%d)\n",
+            satsInView, gsvGP, gsvGL, gsvGA, gsvGB);
+    if (satsInView < gps.satellites) {
+      tprintln("  NOTE: GLGSV/GAGSV messages may not be enabled");
+    }
     tprintf("HDOP: %.1f%s\n", gps.hdop, gps.hdop > 50 ? " (no data)" : "");
     tprintf("Position: %.8f, %.8f\n", gps.lat, gps.lon);
     tprintf("Altitude: %.1f m\n", gps.alt);
@@ -2509,6 +2819,61 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("Deleting uploaded files...");
     int deleted = deleteUploadedFiles("/sf");
     tprintf("Deleted %d files\n", deleted);
+
+  } else if (cmd == "clearmarkers") {
+    if (!sdOK) {
+      tprintln("SD card not available");
+      return;
+    }
+    tprintln("Clearing .uploaded markers (keeping data files)...");
+    int count = 0;
+    // Clear markers in all session directories
+    File root = SD.open("/sf");
+    if (root) {
+      File dir = root.openNextFile();
+      while (dir) {
+        if (dir.isDirectory()) {
+          String dirPath = String("/sf/") + dir.name();
+          File subdir = SD.open(dirPath);
+          if (subdir) {
+            File f = subdir.openNextFile();
+            while (f) {
+              String fname = String(f.name());
+              f.close();
+              if (fname.endsWith(".uploaded")) {
+                String fullPath = dirPath + "/" + fname;
+                if (SD.remove(fullPath.c_str())) {
+                  count++;
+                }
+              }
+              f = subdir.openNextFile();
+            }
+            subdir.close();
+          }
+        }
+        dir.close();
+        dir = root.openNextFile();
+      }
+      root.close();
+    }
+    // Also clear markers in /sf root
+    File sfRoot = SD.open("/sf");
+    if (sfRoot) {
+      File f = sfRoot.openNextFile();
+      while (f) {
+        String fname = String(f.name());
+        f.close();
+        if (fname.endsWith(".uploaded")) {
+          String fullPath = String("/sf/") + fname;
+          if (SD.remove(fullPath.c_str())) {
+            count++;
+          }
+        }
+        f = sfRoot.openNextFile();
+      }
+      sfRoot.close();
+    }
+    tprintf("Cleared %d marker files\n", count);
 
   } else if (cmd == "gpsraw") {
     tprintln("=== Raw GPS data (10 seconds) ===");
@@ -2782,11 +3147,6 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintf("Start threshold: >%.1f kt for %d sec\n", config.start_speed_knots, config.start_delay_sec);
     tprintf("Stop threshold: <%.1f kt for %d sec\n", config.stop_speed_knots, config.stop_delay_sec);
 
-  } else if (cmd == "shutdown") {
-    tprintln("Shutting down...");
-    delay(500);
-    shutdownCleanly();
-
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -2815,7 +3175,6 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  cleanup    - Delete uploaded files");
     tprintln("  wifi       - Connect to WiFi");
     tprintln("  disconnect - Disconnect WiFi");
-    tprintln("  shutdown   - Clean shutdown (deep sleep)");
     tprintln("  reboot     - Restart device");
     tprintln("  help       - Show this help");
     tprintln("================");
@@ -2837,58 +3196,10 @@ void handleSerialCommand() {
 }
 
 // ============================================================
-// POWER BUTTON HANDLING
-// ============================================================
-void shutdownCleanly() {
-  Serial.println("[PWR] Shutdown initiated...");
-
-  // Stop logging and close files
-  if (logging) {
-    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000))) {
-      navFile.flush(); navFile.close();
-      imuFile.flush(); imuFile.close();
-      rawFile.flush(); rawFile.close();
-      if (windFile) { windFile.flush(); windFile.close(); }
-      xSemaphoreGive(sdMutex);
-    }
-    logging = false;
-  }
-
-  // Visual confirmation on OLED
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_helvB14_tr);
-  u8g2.drawStr(15, 35, "SHUTDOWN");
-  u8g2.sendBuffer();
-  delay(1500);
-
-  u8g2.clearBuffer();
-  u8g2.sendBuffer();  // Turn off OLED
-
-  Serial.println("[PWR] Entering deep sleep...");
-  delay(100);
-
-  // Configure wake on button press (LOW = pressed)
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_13, 0);
-  esp_deep_sleep_start();
-}
-
-void checkPowerButton() {
-  if (digitalRead(POWER_BTN_PIN) == LOW) {
-    unsigned long pressStart = millis();
-    // Wait for button release or 2 second hold
-    while (digitalRead(POWER_BTN_PIN) == LOW) {
-      if (millis() - pressStart > 2000) {
-        shutdownCleanly();
-        // Never returns
-      }
-      delay(10);
-    }
-  }
-}
-
-// ============================================================
 // GPS SPEED-TRIGGERED RECORDING STATE MACHINE
 // ============================================================
+// Power control: Use hardware slide switch on PowerBoost EN pin
+// No software shutdown - hardware switch cuts all power
 void updateRecordingState() {
   float speed = gps.speed_kts;
   unsigned long now = millis();
@@ -3008,9 +3319,6 @@ void uploadTaskFunc(void* param) {
 void loop() {
   unsigned long now = millis();
 
-  // Check power button (hold >2s to shutdown)
-  checkPowerButton();
-
   // Handle OTA updates (highest priority)
   if (wifiConnected) {
     ArduinoOTA.handle();
@@ -3078,11 +3386,11 @@ void loop() {
     lastWifiCheck = now;
   }
 
-  // Battery monitoring (every 10 seconds) - DISABLED: battery unplugged
-  // static unsigned long lastBattCheck = 0;
-  // if (now - lastBattCheck >= 10000) {
-  //   updateBattery();
-  //   handleLowBattery();  // Will shut down if critical
-  //   lastBattCheck = now;
-  // }
+  // Battery monitoring (every 10 seconds)
+  static unsigned long lastBattCheck = 0;
+  if (now - lastBattCheck >= 10000) {
+    updateBattery();
+    handleLowBattery();  // Will warn and halt if critical
+    lastBattCheck = now;
+  }
 }
