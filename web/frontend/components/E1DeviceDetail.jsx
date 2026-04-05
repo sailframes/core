@@ -2,6 +2,24 @@ import React, { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { API_URL } from "../src/config";
 
+// Format YYYY-MM-DD date to friendly Boston local format
+function formatLocalDate(dateStr) {
+  if (!dateStr) return dateStr;
+  try {
+    // Parse as UTC date, then format for Boston timezone
+    const dt = new Date(dateStr + "T12:00:00Z"); // Use noon to avoid date shifting
+    return dt.toLocaleDateString("en-US", {
+      timeZone: "America/New_York",
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
 export default function E1DeviceDetail() {
   const { deviceId } = useParams();
   const [uploads, setUploads] = useState([]);
@@ -90,7 +108,7 @@ export default function E1DeviceDetail() {
         <table>
           <thead>
             <tr>
-              <th>Date</th>
+              <th>Date (Boston Time)</th>
               <th>Files</th>
               <th>Total Size</th>
               <th>Processed</th>
@@ -104,7 +122,7 @@ export default function E1DeviceDetail() {
                     to={`/e1/${deviceId}/${upload.date}`}
                     style={{ color: "var(--accent)", textDecoration: "none" }}
                   >
-                    {upload.date}
+                    {formatLocalDate(upload.date)}
                   </Link>
                 </td>
                 <td>
