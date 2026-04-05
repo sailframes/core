@@ -111,7 +111,7 @@ export default function E1DeviceDetail() {
     <div className="panel">
       <div className="panel-header">
         <div>
-          <Link to="/e1" style={{ color: "var(--text-secondary)", textDecoration: "none" }}>
+          <Link to="/" style={{ color: "var(--text-secondary)", textDecoration: "none" }}>
             E1 Fleet
           </Link>
           <span style={{ color: "var(--text-secondary)" }}> / </span>
@@ -144,7 +144,7 @@ export default function E1DeviceDetail() {
               <tr key={group.localDateKey}>
                 <td>
                   <Link
-                    to={`/e1/${deviceId}/${group.localDateKey}`}
+                    to={`/${deviceId}/${group.localDateKey}`}
                     style={{ color: "var(--accent)", textDecoration: "none" }}
                   >
                     {group.displayDate}

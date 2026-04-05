@@ -52,21 +52,14 @@ const FILE_TYPE_COLORS = {
   other: "var(--border)",
 };
 
-function formatBytes(bytes) {
-  if (!bytes) return "0 B";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export default function E1DateDetail() {
   const { deviceId, date } = useParams();
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [deleting, setDeleting] = useState(null);
 
-  // Fetch sessions data (has GPS-derived times)
-  useEffect(() => {
+  const fetchSessions = () => {
     setLoading(true);
     fetch(`${API_URL}/api/sessions`)
       .then((r) => {
@@ -74,7 +67,6 @@ export default function E1DateDetail() {
         return r.json();
       })
       .then((data) => {
-        // Filter sessions for this device where local date matches
         const deviceSessions = (data.sessions || []).filter((s) => {
           if (s.device_id !== deviceId) return false;
           if (!s.start_time) return false;
@@ -85,18 +77,22 @@ export default function E1DateDetail() {
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchSessions();
   }, [deviceId, date]);
 
   // Process sessions for display
   const sortedSessions = useMemo(() => {
     return sessions
       .map((session) => {
-        // Extract base session ID (e.g., "s001" from "s001-000061")
         const sessionIdParts = (session.session_id || "").split("-");
         const baseSessionId = sessionIdParts[0] || session.session_id;
 
         return {
           sessionId: session.session_id,
+          folderDate: session.date,
           displayName: baseSessionId,
           startTime: session.start_time,
           endTime: session.end_time,
@@ -112,12 +108,93 @@ export default function E1DateDetail() {
       .sort((a, b) => a.startTime.localeCompare(b.startTime));
   }, [sessions]);
 
-  const handleViewInDashboard = (sessionId) => {
-    const sessionPath = sessionId ? `${date}-${sessionId}` : date;
-    window.open(`/?session=${deviceId}/${sessionPath}`, "_blank");
+  // Sessions under 15 minutes
+  const shortSessions = useMemo(() => {
+    return sortedSessions.filter((s) => s.durationMinutes != null && s.durationMinutes < 15);
+  }, [sortedSessions]);
+
+  const handleViewInDashboard = (session) => {
+    const sessionPath = session.sessionId
+      ? `${session.folderDate}-${session.sessionId}`
+      : session.folderDate;
+    window.open(`/dashboard/?session=${deviceId}/${sessionPath}`, "_blank");
   };
 
-  // Get sensor types for a session
+  const handleDeleteSession = async (session) => {
+    const sessionPath = session.sessionId
+      ? `${session.folderDate}-${session.sessionId}`
+      : session.folderDate;
+
+    const confirmed = window.confirm(
+      `Delete session ${session.displayName} (${session.durationMinutes || 0} min)?\n\nThis will permanently delete all data for this session.`
+    );
+
+    if (!confirmed) return;
+
+    setDeleting(session.sessionId);
+    try {
+      const response = await fetch(`${API_URL}/api/sessions/${deviceId}/${sessionPath}`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to delete session");
+      }
+
+      // Refresh sessions list
+      fetchSessions();
+    } catch (err) {
+      alert(`Error deleting session: ${err.message}`);
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  const handleDeleteShortSessions = async () => {
+    if (shortSessions.length === 0) {
+      alert("No sessions under 15 minutes to delete.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${shortSessions.length} session(s) under 15 minutes?\n\n` +
+        shortSessions.map((s) => `  - ${s.displayName} (${s.durationMinutes || 0} min)`).join("\n") +
+        `\n\nThis will permanently delete all data for these sessions.`
+    );
+
+    if (!confirmed) return;
+
+    setDeleting("bulk");
+    let deleted = 0;
+    let errors = 0;
+
+    for (const session of shortSessions) {
+      const sessionPath = session.sessionId
+        ? `${session.folderDate}-${session.sessionId}`
+        : session.folderDate;
+
+      try {
+        const response = await fetch(`${API_URL}/api/sessions/${deviceId}/${sessionPath}`, {
+          method: "DELETE",
+        });
+        if (response.ok) {
+          deleted++;
+        } else {
+          errors++;
+        }
+      } catch {
+        errors++;
+      }
+    }
+
+    setDeleting(null);
+    fetchSessions();
+
+    if (errors > 0) {
+      alert(`Deleted ${deleted} sessions. ${errors} failed.`);
+    }
+  };
+
   const getSensorTypes = (sensors) => {
     const types = [];
     if (sensors.gps) types.push("nav");
@@ -130,12 +207,12 @@ export default function E1DateDetail() {
     <div className="panel">
       <div className="panel-header">
         <div>
-          <Link to="/e1" style={{ color: "var(--text-secondary)", textDecoration: "none" }}>
+          <Link to="/" style={{ color: "var(--text-secondary)", textDecoration: "none" }}>
             E1 Fleet
           </Link>
           <span style={{ color: "var(--text-secondary)" }}> / </span>
           <Link
-            to={`/e1/${deviceId}`}
+            to={`/${deviceId}`}
             style={{ color: "var(--text-secondary)", textDecoration: "none" }}
           >
             {deviceId}
@@ -143,8 +220,28 @@ export default function E1DateDetail() {
           <span style={{ color: "var(--text-secondary)" }}> / </span>
           <h2 style={{ display: "inline" }}>{formatDisplayDate(date)}</h2>
         </div>
-        <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-          All times from GPS UTC
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {shortSessions.length > 0 && (
+            <button
+              onClick={handleDeleteShortSessions}
+              disabled={deleting === "bulk"}
+              style={{
+                fontSize: 12,
+                padding: "6px 12px",
+                background: "var(--danger)",
+                color: "#fff",
+                border: "none",
+                borderRadius: 4,
+                cursor: deleting === "bulk" ? "wait" : "pointer",
+                opacity: deleting === "bulk" ? 0.6 : 1,
+              }}
+            >
+              {deleting === "bulk" ? "Deleting..." : `Delete ${shortSessions.length} < 15min`}
+            </button>
+          )}
+          <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+            All times from GPS UTC
+          </span>
         </div>
       </div>
 
@@ -171,7 +268,7 @@ export default function E1DateDetail() {
                   </span>
                   <span className="time-utc">
                     ({session.startTimeUtc} — {session.endTimeUtc} UTC)
-                    {session.durationMinutes && ` · ${session.durationMinutes} min`}
+                    {session.durationMinutes != null && ` · ${session.durationMinutes} min`}
                   </span>
                 </div>
               </div>
@@ -190,18 +287,36 @@ export default function E1DateDetail() {
                       {type.toUpperCase()}
                     </span>
                   ))}
-                  {session.durationMinutes && (
+                  {session.durationMinutes != null && (
                     <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
                       {session.durationMinutes} min
                     </span>
                   )}
                 </div>
-                <button
-                  onClick={() => handleViewInDashboard(session.sessionId)}
-                  style={{ fontSize: 12, padding: "6px 12px" }}
-                >
-                  View in Dashboard
-                </button>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    onClick={() => handleViewInDashboard(session)}
+                    style={{ fontSize: 12, padding: "6px 12px" }}
+                  >
+                    View in Dashboard
+                  </button>
+                  <button
+                    onClick={() => handleDeleteSession(session)}
+                    disabled={deleting === session.sessionId}
+                    style={{
+                      fontSize: 12,
+                      padding: "6px 12px",
+                      background: "var(--danger)",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 4,
+                      cursor: deleting === session.sessionId ? "wait" : "pointer",
+                      opacity: deleting === session.sessionId ? 0.6 : 1,
+                    }}
+                  >
+                    {deleting === session.sessionId ? "..." : "Delete"}
+                  </button>
+                </div>
               </div>
             </div>
           ))}

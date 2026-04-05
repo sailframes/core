@@ -28,25 +28,43 @@ async function init() {
     videoPlayer = new VideoPlayer();
     timeline = new Timeline();
 
-    // Load sessions list
-    await loadSessions();
+    // Check for ?session= URL parameter first (e.g., ?session=E1/2026-04-04-s013-000013)
+    const urlParams = new URLSearchParams(window.location.search);
+    const sessionParam = urlParams.get('session');
+
+    // Load sessions list (but don't auto-select if URL param exists)
+    await loadSessions(!sessionParam);
 
     // Setup session selector
     const sessionSelect = document.getElementById('session-select');
     sessionSelect.addEventListener('change', (e) => {
         if (e.target.value) {
-            const [deviceId, date] = e.target.value.split('/');
+            const [deviceId, ...dateParts] = e.target.value.split('/');
+            const date = dateParts.join('/');
             loadSession(deviceId, date);
         }
     });
+
+    // Load session from URL parameter if present
+    if (sessionParam) {
+        const slashIndex = sessionParam.indexOf('/');
+        if (slashIndex !== -1) {
+            const deviceId = sessionParam.substring(0, slashIndex);
+            const date = sessionParam.substring(slashIndex + 1);
+            console.log(`Loading session from URL: ${deviceId}/${date}`);
+            sessionSelect.value = sessionParam;
+            loadSession(deviceId, date);
+        }
+    }
 
     console.log('Initialization complete');
 }
 
 /**
  * Load available sessions
+ * @param {boolean} autoSelect - Whether to auto-select and load first session
  */
-async function loadSessions() {
+async function loadSessions(autoSelect = true) {
     try {
         const response = await fetch(`${API_BASE}/api/sessions`);
         if (!response.ok) throw new Error('Failed to fetch sessions');
@@ -61,24 +79,32 @@ async function loadSessions() {
             select.remove(1);
         }
 
-        // Add session options
+        // Add session options with session_id for E1 sessions
         sessions.forEach(session => {
             const option = document.createElement('option');
-            option.value = `${session.device_id}/${session.date}`;
+            // Include session_id in value for proper matching
+            const sessionPath = session.session_id
+                ? `${session.date}-${session.session_id}`
+                : session.date;
+            option.value = `${session.device_id}/${sessionPath}`;
 
             const duration = session.duration_minutes
                 ? ` (${session.duration_minutes} min)`
                 : '';
             const video = session.has_video ? ' [VIDEO]' : '';
 
-            option.textContent = `${session.date}${duration}${video}`;
+            option.textContent = `${session.date}${session.session_id ? '-' + session.session_id : ''}${duration}${video}`;
             select.appendChild(option);
         });
 
-        // Auto-select first session if available
-        if (sessions.length > 0) {
-            select.value = `${sessions[0].device_id}/${sessions[0].date}`;
-            loadSession(sessions[0].device_id, sessions[0].date);
+        // Auto-select first session if requested and available
+        if (autoSelect && sessions.length > 0) {
+            const first = sessions[0];
+            const firstPath = first.session_id
+                ? `${first.date}-${first.session_id}`
+                : first.date;
+            select.value = `${first.device_id}/${firstPath}`;
+            loadSession(first.device_id, firstPath);
         }
     } catch (error) {
         console.error('Error loading sessions:', error);

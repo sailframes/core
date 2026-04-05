@@ -59,7 +59,7 @@ export default function E1Dashboard() {
         {devices.map((device) => (
           <Link
             key={device.device_id}
-            to={`/e1/${device.device_id}`}
+            to={`/${device.device_id}`}
             style={{ textDecoration: "none" }}
           >
             <div className="stat-card device-card">

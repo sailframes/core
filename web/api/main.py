@@ -493,6 +493,53 @@ def get_video(device_id: str, date: str):
     return {"cameras": cameras}
 
 
+# --- Session Management ---
+
+def _delete_s3_prefix(prefix: str) -> int:
+    """Delete all objects under an S3 prefix. Returns count of deleted objects."""
+    if LOCAL_DATA_DIR:
+        base = Path(LOCAL_DATA_DIR) / prefix
+        count = 0
+        if base.exists():
+            import shutil
+            for p in base.rglob("*"):
+                if p.is_file():
+                    p.unlink()
+                    count += 1
+            # Remove empty directories
+            shutil.rmtree(base, ignore_errors=True)
+        return count
+
+    deleted = 0
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
+        objects = page.get("Contents", [])
+        if objects:
+            s3.delete_objects(
+                Bucket=S3_BUCKET,
+                Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]}
+            )
+            deleted += len(objects)
+    return deleted
+
+
+@app.delete("/api/sessions/{device_id}/{date}")
+def delete_session(device_id: str, date: str):
+    """Delete a session and all its data (processed folder)."""
+    prefix = f"{DATA_PREFIX}/{device_id}/{date}/"
+    deleted_count = _delete_s3_prefix(prefix)
+
+    if deleted_count == 0:
+        raise HTTPException(404, f"Session not found: {device_id}/{date}")
+
+    return {
+        "status": "deleted",
+        "device_id": device_id,
+        "date": date,
+        "files_deleted": deleted_count,
+    }
+
+
 # --- Static files (frontend) ---
 
 frontend_dir = Path(__file__).parent.parent / "frontend" / "dist"
