@@ -246,6 +246,140 @@ table tr:hover td {
   color: var(--text-secondary);
 }
 
+/* E1 Dashboard styles */
+.file-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #fff;
+}
+
+.tab-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.tab-buttons button {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.tab-buttons button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input[type="date"] {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.8);
+}
+
+.device-card {
+  cursor: pointer;
+  transition: transform 0.1s, border-color 0.1s;
+}
+
+.device-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+}
+
+.file-row:hover td {
+  background: var(--bg-secondary);
+}
+
+.download-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+/* Session cards */
+.sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.session-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.session-card:hover {
+  border-color: var(--accent);
+}
+
+.session-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.session-id {
+  display: flex;
+  flex-direction: column;
+}
+
+.session-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.session-name {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.session-time {
+  text-align: right;
+}
+
+.time-local {
+  display: block;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.time-utc {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.session-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.session-files {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-count, .file-size {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 @media (max-width: 768px) {
   .app {
     flex-direction: column;
@@ -257,5 +391,8 @@ table tr:hover td {
   }
   .grid-2, .grid-3 {
     grid-template-columns: 1fr;
+  }
+  .tab-buttons {
+    flex-wrap: wrap;
   }
 }

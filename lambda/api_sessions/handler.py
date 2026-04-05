@@ -67,8 +67,9 @@ def list_sessions() -> list:
                 except Exception as e:
                     logger.warning(f"Failed to read manifest {key}: {e}")
 
-    # Sort by date descending
-    sessions.sort(key=lambda s: s.get('date', ''), reverse=True)
+    # Sort by start_time descending (more accurate than date for multiple sessions per day)
+    # Fall back to date if start_time not available
+    sessions.sort(key=lambda s: s.get('start_time') or s.get('date', ''), reverse=True)
 
     return sessions
 

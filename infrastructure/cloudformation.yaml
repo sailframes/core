@@ -7,35 +7,17 @@ Parameters:
     Default: prod
     AllowedValues: [prod, staging]
     Description: Deployment environment
+  DataBucketName:
+    Type: String
+    Default: sailframes-fleet-data-prod
+    Description: Existing S3 bucket for fleet data (created by Terraform)
 
 Resources:
   # ============================================
   # S3 BUCKETS
   # ============================================
-
-  DataBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      BucketName: !Sub 'sailframes-data-${Environment}'
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      CorsConfiguration:
-        CorsRules:
-          - AllowedHeaders: ['*']
-            AllowedMethods: [GET, HEAD]
-            AllowedOrigins: ['*']
-            MaxAge: 3600
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldRawData
-            Status: Enabled
-            Prefix: raw/
-            ExpirationInDays: 365
-      # Note: S3 notifications configured via CLI post-deployment to avoid circular dependencies
-      # aws s3api put-bucket-notification-configuration ...
+  # Note: Data bucket (sailframes-fleet-data-prod) already exists from Terraform deployment
+  # We reference it by name instead of creating a new one
 
   WebsiteBucket:
     Type: AWS::S3::Bucket
@@ -91,8 +73,8 @@ Resources:
                   - s3:PutObject
                   - s3:ListBucket
                 Resource:
-                  - !Sub 'arn:aws:s3:::sailframes-data-${Environment}'
-                  - !Sub 'arn:aws:s3:::sailframes-data-${Environment}/*'
+                  - !Sub 'arn:aws:s3:::${DataBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataBucketName}/*'
 
   PiUploaderUser:
     Type: AWS::IAM::User
@@ -107,10 +89,10 @@ Resources:
                 Action:
                   - s3:PutObject
                   - s3:PutObjectAcl
-                Resource: !Sub 'arn:aws:s3:::sailframes-data-${Environment}/raw/*'
+                Resource: !Sub 'arn:aws:s3:::${DataBucketName}/raw/*'
               - Effect: Allow
                 Action: s3:ListBucket
-                Resource: !Sub 'arn:aws:s3:::sailframes-data-${Environment}'
+                Resource: !Sub 'arn:aws:s3:::${DataBucketName}'
 
   # ============================================
   # LAMBDA FUNCTIONS
@@ -130,7 +112,7 @@ Resources:
         S3Key: process_upload.zip
       Environment:
         Variables:
-          DATA_BUCKET: !Ref DataBucket
+          DATA_BUCKET: !Ref DataBucketName
 
   ProcessUploadPermission:
     Type: AWS::Lambda::Permission
@@ -139,7 +121,7 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: s3.amazonaws.com
       SourceAccount: !Ref AWS::AccountId
-      SourceArn: !Sub 'arn:aws:s3:::sailframes-data-${Environment}'
+      SourceArn: !Sub 'arn:aws:s3:::${DataBucketName}'
 
   ApiSessionsFunction:
     Type: AWS::Lambda::Function
@@ -155,7 +137,7 @@ Resources:
         S3Key: api_sessions.zip
       Environment:
         Variables:
-          DATA_BUCKET: !Ref DataBucket
+          DATA_BUCKET: !Ref DataBucketName
 
   ApiDataFunction:
     Type: AWS::Lambda::Function
@@ -171,7 +153,7 @@ Resources:
         S3Key: api_data.zip
       Environment:
         Variables:
-          DATA_BUCKET: !Ref DataBucket
+          DATA_BUCKET: !Ref DataBucketName
 
   ApiVideoFunction:
     Type: AWS::Lambda::Function
@@ -187,7 +169,7 @@ Resources:
         S3Key: api_video.zip
       Environment:
         Variables:
-          DATA_BUCKET: !Ref DataBucket
+          DATA_BUCKET: !Ref DataBucketName
           CLOUDFRONT_DOMAIN: !GetAtt WebsiteBucket.WebsiteURL
 
   ApiAnalysisFunction:
@@ -204,7 +186,23 @@ Resources:
         S3Key: api_analysis.zip
       Environment:
         Variables:
-          DATA_BUCKET: !Ref DataBucket
+          DATA_BUCKET: !Ref DataBucketName
+
+  ApiE1Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'sailframes-api-e1-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Code:
+        S3Bucket: !Sub 'sailframes-lambda-code-${Environment}'
+        S3Key: api_e1.zip
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucketName
 
   # ============================================
   # VIDEO TRANSCODING
@@ -230,7 +228,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                Resource: !Sub '${DataBucket.Arn}/*'
+                Resource: !Sub 'arn:aws:s3:::${DataBucketName}/*'
 
   TranscodeVideoFunction:
     Type: AWS::Lambda::Function
@@ -246,7 +244,7 @@ Resources:
         S3Key: transcode_video.zip
       Environment:
         Variables:
-          DATA_BUCKET: !Ref DataBucket
+          DATA_BUCKET: !Ref DataBucketName
           MEDIACONVERT_ROLE: !GetAtt MediaConvertRole.Arn
           MEDIACONVERT_ENDPOINT: !Sub 'https://mediaconvert.${AWS::Region}.amazonaws.com'
           CLOUDFRONT_DOMAIN: sailframes.com
@@ -265,7 +263,7 @@ Resources:
         S3Key: transcode_complete.zip
       Environment:
         Variables:
-          DATA_BUCKET: !Ref DataBucket
+          DATA_BUCKET: !Ref DataBucketName
           CLOUDFRONT_DOMAIN: sailframes.com
 
   TranscodeLambdaRole:
@@ -292,8 +290,8 @@ Resources:
                   - s3:PutObject
                   - s3:ListBucket
                 Resource:
-                  - !Sub 'arn:aws:s3:::sailframes-data-${Environment}'
-                  - !Sub 'arn:aws:s3:::sailframes-data-${Environment}/*'
+                  - !Sub 'arn:aws:s3:::${DataBucketName}'
+                  - !Sub 'arn:aws:s3:::${DataBucketName}/*'
         - PolicyName: MediaConvertAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -315,7 +313,7 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: s3.amazonaws.com
       SourceAccount: !Ref AWS::AccountId
-      SourceArn: !Sub 'arn:aws:s3:::sailframes-data-${Environment}'
+      SourceArn: !Sub 'arn:aws:s3:::${DataBucketName}'
 
   # EventBridge rule to trigger on MediaConvert job completion
   MediaConvertCompleteRule:
@@ -463,6 +461,44 @@ Resources:
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
 
+  # E1 Fleet Data endpoints
+  E1Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiE1Function.Arn
+      PayloadFormatVersion: '2.0'
+
+  E1DevicesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'GET /api/e1/devices'
+      Target: !Sub 'integrations/${E1Integration}'
+
+  E1UploadsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'GET /api/e1/devices/{device_id}/uploads'
+      Target: !Sub 'integrations/${E1Integration}'
+
+  E1FilesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'GET /api/e1/files/{device_id}/{date}/{filename}'
+      Target: !Sub 'integrations/${E1Integration}'
+
+  E1Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiE1Function
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
 Outputs:
   WebsiteURL:
     Description: S3 Website URL (use this until CloudFront is set up)
@@ -472,7 +508,7 @@ Outputs:
 
   DataBucketName:
     Description: S3 bucket for race data
-    Value: !Ref DataBucket
+    Value: !Ref DataBucketName
     Export:
       Name: !Sub '${AWS::StackName}-DataBucket'
 

@@ -14,6 +14,7 @@ set -e
 
 # Configuration
 ENVIRONMENT="${1:-prod}"
+AWS_PROFILE="${2:-sailframes}"
 STACK_NAME="sailframes-${ENVIRONMENT}"
 REGION="${AWS_REGION:-us-east-1}"
 DOMAIN="sailframes.com"
@@ -42,12 +43,16 @@ check_prerequisites() {
         error "AWS CLI not installed"
     fi
 
-    if ! aws sts get-caller-identity &> /dev/null; then
-        error "AWS credentials not configured"
+    if ! aws sts get-caller-identity --profile "$AWS_PROFILE" &> /dev/null; then
+        error "AWS credentials not configured for profile: $AWS_PROFILE"
     fi
 
     if ! command -v zip &> /dev/null; then
         error "zip command not found"
+    fi
+
+    if ! command -v npm &> /dev/null; then
+        error "npm not installed (required for frontend build)"
     fi
 
     log "Prerequisites OK"
@@ -59,15 +64,16 @@ create_lambda_bucket() {
 
     echo "Checking Lambda code bucket: $bucket" >&2
 
-    if ! aws s3 ls "s3://$bucket" &> /dev/null; then
+    if ! aws s3 ls "s3://$bucket" --profile "$AWS_PROFILE" &> /dev/null; then
         echo "Creating Lambda code bucket..." >&2
-        aws s3 mb "s3://$bucket" --region "$REGION" >&2
+        aws s3 mb "s3://$bucket" --region "$REGION" --profile "$AWS_PROFILE" >&2
 
         # Block public access
         aws s3api put-public-access-block \
             --bucket "$bucket" \
             --public-access-block-configuration \
-            "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true" >&2
+            "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true" \
+            --profile "$AWS_PROFILE" >&2
     fi
 
     echo "$bucket"
@@ -79,7 +85,7 @@ package_lambdas() {
 
     log "Packaging Lambda functions..."
 
-    local functions=("process_upload" "api_sessions" "api_data" "api_video" "api_analysis")
+    local functions=("process_upload" "api_sessions" "api_data" "api_video" "api_analysis" "api_e1")
 
     for func in "${functions[@]}"; do
         local func_dir="$LAMBDA_DIR/$func"
@@ -92,7 +98,7 @@ package_lambdas() {
             (cd "$func_dir" && zip -r "$zip_file" .)
 
             # Upload to S3
-            aws s3 cp "$zip_file" "s3://$bucket/${func}.zip"
+            aws s3 cp "$zip_file" "s3://$bucket/${func}.zip" --profile "$AWS_PROFILE"
 
             rm -f "$zip_file"
         else
@@ -114,7 +120,7 @@ deploy_stack() {
     fi
 
     # Check if stack exists
-    if aws cloudformation describe-stacks --stack-name "$STACK_NAME" &> /dev/null; then
+    if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" &> /dev/null; then
         log "Updating existing stack..."
         aws cloudformation update-stack \
             --stack-name "$STACK_NAME" \
@@ -122,10 +128,11 @@ deploy_stack() {
             --parameters \
                 ParameterKey=Environment,ParameterValue="$ENVIRONMENT" \
             --capabilities CAPABILITY_NAMED_IAM \
+            --profile "$AWS_PROFILE" \
             --region "$REGION" 2>&1 || {
                 local exit_code=$?
                 # Check if "No updates" message
-                if aws cloudformation describe-stacks --stack-name "$STACK_NAME" &> /dev/null; then
+                if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --profile "$AWS_PROFILE" &> /dev/null; then
                     log "Stack exists, may have no updates needed"
                     return 0
                 fi
@@ -135,6 +142,7 @@ deploy_stack() {
         log "Waiting for stack update..."
         aws cloudformation wait stack-update-complete \
             --stack-name "$STACK_NAME" \
+            --profile "$AWS_PROFILE" \
             --region "$REGION" 2>&1 || true
     else
         log "Creating new stack..."
@@ -144,15 +152,43 @@ deploy_stack() {
             --parameters \
                 ParameterKey=Environment,ParameterValue="$ENVIRONMENT" \
             --capabilities CAPABILITY_NAMED_IAM \
+            --profile "$AWS_PROFILE" \
             --region "$REGION"
 
         log "Waiting for stack creation (this may take 5-10 minutes)..."
         aws cloudformation wait stack-create-complete \
             --stack-name "$STACK_NAME" \
+            --profile "$AWS_PROFILE" \
             --region "$REGION"
     fi
 
     log "Stack deployment complete"
+}
+
+# Build React frontend
+build_frontend() {
+    log "Building React frontend..."
+
+    local frontend_dir="$WEB_DIR/frontend"
+
+    if [ ! -d "$frontend_dir" ]; then
+        error "Frontend directory not found: $frontend_dir"
+    fi
+
+    # Install dependencies if needed
+    if [ ! -d "$frontend_dir/node_modules" ]; then
+        log "Installing npm dependencies..."
+        (cd "$frontend_dir" && npm install)
+    fi
+
+    # Build frontend
+    (cd "$frontend_dir" && npm run build)
+
+    if [ ! -d "$frontend_dir/dist" ]; then
+        error "Frontend build failed - dist directory not found"
+    fi
+
+    log "Frontend built successfully"
 }
 
 # Deploy static website
@@ -165,6 +201,7 @@ deploy_website() {
         --stack-name "$STACK_NAME" \
         --query "Stacks[0].Outputs[?OutputKey=='WebsiteBucketName'].OutputValue" \
         --output text \
+        --profile "$AWS_PROFILE" \
         --region "$REGION")
 
     if [ -z "$website_bucket" ] || [ "$website_bucket" = "None" ]; then
@@ -177,28 +214,34 @@ deploy_website() {
         --stack-name "$STACK_NAME" \
         --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
         --output text \
+        --profile "$AWS_PROFILE" \
         --region "$REGION")
 
     log "Uploading to: $website_bucket"
     log "API endpoint: $api_endpoint"
 
-    # Create config.js with API URL
-    echo "window.SAILFRAMES_API_URL = '${api_endpoint}';" > "$WEB_DIR/config.js"
+    local dist_dir="$WEB_DIR/frontend/dist"
 
-    # Sync website files
-    aws s3 sync "$WEB_DIR" "s3://$website_bucket/" \
+    # Update config.js with API URL in the built dist
+    mkdir -p "$dist_dir"
+    echo "window.SAILFRAMES_API_URL = '${api_endpoint}';" > "$dist_dir/config.js"
+
+    # Sync website files (excluding HTML and config for cache control)
+    aws s3 sync "$dist_dir" "s3://$website_bucket/" \
         --delete \
         --cache-control "max-age=31536000" \
         --exclude "*.html" \
         --exclude "config.js" \
+        --profile "$AWS_PROFILE" \
         --region "$REGION"
 
     # Upload HTML and config with shorter cache
-    aws s3 sync "$WEB_DIR" "s3://$website_bucket/" \
+    aws s3 sync "$dist_dir" "s3://$website_bucket/" \
         --exclude "*" \
         --include "*.html" \
         --include "config.js" \
         --cache-control "max-age=60" \
+        --profile "$AWS_PROFILE" \
         --region "$REGION"
 
     log "Website deployed"
@@ -212,6 +255,7 @@ print_outputs() {
         --stack-name "$STACK_NAME" \
         --query "Stacks[0].Outputs[*].[OutputKey,OutputValue]" \
         --output table \
+        --profile "$AWS_PROFILE" \
         --region "$REGION"
 
     echo ""
@@ -221,6 +265,7 @@ print_outputs() {
         --stack-name "$STACK_NAME" \
         --query "Stacks[0].Outputs[?OutputKey=='WebsiteURL'].OutputValue" \
         --output text \
+        --profile "$AWS_PROFILE" \
         --region "$REGION")
 
     local api_endpoint
@@ -228,6 +273,7 @@ print_outputs() {
         --stack-name "$STACK_NAME" \
         --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
         --output text \
+        --profile "$AWS_PROFILE" \
         --region "$REGION")
 
     echo "========================================"
@@ -248,6 +294,7 @@ main() {
     echo "========================================="
     echo " SailFrames AWS Deployment"
     echo " Environment: $ENVIRONMENT"
+    echo " AWS Profile: $AWS_PROFILE"
     echo " Region: $REGION"
     echo "========================================="
     echo ""
@@ -258,6 +305,7 @@ main() {
     lambda_bucket=$(create_lambda_bucket)
 
     package_lambdas "$lambda_bucket"
+    build_frontend
     deploy_stack
     deploy_website
     print_outputs

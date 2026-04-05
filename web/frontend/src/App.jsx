@@ -12,6 +12,9 @@ import StraightLineTable from "../components/StraightLineTable";
 import RigAnalyzer from "../components/RigAnalyzer";
 import BoatProfiles from "../components/BoatProfiles";
 import Leaderboard from "../components/Leaderboard";
+import E1Dashboard from "../components/E1Dashboard";
+import E1DeviceDetail from "../components/E1DeviceDetail";
+import E1DateDetail from "../components/E1DateDetail";
 
 export default function App() {
   const [sessions, setSessions] = useState([]);
@@ -65,6 +68,7 @@ export default function App() {
     { to: "/rig", label: "Rig Analysis" },
     { to: "/boats", label: "Boat Profiles" },
     { to: "/leaderboard", label: "Leaderboard" },
+    { to: "/e1", label: "E1 Fleet Data" },
   ];
 
   return (
@@ -159,6 +163,9 @@ export default function App() {
           />
           <Route path="/boats" element={<BoatProfiles />} />
           <Route path="/leaderboard" element={<Leaderboard />} />
+          <Route path="/e1" element={<E1Dashboard />} />
+          <Route path="/e1/:deviceId" element={<E1DeviceDetail />} />
+          <Route path="/e1/:deviceId/:date" element={<E1DateDetail />} />
         </Routes>
       </main>
     </div>

@@ -56,14 +56,51 @@ def extract_start_time_from_filename(filename: str) -> str:
     return ''
 
 
+def extract_session_id_from_filename(filename: str) -> str:
+    """Extract session ID from E1 filename.
+
+    E1 filenames: E1_s001_000061_nav.csv, E1_boot17_122131_nav.csv
+
+    The session ID includes both the boot/session identifier AND the start time
+    to distinguish multiple recording sessions on the same boot.
+    Returns session ID (e.g., 's001-000061', 'boot17-122131') or empty string if not found.
+    """
+    import re
+    parts = filename.replace('.csv', '').replace('.rtcm3', '').split('_')
+
+    session_part = None
+    time_part = None
+
+    for part in parts:
+        # Match session patterns: s001, s002, boot17, etc.
+        if re.match(r'^(s\d+|boot\d+)$', part):
+            session_part = part
+        # Match time patterns: 6 digits like 122131 (HHMMSS)
+        if len(part) == 6 and part.isdigit():
+            hh, mm, ss = int(part[:2]), int(part[2:4]), int(part[4:6])
+            if hh < 24 and mm < 60 and ss < 60:
+                time_part = part
+
+    if session_part and time_part:
+        return f"{session_part}-{time_part}"
+    elif session_part:
+        return session_part
+    return ''
+
+
 def process_file(bucket: str, key: str):
     """Process a single CSV file.
 
     Supports two path structures:
     - S1 format: raw/{device_id}/{date}/{sensor_type}/{filename}.csv (5+ parts)
     - E1 format: raw/{device_id}/{date}/{filename}.csv (4 parts, sensor in filename)
+
+    For E1 files, extracts session ID (s001, boot17, etc.) from filename and
+    creates separate processed folders per session.
     """
     parts = key.split('/')
+
+    session_id = None  # Only used for E1 files
 
     if len(parts) >= 5:
         # S1 format: raw/{device}/{date}/{sensor}/{file}.csv
@@ -76,6 +113,9 @@ def process_file(bucket: str, key: str):
         device_id = parts[1]
         date = parts[2]
         filename = parts[3]
+        # Extract session ID for E1 files
+        session_id = extract_session_id_from_filename(filename)
+        logger.info(f"Extracted session ID from filename: {session_id}")
         # Extract sensor type from filename suffix (e.g., E1_20260401_120000_nav.csv)
         if '_nav.csv' in filename:
             sensor_type = 'gps'
@@ -114,7 +154,12 @@ def process_file(bucket: str, key: str):
         return
 
     # Merge with existing processed JSON (don't overwrite)
-    output_key = f"processed/{device_id}/{date}/{sensor_type}.json"
+    # For E1 files with session ID, create separate folder per session
+    if session_id:
+        output_folder = f"{date}-{session_id}"
+    else:
+        output_folder = date
+    output_key = f"processed/{device_id}/{output_folder}/{sensor_type}.json"
 
     # Try to load existing data
     existing_data = []
@@ -150,7 +195,7 @@ def process_file(bucket: str, key: str):
     logger.info(f"Wrote {len(merged)} records to {output_key}")
 
     # Update manifest
-    update_manifest(bucket, device_id, date, sensor_type, data)
+    update_manifest(bucket, device_id, output_folder, sensor_type, data)
 
 
 def process_gps(csv_content: str, date: str = None, start_time: str = None) -> list:
@@ -494,9 +539,28 @@ def process_wind(csv_content: str, date: str = None, start_time: str = None) -> 
         return result
 
 
-def update_manifest(bucket: str, device_id: str, date: str, sensor_type: str, data: list):
-    """Update or create session manifest with metadata."""
-    manifest_key = f"processed/{device_id}/{date}/manifest.json"
+def update_manifest(bucket: str, device_id: str, folder: str, sensor_type: str, data: list):
+    """Update or create session manifest with metadata.
+
+    Args:
+        bucket: S3 bucket name
+        device_id: Device ID (e.g., 'E1')
+        folder: Folder name - either date (YYYY-MM-DD) or date-session (YYYY-MM-DD-s001)
+        sensor_type: Sensor type (gps, imu, wind, pressure)
+        data: Processed data records
+    """
+    manifest_key = f"processed/{device_id}/{folder}/manifest.json"
+
+    # Parse folder name to extract date and optional session_id
+    # Format: YYYY-MM-DD or YYYY-MM-DD-s001
+    parts = folder.split('-')
+    if len(parts) > 3:
+        # Has session ID: YYYY-MM-DD-s001
+        date = '-'.join(parts[:3])
+        session_id = '-'.join(parts[3:])
+    else:
+        date = folder
+        session_id = None
 
     # Try to load existing manifest
     try:
@@ -506,6 +570,7 @@ def update_manifest(bucket: str, device_id: str, date: str, sensor_type: str, da
         manifest = {
             'device_id': device_id,
             'date': date,
+            'session_id': session_id,
             'sensors': {},
             'created_at': datetime.now(timezone.utc).isoformat()
         }

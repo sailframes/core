@@ -61,6 +61,246 @@ def _list_keys(prefix: str) -> list[str]:
     return keys
 
 
+def _list_objects_with_metadata(prefix: str) -> list[dict]:
+    """List S3 objects with size and last modified metadata."""
+    if LOCAL_DATA_DIR:
+        base = Path(LOCAL_DATA_DIR) / prefix
+        if not base.exists():
+            return []
+        results = []
+        for p in base.rglob("*"):
+            if p.is_file():
+                stat = p.stat()
+                from datetime import datetime
+                results.append({
+                    "key": str(p.relative_to(Path(LOCAL_DATA_DIR))),
+                    "size": stat.st_size,
+                    "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat() + "Z",
+                })
+        return results
+    results = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            results.append({
+                "key": obj["Key"],
+                "size": obj["Size"],
+                "last_modified": obj["LastModified"].isoformat(),
+            })
+    return results
+
+
+def _generate_presigned_url(key: str, expiry: int = 3600) -> str:
+    """Generate presigned GET URL for S3 object."""
+    if LOCAL_DATA_DIR:
+        return f"/api/e1/download/{key}"
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": S3_BUCKET, "Key": key},
+        ExpiresIn=expiry,
+    )
+
+
+def _detect_file_type(filename: str) -> str:
+    """Detect E1 file type from filename pattern."""
+    if "_nav.csv" in filename:
+        return "nav"
+    if "_imu.csv" in filename:
+        return "imu"
+    if "_wind.csv" in filename:
+        return "wind"
+    if ".rtcm3" in filename:
+        return "rtcm3"
+    if filename.endswith(".json"):
+        return "processed"
+    return "unknown"
+
+
+def _format_bytes(size: int) -> str:
+    """Format byte size as human-readable string."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+# --- E1 Fleet Data ---
+
+@app.get("/api/e1/devices")
+def list_e1_devices():
+    """List all E1 devices with upload statistics."""
+    objects = _list_objects_with_metadata("raw/")
+
+    # Group by device_id
+    devices = {}
+    for obj in objects:
+        parts = obj["key"].split("/")
+        if len(parts) < 3:
+            continue
+        device_id = parts[1]
+        date = parts[2]
+
+        if device_id not in devices:
+            devices[device_id] = {
+                "device_id": device_id,
+                "dates": set(),
+                "total_files": 0,
+                "total_size_bytes": 0,
+            }
+
+        devices[device_id]["dates"].add(date)
+        devices[device_id]["total_files"] += 1
+        devices[device_id]["total_size_bytes"] += obj["size"]
+
+    # Convert to list with computed fields
+    result = []
+    for device in devices.values():
+        dates = sorted(device["dates"])
+        result.append({
+            "device_id": device["device_id"],
+            "first_upload": dates[0] if dates else None,
+            "last_upload": dates[-1] if dates else None,
+            "total_sessions": len(dates),
+            "total_files": device["total_files"],
+            "total_size_bytes": device["total_size_bytes"],
+            "total_size_formatted": _format_bytes(device["total_size_bytes"]),
+        })
+
+    return {"devices": sorted(result, key=lambda d: d["device_id"])}
+
+
+@app.get("/api/e1/devices/{device_id}/uploads")
+def list_e1_uploads(
+    device_id: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
+    """List all uploads for a specific E1 device grouped by date."""
+    raw_objects = _list_objects_with_metadata(f"raw/{device_id}/")
+    processed_objects = _list_objects_with_metadata(f"processed/{device_id}/")
+
+    # Group raw files by date
+    uploads_by_date = {}
+    for obj in raw_objects:
+        parts = obj["key"].split("/")
+        if len(parts) < 4:
+            continue
+        date = parts[2]
+        filename = parts[3]
+
+        # Apply date filters
+        if start_date and date < start_date:
+            continue
+        if end_date and date > end_date:
+            continue
+
+        if date not in uploads_by_date:
+            uploads_by_date[date] = {
+                "date": date,
+                "raw_files": [],
+                "processed_files": [],
+                "total_size_bytes": 0,
+            }
+
+        uploads_by_date[date]["raw_files"].append({
+            "key": obj["key"],
+            "filename": filename,
+            "file_type": _detect_file_type(filename),
+            "size_bytes": obj["size"],
+            "size_formatted": _format_bytes(obj["size"]),
+            "last_modified": obj["last_modified"],
+        })
+        uploads_by_date[date]["total_size_bytes"] += obj["size"]
+
+    # Add processed files
+    for obj in processed_objects:
+        parts = obj["key"].split("/")
+        if len(parts) < 4:
+            continue
+        date = parts[2]
+        filename = parts[3]
+
+        if date not in uploads_by_date:
+            continue
+
+        uploads_by_date[date]["processed_files"].append({
+            "key": obj["key"],
+            "filename": filename,
+            "sensor_type": filename.replace(".json", ""),
+            "size_bytes": obj["size"],
+            "size_formatted": _format_bytes(obj["size"]),
+        })
+
+    # Compute summary stats per date
+    uploads = []
+    for date, data in uploads_by_date.items():
+        file_types = {}
+        for f in data["raw_files"]:
+            ft = f["file_type"]
+            file_types[ft] = file_types.get(ft, 0) + 1
+
+        uploads.append({
+            **data,
+            "file_type_counts": file_types,
+            "total_size_formatted": _format_bytes(data["total_size_bytes"]),
+            "has_manifest": any(f["filename"] == "manifest.json" for f in data["processed_files"]),
+        })
+
+    return {
+        "device_id": device_id,
+        "uploads": sorted(uploads, key=lambda u: u["date"], reverse=True),
+    }
+
+
+@app.get("/api/e1/files/{device_id}/{date}/{filename:path}")
+def get_e1_file(device_id: str, date: str, filename: str):
+    """Get file metadata and presigned download URL."""
+    key = f"raw/{device_id}/{date}/{filename}"
+
+    # Try raw first, then processed
+    try:
+        if LOCAL_DATA_DIR:
+            path = Path(LOCAL_DATA_DIR) / key
+            if not path.exists():
+                key = f"processed/{device_id}/{date}/{filename}"
+                path = Path(LOCAL_DATA_DIR) / key
+            if not path.exists():
+                raise HTTPException(404, f"File not found: {filename}")
+            stat = path.stat()
+            from datetime import datetime
+            metadata = {
+                "size_bytes": stat.st_size,
+                "last_modified": datetime.fromtimestamp(stat.st_mtime).isoformat() + "Z",
+                "content_type": "text/csv" if filename.endswith(".csv") else "application/octet-stream",
+            }
+        else:
+            try:
+                resp = s3.head_object(Bucket=S3_BUCKET, Key=key)
+            except Exception:
+                key = f"processed/{device_id}/{date}/{filename}"
+                resp = s3.head_object(Bucket=S3_BUCKET, Key=key)
+            metadata = {
+                "size_bytes": resp["ContentLength"],
+                "last_modified": resp["LastModified"].isoformat(),
+                "content_type": resp.get("ContentType", "application/octet-stream"),
+            }
+    except Exception as e:
+        raise HTTPException(404, f"File not found: {filename}")
+
+    return {
+        "key": key,
+        "filename": filename,
+        "file_type": _detect_file_type(filename),
+        "size_bytes": metadata["size_bytes"],
+        "size_formatted": _format_bytes(metadata["size_bytes"]),
+        "last_modified": metadata["last_modified"],
+        "content_type": metadata["content_type"],
+        "download_url": _generate_presigned_url(key),
+        "download_url_expires_in": 3600,
+    }
+
+
 # --- Sessions ---
 
 @app.get("/api/sessions")
