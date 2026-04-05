@@ -1,55 +1,100 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import { API_URL } from "../src/config";
 
-// Format YYYY-MM-DD date to friendly Boston local format
-function formatLocalDate(dateStr) {
-  if (!dateStr) return dateStr;
+const BOSTON_TIMEZONE = "America/New_York";
+
+// Convert UTC ISO timestamp to Boston local date string (YYYY-MM-DD for routing)
+function getLocalDateKey(utcTimestamp) {
+  if (!utcTimestamp) return null;
   try {
-    // Parse as UTC date, then format for Boston timezone
-    const dt = new Date(dateStr + "T12:00:00Z"); // Use noon to avoid date shifting
+    const dt = new Date(utcTimestamp);
+    // Get date parts in Boston timezone
+    const parts = dt.toLocaleDateString("en-CA", { timeZone: BOSTON_TIMEZONE }).split("-");
+    return parts.join("-"); // YYYY-MM-DD
+  } catch {
+    return null;
+  }
+}
+
+// Format UTC timestamp to friendly Boston local date
+function formatLocalDate(utcTimestamp) {
+  if (!utcTimestamp) return null;
+  try {
+    const dt = new Date(utcTimestamp);
     return dt.toLocaleDateString("en-US", {
-      timeZone: "America/New_York",
+      timeZone: BOSTON_TIMEZONE,
       weekday: "short",
       month: "short",
       day: "numeric",
       year: "numeric",
     });
   } catch {
-    return dateStr;
+    return null;
   }
 }
 
 export default function E1DeviceDetail() {
   const { deviceId } = useParams();
-  const [uploads, setUploads] = useState([]);
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
+  const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Fetch sessions data (has GPS-derived times)
   useEffect(() => {
     setLoading(true);
-    const params = new URLSearchParams();
-    if (startDate) params.set("start_date", startDate);
-    if (endDate) params.set("end_date", endDate);
-
-    fetch(`${API_URL}/api/e1/devices/${deviceId}/uploads?${params}`)
+    fetch(`${API_URL}/api/sessions`)
       .then((r) => {
-        if (!r.ok) throw new Error("Failed to load uploads");
+        if (!r.ok) throw new Error("Failed to load sessions");
         return r.json();
       })
-      .then((data) => setUploads(data.uploads || []))
+      .then((data) => {
+        // Filter sessions for this device
+        const deviceSessions = (data.sessions || []).filter(
+          (s) => s.device_id === deviceId && s.start_time
+        );
+        setSessions(deviceSessions);
+      })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [deviceId, startDate, endDate]);
+  }, [deviceId]);
 
-  const FileTypeBadge = ({ type, count }) => {
+  // Group sessions by local date (Boston time)
+  const dateGroups = useMemo(() => {
+    const groups = {};
+
+    for (const session of sessions) {
+      const localDateKey = getLocalDateKey(session.start_time);
+      if (!localDateKey) continue;
+
+      if (!groups[localDateKey]) {
+        groups[localDateKey] = {
+          localDateKey,
+          displayDate: formatLocalDate(session.start_time),
+          sessions: [],
+          totalSensors: { nav: 0, imu: 0, wind: 0 },
+        };
+      }
+
+      groups[localDateKey].sessions.push(session);
+
+      // Count sensors
+      if (session.sensors?.gps) groups[localDateKey].totalSensors.nav++;
+      if (session.sensors?.imu) groups[localDateKey].totalSensors.imu++;
+      if (session.sensors?.wind) groups[localDateKey].totalSensors.wind++;
+    }
+
+    // Sort by date descending (most recent first)
+    return Object.values(groups).sort((a, b) =>
+      b.localDateKey.localeCompare(a.localDateKey)
+    );
+  }, [sessions]);
+
+  const SensorBadge = ({ type, count }) => {
     const colors = {
       nav: "var(--accent)",
       imu: "var(--success)",
       wind: "var(--warning)",
-      rtcm3: "var(--danger)",
     };
     if (!count) return null;
     return (
@@ -57,7 +102,7 @@ export default function E1DeviceDetail() {
         className="file-type-badge"
         style={{ background: colors[type] || "var(--border)", marginRight: 4 }}
       >
-        {type}: {count}
+        {type.toUpperCase()}: {count}
       </span>
     );
   };
@@ -72,74 +117,46 @@ export default function E1DeviceDetail() {
           <span style={{ color: "var(--text-secondary)" }}> / </span>
           <h2 style={{ display: "inline" }}>{deviceId}</h2>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <label style={{ fontSize: 13, color: "var(--text-secondary)" }}>From:</label>
-          <input
-            type="date"
-            value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-          />
-          <label style={{ fontSize: 13, color: "var(--text-secondary)" }}>To:</label>
-          <input
-            type="date"
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-          />
-          {(startDate || endDate) && (
-            <button
-              onClick={() => { setStartDate(""); setEndDate(""); }}
-              style={{ background: "var(--bg-secondary)", padding: "8px 12px" }}
-            >
-              Clear
-            </button>
-          )}
+        <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>
+          All times in Boston (America/New_York)
         </div>
       </div>
 
       {loading ? (
-        <div className="loading">Loading uploads...</div>
+        <div className="loading">Loading sessions...</div>
       ) : error ? (
         <div style={{ color: "var(--danger)" }}>Error: {error}</div>
-      ) : uploads.length === 0 ? (
+      ) : dateGroups.length === 0 ? (
         <div style={{ color: "var(--text-secondary)" }}>
-          No uploads found for this device{startDate || endDate ? " in selected date range" : ""}.
+          No processed sessions found for this device.
         </div>
       ) : (
         <table>
           <thead>
             <tr>
-              <th>Date (Boston Time)</th>
-              <th>Files</th>
-              <th>Total Size</th>
-              <th>Processed</th>
+              <th>Date (Boston)</th>
+              <th>Sessions</th>
+              <th>Sensors</th>
             </tr>
           </thead>
           <tbody>
-            {uploads.map((upload) => (
-              <tr key={upload.date}>
+            {dateGroups.map((group) => (
+              <tr key={group.localDateKey}>
                 <td>
                   <Link
-                    to={`/e1/${deviceId}/${upload.date}`}
+                    to={`/e1/${deviceId}/${group.localDateKey}`}
                     style={{ color: "var(--accent)", textDecoration: "none" }}
                   >
-                    {formatLocalDate(upload.date)}
+                    {group.displayDate}
                   </Link>
                 </td>
-                <td>
-                  <FileTypeBadge type="nav" count={upload.file_type_counts?.nav} />
-                  <FileTypeBadge type="imu" count={upload.file_type_counts?.imu} />
-                  <FileTypeBadge type="wind" count={upload.file_type_counts?.wind} />
-                  <FileTypeBadge type="rtcm3" count={upload.file_type_counts?.rtcm3} />
-                </td>
                 <td style={{ color: "var(--text-secondary)" }}>
-                  {upload.total_size_formatted}
+                  {group.sessions.length} session{group.sessions.length !== 1 ? "s" : ""}
                 </td>
                 <td>
-                  {upload.has_manifest ? (
-                    <span style={{ color: "var(--success)" }}>Yes</span>
-                  ) : (
-                    <span style={{ color: "var(--text-secondary)" }}>No</span>
-                  )}
+                  <SensorBadge type="nav" count={group.totalSensors.nav} />
+                  <SensorBadge type="imu" count={group.totalSensors.imu} />
+                  <SensorBadge type="wind" count={group.totalSensors.wind} />
                 </td>
               </tr>
             ))}
