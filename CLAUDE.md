@@ -170,12 +170,85 @@ Power:
 
 - NMEA parsing (GGA/RMC sentences from LG290P)
 - BNO085 reading at 20Hz with heel/pitch calculation
-- SD logging: CSV (human-readable) + raw binary (for PPK post-processing)
+- SD logging: CSV (human-readable) + raw RTCM3 binary (for PPK post-processing)
 - OLED status display (fix quality, satellites, heel, recording status)
 - Wi-Fi auto-upload to AWS S3 on yacht club network detection
 - Configuration loaded from SD card `config.txt`
-- **Libraries:** Adafruit SSD1306 + GFX (OLED), ESP32 by Espressif Systems board support
+- **Libraries:** Adafruit SSD1306 + GFX (OLED), NimBLE-Arduino (wind sensor BLE), ESP32 by Espressif Systems board support
 - **Arduino IDE:** ESP32 board support installed (v3.3.7)
+
+**Serial Commands:**
+| Command | Description |
+|---------|-------------|
+| `start` | Start recording session |
+| `stop` | Stop recording session |
+| `upload` | Manually trigger Wi-Fi upload |
+| `clearmarkers` | Delete `.uploaded` marker files to retry failed uploads |
+| `status` | Show current sensor status |
+| `gps` | Show GPS debug info |
+| `config` | Show current configuration |
+
+### E1 Wi-Fi Upload Architecture
+
+The E1 uses a two-tier upload strategy to handle API Gateway's 29-second timeout:
+
+| File Size | Method | Endpoint |
+|-----------|--------|----------|
+| < 1 MB | Direct POST | API Gateway → Lambda → S3 |
+| ≥ 1 MB | Presigned URL | API Gateway → Lambda (get URL) → Direct S3 PUT |
+
+**Upload flow for large files:**
+1. Request presigned URL via POST to `/upload?boat=E1&file=PATH&presign=1&size=BYTES`
+2. Lambda generates presigned S3 PUT URL (1-hour expiry)
+3. ESP32 uploads directly to S3 using plain HTTP (no TLS overhead)
+4. S3 accepts the upload with metadata (boat_id, original_path)
+
+**Why HTTP instead of HTTPS for S3:**
+- ESP32 TLS is slow and memory-constrained
+- Fleet data (GPS, IMU) is not sensitive
+- S3 supports both HTTP and HTTPS
+- Reduces upload time significantly for large RTCM3 files
+
+**Upload marker files:**
+- After successful upload, creates `filename.uploaded` marker
+- Prevents re-uploading same file on subsequent upload runs
+- Use `clearmarkers` command to delete markers and retry failed uploads
+
+### E1 BLE/Wi-Fi Radio Conflict
+
+**Critical:** ESP32 shares a single radio for both BLE and Wi-Fi. Running both
+simultaneously causes TLS handshake failures and connection timeouts.
+
+**Symptoms:**
+- HTTP error -1 (CONNECTION_REFUSED/TIMEOUT) during uploads
+- TLS failures even with good Wi-Fi signal
+- Intermittent connection drops
+
+**Solution — BLE deinit sequence before Wi-Fi operations:**
+```cpp
+// 1. Disconnect BLE client first
+if (pWindClient && pWindClient->isConnected()) {
+    pWindClient->disconnect();
+    delay(100);
+}
+
+// 2. Disconnect Wi-Fi if connected (before BLE deinit!)
+if (WiFi.status() == WL_CONNECTED) {
+    WiFi.disconnect(true);
+    delay(200);
+}
+
+// 3. Fully deinitialize BLE stack
+NimBLEDevice::deinit(false);  // MUST use false, not true!
+bleInitialized = false;
+delay(500);
+
+// 4. Now safe to use Wi-Fi
+WiFi.begin(ssid, password);
+```
+
+**Important:** `NimBLEDevice::deinit(true)` causes heap corruption crashes.
+Always use `deinit(false)` which preserves some internal state safely.
 
 ---
 
@@ -246,6 +319,56 @@ for ~5-10 second TTFF. Valuable given daily install/remove pattern where every b
 is a cold or warm start. Legacy developer tokens phasing out by May 2028.
 
 **Note:** Quectel LG290P has no equivalent free A-GNSS service. SBAS helps acquisition.
+
+### LG290P Configuration (E1)
+
+The Waveshare LG290P module uses Quectel's PQTM command protocol. Configuration
+is best done via **QGNSS on Windows** — PyGPSClient on macOS has limited support.
+
+**Hardware connections:**
+- USB-C port: For PC configuration (CH343 USB-serial chip)
+- UART SH1.0 connector: For ESP32 connection (TXD3/RXD3 at 460800 baud)
+- RST button: Single press reboots; no factory reset function
+
+**RTCM3 PPK configuration (saved to NVM via QGNSS):**
+```
+$PQTMCFGRTCM,W,7,0,-90,07,06,1,0*     # Enable MSM7 for all constellations
+$PQTMCFGMSGRATE,W,RTCM3-1019,1*       # GPS ephemeris
+$PQTMCFGMSGRATE,W,RTCM3-1020,1*       # GLONASS ephemeris
+$PQTMCFGMSGRATE,W,RTCM3-1042,1*       # BeiDou ephemeris
+$PQTMCFGMSGRATE,W,RTCM3-1046,1*       # Galileo ephemeris
+$PQTMCFGMSGRATE,W,RTCM3-1006,10*      # Station reference every 10 epochs
+$PQTMCFGCNST,W,1,1,1,1,1,1*           # Enable all constellations (GPS,GLO,GAL,BDS,QZSS,NavIC)
+$PQTMSAVEPAR*                          # Save to NVM
+$PQTMHOT*                              # Hot restart
+```
+
+**Firmware syntax note (AANR01A06S):** The `PQTMCFGMSGRATE` command uses TWO
+parameters (message, rate) — NOT three. Adding an offset parameter causes `ERROR,1`.
+
+**E1 firmware only configures NMEA at runtime** — RTCM3 config is pre-saved in NVM:
+```cpp
+void configureLG290P() {
+    sendPQTM("PQTMCFGMSGRATE,W,GGA,1");
+    sendPQTM("PQTMCFGMSGRATE,W,RMC,1");
+    sendPQTM("PQTMCFGMSGRATE,W,GSA,1");
+    sendPQTM("PQTMCFGMSGRATE,W,GSV,1");
+    // RTCM3 already configured via QGNSS and saved to NVM
+}
+```
+
+**RTCM3 messages output after configuration:**
+| RTCM3 ID | Content | Rate |
+|----------|---------|------|
+| 1077 | GPS MSM7 (pseudorange + phase + doppler + CNR) | Every epoch |
+| 1087 | GLONASS MSM7 | Every epoch |
+| 1097 | Galileo MSM7 | Every epoch |
+| 1127 | BeiDou MSM7 | Every epoch |
+| 1019 | GPS ephemeris | Periodic (~30s) |
+| 1020 | GLONASS ephemeris | Periodic |
+| 1042 | BeiDou ephemeris | Periodic |
+| 1046 | Galileo ephemeris | Periodic |
+| 1006 | Station reference position | Every 10 epochs |
 
 ### GPS Warm/Hot Start
 
@@ -723,6 +846,27 @@ contract or data schema, update this file so other sessions pick it up.
 10. **KiCad Footprint Editor** — access from the KiCad main project launcher,
     not from within the schematic editor.
 
+11. **ESP32 BLE/Wi-Fi radio conflict** — ESP32 has a single shared radio for BLE
+    and Wi-Fi. Both cannot operate reliably simultaneously. Must fully deinitialize
+    BLE before Wi-Fi uploads, then reinitialize BLE after. See E1 Wi-Fi Upload section.
+
+12. **NimBLEDevice::deinit(true) crashes** — calling `deinit(true)` causes heap
+    corruption and crashes. Always use `deinit(false)`. Also: disconnect Wi-Fi
+    BEFORE deinitializing BLE, not after.
+
+13. **macOS Spotlight files on SD card** — when SD card is inserted into Mac,
+    Spotlight creates `.Spotlight-V100` and `.fseventsd` directories. These are
+    harmless but appear in file listings. The firmware skips hidden files during upload.
+
+14. **LG290P PQTM command syntax** — firmware AANR01A06S uses two-parameter syntax
+    for `PQTMCFGMSGRATE` (message, rate). Three-parameter syntax (with offset)
+    returns `ERROR,1`. PyGPSClient on macOS has limited LG290P support — use QGNSS
+    on Windows for configuration.
+
+15. **API Gateway 29-second timeout** — Lambda functions behind API Gateway have
+    a hard 29-second timeout. Large file uploads fail with HTTP -3 (SEND_PAYLOAD_FAILED).
+    Solution: use presigned S3 URLs for files ≥1MB.
+
 ---
 
 ## Weather Data Integration
@@ -755,9 +899,9 @@ Competitive analysis is maintained separately.
 
 ## Tools & Resources
 
-- **GNSS:** u-center (ZED-F9P config/logging), RTKLIB (PPK post-processing),
-  GNSS View app (satellite visibility diagnostics), pyubx2 (UBX binary parsing),
-  NOAA UFCORS (free base station data)
+- **GNSS:** u-center (ZED-F9P config/logging), QGNSS (LG290P config, Windows only),
+  RTKLIB (PPK post-processing), GNSS View app (satellite visibility diagnostics),
+  pyubx2 (UBX binary parsing), NOAA UFCORS (free base station data)
 - **Development:** Arduino IDE (ESP32), KiCad (schematic + PCB),
   Freerouting (autorouter), JLCPCB (PCB fabrication)
 - **Cloud/data:** AWS S3, AWS Lambda, PostgreSQL
@@ -781,7 +925,14 @@ Competitive analysis is maintained separately.
 - March 30, 2026: Updated CLAUDE.md — added E1 hardware/firmware/wiring, PPK strategy,
   Newhaven display, NVMe storage, power bank, BNO085 calibration, analytics roadmap,
   removed competitor brand names, corrected stale hardware references
+- April 4, 2026: E1 Wi-Fi upload fixes and LG290P configuration
+  - Fixed ESP32 BLE/Wi-Fi radio conflict (must deinit BLE before Wi-Fi uploads)
+  - Implemented presigned S3 URLs for large files (bypass API Gateway timeout)
+  - Switched to HTTP for S3 uploads (faster, no TLS overhead for non-sensitive data)
+  - Added `clearmarkers` command to retry failed uploads
+  - Documented LG290P RTCM3 configuration via QGNSS (PyGPSClient has limited support)
+  - Added NimBLEDevice::deinit(false) requirement (deinit(true) causes heap corruption)
 
 ---
 
-*Last updated: April 1, 2026 — Unified S1/E1 S3 bucket (sailframes-fleet-data-prod)*
+*Last updated: April 4, 2026 — E1 Wi-Fi upload fixes, presigned S3 URLs, LG290P RTCM3 config*
