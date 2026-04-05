@@ -90,7 +90,7 @@ export default function E1DateDetail() {
   }, [deviceId, date]);
 
   // Group files by session and merge with session metadata
-  const sessionGroups = useMemo(() => {
+  const { sessionsWithTime, sessionsWithoutTime } = useMemo(() => {
     // Group files by session identifier extracted from filename
     const filesBySession = {};
 
@@ -112,7 +112,8 @@ export default function E1DateDetail() {
     }
 
     // Match with session metadata (which has correct times from GPS data)
-    const result = [];
+    const withTime = [];
+    const withoutTime = [];
 
     for (const session of sessions) {
       // Session ID in API might be "s001" or "s001-000061" depending on processing
@@ -124,7 +125,7 @@ export default function E1DateDetail() {
       const fileGroup = filesBySession[baseSessionId] || filesBySession[session.session_id];
 
       if (fileGroup) {
-        result.push({
+        const sessionData = {
           sessionId: session.session_id,
           displayName: baseSessionId,
           startTime: session.start_time,
@@ -139,7 +140,13 @@ export default function E1DateDetail() {
           totalSize: fileGroup.totalSize,
           fileTypes: Array.from(fileGroup.fileTypes),
           sensors: session.sensors || {},
-        });
+        };
+
+        if (session.start_time) {
+          withTime.push(sessionData);
+        } else {
+          withoutTime.push(sessionData);
+        }
 
         // Mark as used
         delete filesBySession[baseSessionId];
@@ -147,9 +154,9 @@ export default function E1DateDetail() {
       }
     }
 
-    // Add any remaining file groups that didn't match a session
+    // Add any remaining file groups that didn't match a session (no GPS time)
     for (const [key, fileGroup] of Object.entries(filesBySession)) {
-      result.push({
+      withoutTime.push({
         sessionId: key,
         displayName: key,
         startTime: null,
@@ -167,15 +174,13 @@ export default function E1DateDetail() {
       });
     }
 
-    // Sort by start time (sessions with times first, then by session ID)
-    return result.sort((a, b) => {
-      if (a.startTime && b.startTime) {
-        return a.startTime.localeCompare(b.startTime);
-      }
-      if (a.startTime) return -1;
-      if (b.startTime) return 1;
-      return (a.sessionId || "").localeCompare(b.sessionId || "");
-    });
+    // Sort sessions with time by start time (earliest first)
+    withTime.sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+    // Sort sessions without time by session ID
+    withoutTime.sort((a, b) => (a.sessionId || "").localeCompare(b.sessionId || ""));
+
+    return { sessionsWithTime: withTime, sessionsWithoutTime: withoutTime };
   }, [files, sessions]);
 
   const handleViewInDashboard = (sessionId) => {
@@ -208,22 +213,23 @@ export default function E1DateDetail() {
         <div className="loading">Loading...</div>
       ) : error ? (
         <div style={{ color: "var(--danger)" }}>Error: {error}</div>
-      ) : sessionGroups.length === 0 ? (
+      ) : sessionsWithTime.length === 0 && sessionsWithoutTime.length === 0 ? (
         <div style={{ color: "var(--text-secondary)", padding: 20 }}>
           No sessions found for this date.
         </div>
       ) : (
-        <div className="sessions-list">
-          {sessionGroups.map((session) => (
-            <div key={session.sessionId} className="session-card">
-              <div className="session-header">
-                <div className="session-id">
-                  <span className="session-label">Session</span>
-                  <span className="session-name">{session.displayName}</span>
-                </div>
-                <div className="session-time">
-                  {session.startTimeBoston && session.endTimeBoston ? (
-                    <>
+        <>
+          {/* Sessions with GPS time - sorted by local time */}
+          {sessionsWithTime.length > 0 && (
+            <div className="sessions-list">
+              {sessionsWithTime.map((session) => (
+                <div key={session.sessionId} className="session-card">
+                  <div className="session-header">
+                    <div className="session-id">
+                      <span className="session-label">Session</span>
+                      <span className="session-name">{session.displayName}</span>
+                    </div>
+                    <div className="session-time">
                       <span className="time-local">
                         {session.startTimeBoston} — {session.endTimeBoston} {session.timezoneAbbr}
                       </span>
@@ -231,42 +237,98 @@ export default function E1DateDetail() {
                         ({session.startTimeUtc} — {session.endTimeUtc} UTC)
                         {session.durationMinutes && ` · ${session.durationMinutes} min`}
                       </span>
-                    </>
-                  ) : (
-                    <span className="time-utc">Not yet processed</span>
-                  )}
-                </div>
-              </div>
+                    </div>
+                  </div>
 
-              <div className="session-details">
-                <div className="session-files">
-                  {session.fileTypes.map((type) => (
-                    <span
-                      key={type}
-                      className="file-type-badge"
-                      style={{
-                        background: FILE_TYPE_COLORS[type] || FILE_TYPE_COLORS.other,
-                        color: type === "wind" ? "#000" : "#fff",
-                      }}
+                  <div className="session-details">
+                    <div className="session-files">
+                      {session.fileTypes.map((type) => (
+                        <span
+                          key={type}
+                          className="file-type-badge"
+                          style={{
+                            background: FILE_TYPE_COLORS[type] || FILE_TYPE_COLORS.other,
+                            color: type === "wind" ? "#000" : "#fff",
+                          }}
+                        >
+                          {type.toUpperCase()}
+                        </span>
+                      ))}
+                      <span className="file-count">
+                        {session.files.length} file{session.files.length !== 1 ? "s" : ""}
+                      </span>
+                      <span className="file-size">{formatBytes(session.totalSize)}</span>
+                    </div>
+                    <button
+                      onClick={() => handleViewInDashboard(session.sessionId)}
+                      style={{ fontSize: 12, padding: "6px 12px" }}
                     >
-                      {type.toUpperCase()}
-                    </span>
-                  ))}
-                  <span className="file-count">
-                    {session.files.length} file{session.files.length !== 1 ? "s" : ""}
-                  </span>
-                  <span className="file-size">{formatBytes(session.totalSize)}</span>
+                      View in Dashboard
+                    </button>
+                  </div>
                 </div>
-                <button
-                  onClick={() => handleViewInDashboard(session.sessionId)}
-                  style={{ fontSize: 12, padding: "6px 12px" }}
-                >
-                  View in Dashboard
-                </button>
-              </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+
+          {/* Sessions without GPS time - shown in separate section below */}
+          {sessionsWithoutTime.length > 0 && (
+            <>
+              <div style={{
+                marginTop: sessionsWithTime.length > 0 ? 24 : 0,
+                marginBottom: 12,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px"
+              }}>
+                No GPS Time Available
+              </div>
+              <div className="sessions-list">
+                {sessionsWithoutTime.map((session) => (
+                  <div key={session.sessionId} className="session-card" style={{ opacity: 0.7 }}>
+                    <div className="session-header">
+                      <div className="session-id">
+                        <span className="session-label">Session</span>
+                        <span className="session-name">{session.displayName}</span>
+                      </div>
+                      <div className="session-time">
+                        <span className="time-utc">Not yet processed</span>
+                      </div>
+                    </div>
+
+                    <div className="session-details">
+                      <div className="session-files">
+                        {session.fileTypes.map((type) => (
+                          <span
+                            key={type}
+                            className="file-type-badge"
+                            style={{
+                              background: FILE_TYPE_COLORS[type] || FILE_TYPE_COLORS.other,
+                              color: type === "wind" ? "#000" : "#fff",
+                            }}
+                          >
+                            {type.toUpperCase()}
+                          </span>
+                        ))}
+                        <span className="file-count">
+                          {session.files.length} file{session.files.length !== 1 ? "s" : ""}
+                        </span>
+                        <span className="file-size">{formatBytes(session.totalSize)}</span>
+                      </div>
+                      <button
+                        onClick={() => handleViewInDashboard(session.sessionId)}
+                        style={{ fontSize: 12, padding: "6px 12px" }}
+                      >
+                        View in Dashboard
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
       )}
     </div>
   );
