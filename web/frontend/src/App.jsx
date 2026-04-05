@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { NavLink, Routes, Route } from "react-router-dom";
 import { API_URL } from "./config";
+import { utcToBostonDate, formatBostonTimeRange, getBostonTimezoneAbbr } from "./timeUtils";
 import SessionBrowser from "../components/SessionBrowser";
 import MapPlayer from "../components/MapPlayer";
 import VideoPlayer from "../components/VideoPlayer";
@@ -187,11 +188,23 @@ function OverviewPage({ session, analysis, sensorData }) {
   const stats = analysis?.session_stats || {};
   const summary = analysis?.maneuver_summary || {};
 
+  // Format session time in Boston time
+  const localDate = utcToBostonDate(session.start_time) || session.date;
+  const timeRange = formatBostonTimeRange(session.start_time, session.end_time);
+  const tzAbbr = getBostonTimezoneAbbr(session.start_time);
+
   return (
     <div>
       <div className="panel">
         <div className="panel-header">
-          <h2>Session: {session.date} — {session.device_id}</h2>
+          <div>
+            <h2>Session: {localDate}</h2>
+            <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 4 }}>
+              {session.device_id}
+              {session.session_id && ` · ${session.session_id}`}
+              {timeRange && ` · ${timeRange} ${tzAbbr}`}
+            </div>
+          </div>
         </div>
         <div className="grid-3">
           <div className="stat-card">

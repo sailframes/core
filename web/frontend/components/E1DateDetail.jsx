@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import { API_URL } from "../src/config";
+import { utcHHMMSSToBoston, getBostonTimezoneAbbr } from "../src/timeUtils";
 
 // Extract session info from E1 filename
 // Patterns: E1_s001_000061_nav.csv, E1_boot17_122131_nav.csv
@@ -30,28 +31,13 @@ function parseFilename(filename) {
   return { sessionId, timeStr };
 }
 
-// Convert HHMMSS to readable time
-function formatTime(timeStr) {
+// Convert HHMMSS to readable UTC time
+function formatTimeUtc(timeStr) {
   if (!timeStr || timeStr.length !== 6) return null;
   const hh = timeStr.slice(0, 2);
   const mm = timeStr.slice(2, 4);
   const ss = timeStr.slice(4, 6);
   return `${hh}:${mm}:${ss}`;
-}
-
-// Convert UTC time string to local time
-function utcToLocal(utcTimeStr, date) {
-  if (!utcTimeStr) return null;
-  try {
-    const dt = new Date(`${date}T${utcTimeStr}Z`);
-    return dt.toLocaleTimeString("en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true
-    });
-  } catch {
-    return utcTimeStr;
-  }
 }
 
 // Get file type from filename
@@ -135,10 +121,11 @@ export default function E1DateDetail() {
 
         return {
           ...session,
-          startTimeUtc: formatTime(startTimeUtc),
-          endTimeUtc: formatTime(endTimeUtc),
-          startTimeLocal: utcToLocal(formatTime(startTimeUtc), date),
-          endTimeLocal: utcToLocal(formatTime(endTimeUtc), date),
+          startTimeUtc: formatTimeUtc(startTimeUtc),
+          endTimeUtc: formatTimeUtc(endTimeUtc),
+          startTimeBoston: utcHHMMSSToBoston(startTimeUtc, date),
+          endTimeBoston: utcHHMMSSToBoston(endTimeUtc, date),
+          timezoneAbbr: getBostonTimezoneAbbr(`${date}T${formatTimeUtc(startTimeUtc) || "12:00:00"}Z`),
           fileTypes: Array.from(session.fileTypes),
         };
       })
@@ -189,10 +176,10 @@ export default function E1DateDetail() {
                   <span className="session-name">{session.sessionId}</span>
                 </div>
                 <div className="session-time">
-                  {session.startTimeLocal && session.endTimeLocal ? (
+                  {session.startTimeBoston && session.endTimeBoston ? (
                     <>
                       <span className="time-local">
-                        {session.startTimeLocal} — {session.endTimeLocal}
+                        {session.startTimeBoston} — {session.endTimeBoston} {session.timezoneAbbr}
                       </span>
                       <span className="time-utc">
                         ({session.startTimeUtc} — {session.endTimeUtc} UTC)
