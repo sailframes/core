@@ -109,27 +109,48 @@ void sendPQTM(const char* body) {
   for (int i = 0; body[i] != '\0'; i++) cs ^= body[i];
   char buf[128];
   snprintf(buf, sizeof(buf), "$%s*%02X\r\n", body, cs);
+
+  // Flush any pending data before sending
+  while (Serial2.available()) Serial2.read();
+
   Serial2.print(buf);
   Serial.printf("[CMD] %s", buf);
 
-  // Wait for and print response
-  delay(150);
+  // Wait longer for response (some commands take time)
+  delay(100);
+
+  // Read all response lines (may be multiple)
   char resp[256];
   int idx = 0;
+  int lineCount = 0;
   unsigned long start = millis();
-  while (millis() - start < 200 && idx < (int)sizeof(resp) - 1) {
+
+  while (millis() - start < 500 && lineCount < 3) {
     if (Serial2.available()) {
       char c = Serial2.read();
-      if (c == '\n' || c == '\r') {
-        if (idx > 0) break;  // End of response line
-      } else {
+      if (c == '\n') {
+        if (idx > 0) {
+          resp[idx] = '\0';
+          // Check for PQTM response (not NMEA)
+          if (resp[0] == '$' && resp[1] == 'P') {
+            Serial.printf("[RSP] %s\n", resp);
+            // Check for error response
+            if (strstr(resp, "ERROR") || strstr(resp, "NACK")) {
+              Serial.println("[GPS] WARNING: Command failed!");
+            }
+          }
+          idx = 0;
+          lineCount++;
+        }
+      } else if (c != '\r' && idx < (int)sizeof(resp) - 1) {
         resp[idx++] = c;
       }
     }
   }
-  resp[idx] = '\0';
-  if (idx > 0) {
-    Serial.printf("[RSP] %s\n", resp);
+
+  // Show if no response received
+  if (lineCount == 0) {
+    Serial.println("[RSP] (no response)");
   }
 }
 
@@ -220,6 +241,13 @@ bool wifiConnected = false;
 bool otaInProgress = false;
 char connectedSSID[64] = "";
 int uploadCount = 0, uploadTotal = 0;
+
+// Get WiFi indicator based on connected SSID
+const char* getWifiIndicator() {
+  if (strcmp(connectedSSID, "Home-IOT") == 0) return "WH";
+  if (strcmp(connectedSSID, "paul") == 0) return "WP";
+  return "W";  // Default for other networks
+}
 int satsInView = 0;
 // GSV constellation counts (satellites in view per system)
 int gsvGP = 0, gsvGL = 0, gsvGA = 0, gsvGB = 0, gsvGQ = 0, gsvGI = 0;
@@ -247,6 +275,23 @@ bool bleInitialized = false;  // Track BLE init state for safe deinit
 unsigned long totalBytes = 0;
 unsigned long rtcmFrameCount = 0;  // Count RTCM3 frames for debugging
 unsigned long rtcmSyncCount = 0;   // Count 0xD3 sync bytes seen (debug)
+
+// RTCM3 message type counters for PPK debugging
+unsigned long rtcm1006Count = 0;   // Reference station ARP
+unsigned long rtcm1019Count = 0;   // GPS ephemeris
+unsigned long rtcm1020Count = 0;   // GLONASS ephemeris
+unsigned long rtcm1042Count = 0;   // BeiDou ephemeris
+unsigned long rtcm1046Count = 0;   // Galileo ephemeris
+unsigned long rtcm1074Count = 0;   // GPS MSM4 (fallback if MSM7 not enabled)
+unsigned long rtcm1084Count = 0;   // GLONASS MSM4
+unsigned long rtcm1094Count = 0;   // Galileo MSM4
+unsigned long rtcm1124Count = 0;   // BeiDou MSM4
+unsigned long rtcm1077Count = 0;   // GPS MSM7 (needed for PPK!)
+unsigned long rtcm1087Count = 0;   // GLONASS MSM7 (needed for PPK!)
+unsigned long rtcm1097Count = 0;   // Galileo MSM7 (needed for PPK!)
+unsigned long rtcm1127Count = 0;   // BeiDou MSM7 (needed for PPK!)
+unsigned long rtcmOtherCount = 0;  // Other message types
+uint16_t rtcmLastType = 0;         // Last message type seen
 char nmeaBuf[256];
 int nmeaIdx = 0;
 
@@ -718,6 +763,36 @@ void setup() {
     Serial.println("[GPS]   - GPS power and antenna");
   }
 
+  // Send CFGRTCM command on every boot to enable MSM7 output
+  // This command IS accepted via UART (unlike CFGMSGRATE for MSM7)
+  // Format: $PQTMCFGRTCM,W,<mode>,<minElev>,<minCN0>,<outMask>,<inMask>,<base>,<ref>*checksum
+  // mode=7 (rover+base), outMask=07 (MSM7), inMask=06, base=1, ref=0
+  // paulout - Serial.println("[GPS] Sending CFGRTCM for MSM7 output...");
+  // paulout -   delay(500);  // Short delay before command
+  // paulout -   Serial2.println("$PQTMCFGRTCM,W,7,0,-90,07,06,1,0*26");
+  // paulout -   delay(500);  // Wait for response
+
+  // Check for response
+  String rtcmResp = "";
+  unsigned long respStart = millis();
+  while (millis() - respStart < 500) {
+    while (Serial2.available()) {
+      char c = Serial2.read();
+      if (c == '$' || rtcmResp.length() > 0) {
+        rtcmResp += c;
+        if (c == '\n') break;
+      }
+    }
+    if (rtcmResp.endsWith("\n")) break;
+    delay(1);
+  }
+  if (rtcmResp.length() > 0) {
+    rtcmResp.trim();
+    Serial.printf("[GPS] CFGRTCM response: %s\n", rtcmResp.c_str());
+  } else {
+    Serial.println("[GPS] CFGRTCM: No response (may still work)");
+  }
+
   delay(500);
   configureLG290P();
 
@@ -778,58 +853,82 @@ void setup() {
 // This function only configures NMEA messages and fix rate at runtime.
 //
 // Saved NVM config (via QGNSS):
-//   - MSM7: 1077 (GPS), 1087 (GLO), 1097 (GAL), 1127 (BDS)
-//   - Ephemeris: 1019, 1020, 1042, 1046
-//   - Station ref: 1006 (every 10 epochs)
+// LG290P requires BASE STATION MODE for MSM output.
+// MSM4 (1074/1084/1094/1124) is output even when MSM7 is requested.
+// MSM4 is sufficient for centimeter-level PPK with RTKLIB.
+//
+// CFGRTCM does NOT persist — must be sent every boot.
+// Do NOT save or restart after CFGRTCM.
 // ============================================================
 void configureLG290P() {
-  Serial.println("[GPS] Configuring LG290P...");
+  Serial.println("[GPS] Configuring LG290P for PPK...");
 
-  // NMEA messages (essential for position data parsing)
-  // Syntax: PQTMCFGMSGRATE,W,<msg>,<rate> — NO offset parameter on AANR01A06S
-  sendPQTM("PQTMCFGMSGRATE,W,GGA,1");   // Position + fix quality
-  sendPQTM("PQTMCFGMSGRATE,W,RMC,1");   // Speed + course + date
-  sendPQTM("PQTMCFGMSGRATE,W,GSA,1");   // Satellites used
-  sendPQTM("PQTMCFGMSGRATE,W,GSV,1");   // Satellites in view
+  // Step 1: Query firmware version
+  Serial.println("[GPS] Querying firmware version...");
+  sendPQTM("PQTMVERNO");
 
-  // RTCM3 MSM7 configuration for PPK
-  // Use PQTMCFGRTCM to enable MSM7 globally (not PQTMCFGMSGRATE for individual messages)
-  // Parameters: MSMType=7, Reserved=0, ElevMask=-90, GNSSMask=07, SigMask=06, Smoothing=1, Reserved=0
-  Serial.println("[GPS] Enabling RTCM3 MSM7...");
-  sendPQTM("PQTMCFGRTCM,W,7,0,-90,07,06,1,0");
+  // Step 2: Check current receiver mode
+  Serial.println("[GPS] Checking receiver mode...");
+  sendPQTM("PQTMCFGRCVRMODE,R");
+  delay(300);
 
-  // Ephemeris messages — use rate only, NO offset parameter
+  // Step 3: Set base station mode if not already set
+  // This enables MSM output capability
+  // Mode 2 = base station (required for MSM output)
+  Serial.println("[GPS] Setting base station mode for MSM output...");
+  sendPQTM("PQTMCFGRCVRMODE,W,2");
+  delay(200);
+
+  // Step 4: Enable RTCM3 protocol on UART2 and UART3
+  Serial.println("[GPS] Enabling RTCM3 protocol on UARTs...");
+  sendPQTM("PQTMCFGPROT,W,1,3,00000005,00000005");  // UART3
+  sendPQTM("PQTMCFGPROT,W,1,2,00000005,00000005");  // UART2
+
+  // Step 5: Re-enable NMEA messages (off by default in base mode)
+  // These are needed for OLED display (SOG, COG from RMC)
+  Serial.println("[GPS] Enabling NMEA messages...");
+  sendPQTM("PQTMCFGMSGRATE,W,GGA,1");
+  sendPQTM("PQTMCFGMSGRATE,W,RMC,1");
+  sendPQTM("PQTMCFGMSGRATE,W,GSA,1");
+  sendPQTM("PQTMCFGMSGRATE,W,GSV,1");
+
+  // Step 6: Enable ephemeris messages
   Serial.println("[GPS] Enabling ephemeris messages...");
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1019,1");  // GPS ephemeris
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1020,1");  // GLONASS ephemeris
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1042,1");  // BeiDou ephemeris
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1046,1");  // Galileo ephemeris
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1019,1");  // GPS
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1020,1");  // GLONASS
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1042,1");  // BeiDou
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1046,1");  // Galileo
 
-  // Station reference position every 10 epochs
-  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1006,10");
-
-  // Fix rate (ms per fix)
-  char cmd[64];
-  snprintf(cmd, sizeof(cmd), "PQTMCFGFIXRATE,W,%d", 1000 / config.gps_rate_hz);
-  sendPQTM(cmd);
-
-  // Save configuration to NVM
+  // Step 7: Save NVM and restart to apply base station mode
   Serial.println("[GPS] Saving to NVM...");
   sendPQTM("PQTMSAVEPAR");
   delay(500);
 
-  // Hot restart to apply all changes
   Serial.println("[GPS] Restarting module...");
-  sendPQTM("PQTMHOT");
-  delay(2000);
+  sendPQTM("PQTMSRR");  // Full restart (not hot restart)
+  delay(6000);  // Wait for module to fully restart
+
+  // Drain any buffered data after restart
   while (Serial2.available()) Serial2.read();
 
+  // Step 8: Send CFGRTCM for MSM output — MUST be after restart
+  // This command does NOT persist in NVM — must send every boot
+  // Do NOT save or restart after this command
+  Serial.println("[GPS] Enabling MSM output (RAM only)...");
+  sendPQTM("PQTMCFGRTCM,W,7,0,-90,07,06,1,0");
+  delay(200);
+
+  // Step 9: Verify configuration
+  Serial.println("[GPS] Verifying configuration...");
+  sendPQTM("PQTMCFGRCVRMODE,R");
+  sendPQTM("PQTMCFGRTCM,R");
+
   Serial.println("[GPS] Configuration complete:");
-  Serial.println("[GPS]   NMEA: GGA, RMC, GSA, GSV");
-  Serial.println("[GPS]   RTCM3: MSM7 (1077/1087/1097/1127)");
+  Serial.println("[GPS]   Mode: Base station (for MSM output)");
+  Serial.println("[GPS]   NMEA: GGA, RMC, GSA, GSV (for OLED)");
+  Serial.println("[GPS]   RTCM3: MSM4 (1074/1084/1094/1124)");
   Serial.println("[GPS]   Ephemeris: 1019, 1020, 1042, 1046");
-  Serial.println("[GPS]   Station ref: 1006 (every 10 epochs)");
-  Serial.printf("[GPS]   Rate: %d Hz\n", config.gps_rate_hz);
+  Serial.println("[GPS]   Note: SOG/COG work in base mode (Doppler-based)");
 }
 
 // ============================================================
@@ -875,6 +974,36 @@ void readGPS() {
           rawFile.write(rtcm.frameBuf, rtcm.frameTotal);
         totalBytes += rtcm.frameTotal;
         rtcmFrameCount++;
+
+        // Decode RTCM3 message type from first 12 bits of payload (bytes 3-4)
+        // Message type = (byte3 << 4) | (byte4 >> 4)
+        uint16_t msgType = ((uint16_t)rtcm.frameBuf[3] << 4) | (rtcm.frameBuf[4] >> 4);
+        rtcmLastType = msgType;
+
+        // Count by message type and print to Serial for debugging
+        switch (msgType) {
+          case 1006: rtcm1006Count++; break;
+          case 1019: rtcm1019Count++; break;
+          case 1020: rtcm1020Count++; break;
+          case 1042: rtcm1042Count++; break;
+          case 1046: rtcm1046Count++; break;
+          case 1074: rtcm1074Count++; break;  // GPS MSM4
+          case 1084: rtcm1084Count++; break;  // GLONASS MSM4
+          case 1094: rtcm1094Count++; break;  // Galileo MSM4
+          case 1124: rtcm1124Count++; break;  // BeiDou MSM4
+          case 1077: rtcm1077Count++; break;  // GPS MSM7
+          case 1087: rtcm1087Count++; break;  // GLONASS MSM7
+          case 1097: rtcm1097Count++; break;  // Galileo MSM7
+          case 1127: rtcm1127Count++; break;  // BeiDou MSM7
+          default: rtcmOtherCount++; break;
+        }
+
+        // Debug output: show message type on Serial (every 10th frame to reduce spam)
+        if (rtcmFrameCount % 10 == 1 || msgType >= 1077) {
+          Serial.printf("[RTCM3] Type %u, len=%u, total frames=%lu\n",
+            msgType, rtcm.frameTotal, rtcmFrameCount);
+        }
+
         rtcm.state = RTCM3Parser::WAIT_SYNC;
       }
       continue;
@@ -1005,9 +1134,10 @@ void parseNMEA(const char* s) {
 // ============================================================
 // BATTERY MONITORING (PowerBoost 1000C)
 // ============================================================
-// Voltage divider: 2x 200Ω resistors, ratio = 2.0
+// Voltage divider: 2x 200Ω resistors
+// Calibrated ratio: 2.27 (measured 4.05V actual vs 3.57V reported with 2.0)
 // TODO: Replace with 100kΩ resistors to reduce idle current
-const float BATT_DIVIDER_RATIO = 2.0;
+const float BATT_DIVIDER_RATIO = 2.27;
 
 void setupBattery() {
   // GPIO35 is input-only, no internal pull-up available
@@ -1040,11 +1170,33 @@ float readBatteryVoltage() {
 }
 
 int getBatteryPercent(float voltage) {
-  // LiPo discharge curve (approximate linear mapping)
-  // 4.2V = 100%, 3.7V = ~50%, 3.0V = 0%
-  if (voltage >= 4.2) return 100;
-  if (voltage <= 3.0) return 0;
-  return (int)((voltage - 3.0) / 1.2 * 100);
+  // Li-ion discharge curve (non-linear lookup table)
+  // Based on typical 18650 discharge profile
+  // Voltage drops quickly at start and end, flat in middle
+  static const float voltageTable[] = {
+    4.20, 4.15, 4.10, 4.05, 4.00, 3.90, 3.80, 3.70, 3.60, 3.50, 3.40, 3.30
+  };
+  static const int percentTable[] = {
+    100,   95,   85,   75,   65,   50,   35,   20,   12,    6,    2,    0
+  };
+  static const int tableSize = sizeof(voltageTable) / sizeof(voltageTable[0]);
+
+  if (voltage >= voltageTable[0]) return 100;
+  if (voltage <= voltageTable[tableSize - 1]) return 0;
+
+  // Find bracketing points and interpolate
+  for (int i = 0; i < tableSize - 1; i++) {
+    if (voltage >= voltageTable[i + 1]) {
+      float vHigh = voltageTable[i];
+      float vLow = voltageTable[i + 1];
+      int pHigh = percentTable[i];
+      int pLow = percentTable[i + 1];
+      // Linear interpolation between points
+      float ratio = (voltage - vLow) / (vHigh - vLow);
+      return pLow + (int)(ratio * (pHigh - pLow));
+    }
+  }
+  return 0;
 }
 
 bool isBatteryCritical() {
@@ -1599,7 +1751,7 @@ void startLogging() {
   if (navFile) {
     logging = true;
     logStart = millis();
-    navFile.println("ms,utc,lat,lon,alt,sog,cog,sat,hdop,fix");
+    navFile.println("ms,utc,lat,lon,alt,sog,cog,sat,hdop,fix,gps_date");
     navFile.flush();
     if (imuFile) {
       imuFile.println("ms,utc,ax,ay,az,gx,gy,gz,heel,pitch");
@@ -1632,10 +1784,10 @@ void startLogging() {
 void logNav() {
   if (!navFile || !logging) return;
   unsigned long e = millis() - logStart;
-  navFile.printf("%lu,%s,%.10f,%.10f,%.3f,%.3f,%.2f,%d,%.2f,%d\n",
+  navFile.printf("%lu,%s,%.10f,%.10f,%.3f,%.3f,%.2f,%d,%.2f,%d,%s\n",
     e, gps.utc_time, gps.lat, gps.lon, gps.alt,
-    gps.speed_kts, gps.course, gps.satellites, gps.hdop, gps.fix_quality);
-  totalBytes += 80;
+    gps.speed_kts, gps.course, gps.satellites, gps.hdop, gps.fix_quality, gps.date);
+  totalBytes += 90;
 }
 
 void logIMU() {
@@ -1724,7 +1876,7 @@ void updateDisplayD1() {
   char statusStr[16] = "";
   strcat(statusStr, recStr);
   if (uploading) strcat(statusStr, " UP");
-  else if (wifiConnected) strcat(statusStr, " W");
+  else if (wifiConnected) { strcat(statusStr, " "); strcat(statusStr, getWifiIndicator()); }
 #if ENABLE_WIND
   if (wind.connected) strcat(statusStr, " C");
 #endif
@@ -1815,7 +1967,7 @@ void updateDisplayD2() {
   char statusStr[16] = "";
   strcat(statusStr, recStr);
   if (uploading) strcat(statusStr, " UP");
-  else if (wifiConnected) strcat(statusStr, " W");
+  else if (wifiConnected) { strcat(statusStr, " "); strcat(statusStr, getWifiIndicator()); }
 #if ENABLE_WIND
   if (wind.connected) strcat(statusStr, " C");
 #endif
@@ -2559,8 +2711,18 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintf("IMU: %s (heel:%.0f pitch:%.0f)\n",
       imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE", imu.heel, imu.pitch);
     tprintf("SD:  %s\n", sdOK ? "OK" : "FAILED");
+    tprintf("Battery: %.2fV (%d%%)%s\n", battery.voltage, battery.percent,
+      battery.critical ? " CRITICAL!" : "");
     tprintf("Logging: %s\n", logging ? "YES" : "NO");
     tprintf("Data: %lu KB, RTCM: %lu frames (0xD3: %lu)\n", totalBytes / 1024, rtcmFrameCount, rtcmSyncCount);
+    tprintf("RTCM3 MSM7: 1077=%lu 1087=%lu 1097=%lu 1127=%lu\n",
+      rtcm1077Count, rtcm1087Count, rtcm1097Count, rtcm1127Count);
+    tprintf("RTCM3 MSM4: 1074=%lu 1084=%lu 1094=%lu 1124=%lu\n",
+      rtcm1074Count, rtcm1084Count, rtcm1094Count, rtcm1124Count);
+    tprintf("RTCM3 Eph:  1019=%lu 1020=%lu 1042=%lu 1046=%lu\n",
+      rtcm1019Count, rtcm1020Count, rtcm1042Count, rtcm1046Count);
+    tprintf("RTCM3 Ref:  1006=%lu, Other=%lu, Last=%u\n",
+      rtcm1006Count, rtcmOtherCount, rtcmLastType);
     tprintf("WiFi: %s\n", wifiConnected ? connectedSSID : "disconnected");
     if (wifiConnected) {
       tprintf("IP: %s\n", WiFi.localIP().toString().c_str());
@@ -3147,12 +3309,71 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintf("Start threshold: >%.1f kt for %d sec\n", config.start_speed_knots, config.start_delay_sec);
     tprintf("Stop threshold: <%.1f kt for %d sec\n", config.stop_speed_knots, config.stop_delay_sec);
 
+  } else if (cmd == "rtcm") {
+    // Detailed RTCM3 debug info for PPK troubleshooting
+    tprintln("=== RTCM3 Debug ===");
+    tprintf("Total frames: %lu (0xD3 syncs: %lu)\n", rtcmFrameCount, rtcmSyncCount);
+    tprintln("");
+    tprintln("MSM7 Observations (REQUIRED for PPK):");
+    tprintf("  1077 GPS:     %lu\n", rtcm1077Count);
+    tprintf("  1087 GLONASS: %lu\n", rtcm1087Count);
+    tprintf("  1097 Galileo: %lu\n", rtcm1097Count);
+    tprintf("  1127 BeiDou:  %lu\n", rtcm1127Count);
+    tprintln("");
+    tprintln("MSM4 Observations (fallback, less precise):");
+    tprintf("  1074 GPS:     %lu\n", rtcm1074Count);
+    tprintf("  1084 GLONASS: %lu\n", rtcm1084Count);
+    tprintf("  1094 Galileo: %lu\n", rtcm1094Count);
+    tprintf("  1124 BeiDou:  %lu\n", rtcm1124Count);
+    tprintln("");
+    tprintln("Ephemeris:");
+    tprintf("  1019 GPS:     %lu\n", rtcm1019Count);
+    tprintf("  1020 GLONASS: %lu\n", rtcm1020Count);
+    tprintf("  1042 BeiDou:  %lu\n", rtcm1042Count);
+    tprintf("  1046 Galileo: %lu\n", rtcm1046Count);
+    tprintln("");
+    tprintf("Reference station (1006): %lu\n", rtcm1006Count);
+    tprintf("Other messages: %lu\n", rtcmOtherCount);
+    tprintf("Last message type: %u\n", rtcmLastType);
+    tprintln("");
+    if (rtcm1077Count == 0 && rtcm1087Count == 0 && rtcm1097Count == 0 && rtcm1127Count == 0) {
+      tprintln("WARNING: No MSM7 messages received!");
+      tprintln("PPK post-processing will FAIL.");
+      tprintln("Run 'gpscfg' to reconfigure LG290P.");
+    } else {
+      tprintln("MSM7 data is being received - PPK should work.");
+    }
+    tprintln("==================");
+
+  } else if (cmd == "rtcmreset") {
+    // Reset RTCM3 counters for fresh debugging
+    rtcmFrameCount = 0;
+    rtcmSyncCount = 0;
+    rtcm1006Count = 0;
+    rtcm1019Count = 0;
+    rtcm1020Count = 0;
+    rtcm1042Count = 0;
+    rtcm1046Count = 0;
+    rtcm1074Count = 0;
+    rtcm1084Count = 0;
+    rtcm1094Count = 0;
+    rtcm1124Count = 0;
+    rtcm1077Count = 0;
+    rtcm1087Count = 0;
+    rtcm1097Count = 0;
+    rtcm1127Count = 0;
+    rtcmOtherCount = 0;
+    rtcmLastType = 0;
+    tprintln("RTCM3 counters reset");
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
     tprintln("  gps        - Detailed GPS info");
     tprintln("  gpsraw     - Show raw GPS serial data");
     tprintln("  gpscfg     - Reconfigure GPS module");
+    tprintln("  rtcm       - RTCM3 debug (PPK status)");
+    tprintln("  rtcmreset  - Reset RTCM3 counters");
     tprintln("  imu        - Detailed IMU info");
     tprintln("  imutest    - Test IMU axes (5 sec)");
     tprintln("  cal        - Calibrate IMU (set level)");
@@ -3392,5 +3613,23 @@ void loop() {
     updateBattery();
     handleLowBattery();  // Will warn and halt if critical
     lastBattCheck = now;
+  }
+
+  // RTCM3 debug output (every 30 seconds) - helps diagnose PPK data logging
+  static unsigned long lastRtcmDebug = 0;
+  if (now - lastRtcmDebug >= 30000) {
+    Serial.println("[RTCM3] === 30s Summary ===");
+    Serial.printf("[RTCM3] Total frames: %lu (sync bytes: %lu)\n", rtcmFrameCount, rtcmSyncCount);
+    Serial.printf("[RTCM3] MSM7 (PPK): GPS=%lu GLO=%lu GAL=%lu BDS=%lu\n",
+      rtcm1077Count, rtcm1087Count, rtcm1097Count, rtcm1127Count);
+    Serial.printf("[RTCM3] MSM4 (fallback): GPS=%lu GLO=%lu GAL=%lu BDS=%lu\n",
+      rtcm1074Count, rtcm1084Count, rtcm1094Count, rtcm1124Count);
+    Serial.printf("[RTCM3] Eph: GPS=%lu GLO=%lu BDS=%lu GAL=%lu\n",
+      rtcm1019Count, rtcm1020Count, rtcm1042Count, rtcm1046Count);
+    Serial.printf("[RTCM3] Ref: 1006=%lu, Other=%lu\n", rtcm1006Count, rtcmOtherCount);
+    if (rtcm1077Count == 0 && rtcm1087Count == 0 && rtcm1097Count == 0 && rtcm1127Count == 0) {
+      Serial.println("[RTCM3] WARNING: No MSM7 messages! PPK will fail. Check LG290P RTCM config.");
+    }
+    lastRtcmDebug = now;
   }
 }
