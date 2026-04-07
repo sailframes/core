@@ -1,10 +1,11 @@
 /*
- * SailFrames E1 — Fleet Tracker Firmware v2.2
+ * SailFrames E1 — Fleet Tracker Firmware v2.3
  *
  * Hardware:
  *   - ESP32 DevKit V1 (ELEGOO)
  *   - Waveshare LG290P GNSS (UART2: RX=GPIO16, TX=GPIO17, 460800 baud)
  *   - BNO085 IMU (I2C: 0x4A) — heel, pitch, heading
+ *   - DPS310 Pressure/Temp (I2C: 0x77) — barometric pressure for gust detection
  *   - SSD1309 OLED 2.42" 128x64 (I2C: 0x3C)
  *   - MicroSD card module (SPI: MOSI=23, MISO=19, CLK=18, CS=5)
  *   - Calypso Mini wind sensor (BLE) — apparent wind speed/direction
@@ -28,6 +29,7 @@
  *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_nav.csv
  *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_imu.csv
  *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_wind.csv
+ *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_pres.csv
  *   /sf/YYYYMMDD/E1_YYYYMMDD_HHMMSS_raw.rtcm3
  *
  * License: Apache 2.0
@@ -44,6 +46,7 @@
 #include <HTTPClient.h>
 #include <U8g2lib.h>
 #include <Adafruit_BNO08x.h>
+#include <Adafruit_DPS310.h>
 // NimBLE configuration - disable unused features to reduce size
 #define CONFIG_BT_NIMBLE_ROLE_CENTRAL 1
 #define CONFIG_BT_NIMBLE_ROLE_PERIPHERAL 0
@@ -81,15 +84,12 @@
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT 64
 #define OLED_ADDR     0x3C
-#define BNO085_ADDR   0x4B  // Alternate address (some boards use 0x4A)
-#define MPU6050_ADDR  0x68
+#define BNO085_ADDR   0x4B  // GY-BNO08X breakout (ADO pin high)
+#define DPS310_ADDR   0x77  // Pressure/temperature sensor
 #define GPS_FIX_TIMEOUT_MS  300000
 #define DISPLAY_UPDATE_MS   1000  // Slower updates reduce I2C contention
 #define FLUSH_INTERVAL_MS   10000
 #define IMU_INTERVAL_MS     50
-
-// BNO085 IMU enabled
-#define ENABLE_BNO085       true
 
 // Wind sensor (Calypso Mini BLE)
 #define ENABLE_WIND         true
@@ -195,6 +195,15 @@ struct BatteryData {
   unsigned long lastRead = 0;
 } battery;
 
+struct PressureData {
+  float pressure_hpa = 0;   // Barometric pressure in hPa (mbar)
+  float temperature_c = 0;  // Temperature in Celsius
+  float pressure_min = 9999; // Min pressure in current window (for gust detection)
+  float pressure_max = 0;   // Max pressure in current window
+  bool valid = false;
+  unsigned long lastRead = 0;
+} pressure;
+
 struct RTCM3Parser {
   enum State { WAIT_SYNC, READ_HEADER, READ_PAYLOAD };
   State state = WAIT_SYNC;
@@ -234,10 +243,10 @@ struct Config {
 // U8g2 for SSD1309 128x64 I2C - native support, no scrolling issues
 U8G2_SSD1309_128X64_NONAME0_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 Adafruit_BNO08x bno08x(-1);  // No reset pin
+Adafruit_DPS310 dps;         // DPS310 pressure/temperature sensor
 sh2_SensorValue_t sensorValue;
-File navFile, imuFile, rawFile, windFile;
-bool sdOK = false, imuOK = false, oledOK = false, logging = false;
-bool useIMU_BNO = false;
+File navFile, imuFile, rawFile, windFile, presFile;
+bool sdOK = false, imuOK = false, oledOK = false, presOK = false, logging = false;
 bool uploading = false;
 bool wifiConnected = false;
 bool otaInProgress = false;
@@ -589,13 +598,53 @@ void logWind() {
 #endif // ENABLE_WIND
 
 // ============================================================
+// PRESSURE SENSOR (DPS310)
+// ============================================================
+void readPressure() {
+  if (!presOK) return;
+
+  sensors_event_t temp_event, pressure_event;
+  if (dps.getEvents(&temp_event, &pressure_event)) {
+    pressure.pressure_hpa = pressure_event.pressure;
+    pressure.temperature_c = temp_event.temperature;
+    pressure.valid = true;
+    pressure.lastRead = millis();
+
+    // Track min/max for gust detection
+    if (pressure.pressure_hpa < pressure.pressure_min) {
+      pressure.pressure_min = pressure.pressure_hpa;
+    }
+    if (pressure.pressure_hpa > pressure.pressure_max) {
+      pressure.pressure_max = pressure.pressure_hpa;
+    }
+  }
+}
+
+void logPressure() {
+  if (!presFile || !logging || !pressure.valid) return;
+
+  unsigned long e = millis() - logStart;
+  // Log: elapsed_ms, utc, date, pressure_hpa, temp_c, pressure_min, pressure_max
+  presFile.printf("%lu,%s,%s,%.2f,%.2f,%.2f,%.2f\n",
+    e, gps.utc_time, gps.date, pressure.pressure_hpa, pressure.temperature_c,
+    pressure.pressure_min, pressure.pressure_max);
+  totalBytes += 80;
+}
+
+void resetPressureMinMax() {
+  // Reset min/max tracking (call this periodically, e.g., every 10 seconds)
+  pressure.pressure_min = pressure.pressure_hpa;
+  pressure.pressure_max = pressure.pressure_hpa;
+}
+
+// ============================================================
 // SETUP
 // ============================================================
 void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(500);
   Serial.println("\n=================================");
-  Serial.println("  SailFrames E1 v2.1 — PPK Logger");
+  Serial.println("  SailFrames E1 v2.3 — PPK Logger");
   Serial.println("  Hardware Power Switch Edition");
   Serial.println("=================================");
 
@@ -624,7 +673,7 @@ void setup() {
   }
 
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(100000);  // 100kHz for SSD1309 stability
+  Wire.setClock(400000);  // 400kHz required for BNO085
 
   // I2C Scanner - quick check for expected devices only
   Serial.println("[I2C] Checking devices...");
@@ -632,11 +681,11 @@ void setup() {
   bool oledFound = (Wire.endTransmission() == 0);
   Wire.beginTransmission(BNO085_ADDR);
   bool bnoFound = (Wire.endTransmission() == 0);
-  Wire.beginTransmission(MPU6050_ADDR);
-  bool mpuFound = (Wire.endTransmission() == 0);
+  Wire.beginTransmission(DPS310_ADDR);
+  bool dpsFound = (Wire.endTransmission() == 0);
   Serial.printf("[I2C] OLED 0x3C: %s\n", oledFound ? "YES" : "NO");
-  Serial.printf("[I2C] BNO085 0x4A: %s\n", bnoFound ? "YES" : "NO");
-  Serial.printf("[I2C] MPU6050 0x68: %s\n", mpuFound ? "YES" : "NO");
+  Serial.printf("[I2C] BNO085 0x4B: %s\n", bnoFound ? "YES" : "NO");
+  Serial.printf("[I2C] DPS310 0x77: %s\n", dpsFound ? "YES" : "NO");
 
   // OLED - SSD1309 2.42" 128x64 using U8g2
   u8g2.begin();
@@ -702,12 +751,10 @@ void setup() {
     Serial.println("[SD]   4. Some modules need card inserted before power");
   }
 
-  // IMU — try BNO085 first (needs proper SHTP init), then MPU-6050
-#if ENABLE_BNO085
+  // IMU — BNO085
   Serial.println("[IMU] Initializing BNO085...");
   if (bno08x.begin_I2C(BNO085_ADDR, &Wire)) {
     imuOK = true;
-    useIMU_BNO = true;
     Serial.println("[IMU] BNO085 detected, enabling reports");
     // Enable Game Rotation Vector for heel/pitch (no magnetometer drift)
     if (!bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000)) {
@@ -723,21 +770,30 @@ void setup() {
     }
     Serial.println("[IMU] BNO085 OK");
   } else {
-    Serial.println("[IMU] BNO085 not found, trying MPU-6050...");
-#else
-  Serial.println("[IMU] BNO085 disabled, trying MPU-6050...");
-  {
-#endif
-    Wire.beginTransmission(MPU6050_ADDR);
-    if (Wire.endTransmission() == 0) {
-      Wire.beginTransmission(MPU6050_ADDR);
-      Wire.write(0x6B); Wire.write(0x00);  // Wake up MPU-6050
-      Wire.endTransmission();
-      imuOK = true;
-      Serial.println("[IMU] MPU-6050 OK at 0x68");
-    } else {
-      Serial.println("[IMU] No IMU found");
+    Serial.println("[IMU] BNO085 not found!");
+  }
+
+  // DPS310 Pressure/Temperature sensor
+  delay(100);  // Brief delay after BNO085 before initializing next I2C device
+  Serial.println("[PRES] Initializing DPS310...");
+  if (dps.begin_I2C(DPS310_ADDR, &Wire)) {
+    presOK = true;
+    // Configure for high-rate sampling (good for gust detection)
+    dps.configurePressure(DPS310_64HZ, DPS310_64SAMPLES);
+    dps.configureTemperature(DPS310_64HZ, DPS310_64SAMPLES);
+    Serial.println("[PRES] DPS310 OK");
+
+    // Take initial reading
+    sensors_event_t temp_event, pressure_event;
+    if (dps.getEvents(&temp_event, &pressure_event)) {
+      pressure.pressure_hpa = pressure_event.pressure;
+      pressure.temperature_c = temp_event.temperature;
+      pressure.valid = true;
+      Serial.printf("[PRES] Initial: %.2f hPa, %.1f°C\n",
+        pressure.pressure_hpa, pressure.temperature_c);
     }
+  } else {
+    Serial.println("[PRES] DPS310 not found");
   }
 
   // GPS
@@ -1231,6 +1287,7 @@ void handleLowBattery() {
     if (imuFile) { imuFile.flush(); imuFile.close(); }
     if (rawFile) { rawFile.flush(); rawFile.close(); }
     if (windFile) { windFile.flush(); windFile.close(); }
+    if (presFile) { presFile.flush(); presFile.close(); }
     logging = false;
   }
 
@@ -1275,106 +1332,67 @@ void drawBatteryPercent(int x, int y) {
 void readIMU() {
   if (!imuOK) return;
 
-#if ENABLE_BNO085
-  if (useIMU_BNO) {
-    // BNO085 using Adafruit library with SHTP protocol
-    if (bno08x.wasReset()) {
-      Serial.println("[IMU] BNO085 was reset, re-enabling reports");
-      bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
-      bno08x.enableReport(SH2_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
-      bno08x.enableReport(SH2_ACCELEROMETER, IMU_INTERVAL_MS * 1000);
-    }
+  // BNO085 using Adafruit library with SHTP protocol
+  if (bno08x.wasReset()) {
+    Serial.println("[IMU] BNO085 was reset, re-enabling reports");
+    bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
+    bno08x.enableReport(SH2_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
+    bno08x.enableReport(SH2_ACCELEROMETER, IMU_INTERVAL_MS * 1000);
+  }
 
-    // Read only a few events to avoid blocking display updates
-    int maxReads = 3;
-    while (maxReads-- > 0 && bno08x.getSensorEvent(&sensorValue)) {
-      switch (sensorValue.sensorId) {
-        case SH2_GAME_ROTATION_VECTOR:
-          // Not using quaternion for heel/pitch - accelerometer is more reliable
-          // Just ignore this report, we calculate from accelerometer below
-          break;
-        case SH2_ACCELEROMETER:
-          imu.accel_x = sensorValue.un.accelerometer.x;
-          imu.accel_y = sensorValue.un.accelerometer.y;
-          imu.accel_z = sensorValue.un.accelerometer.z;
+  // Read only a few events to avoid blocking display updates
+  int maxReads = 3;
+  while (maxReads-- > 0 && bno08x.getSensorEvent(&sensorValue)) {
+    switch (sensorValue.sensorId) {
+      case SH2_GAME_ROTATION_VECTOR:
+        // Not using quaternion for heel/pitch - accelerometer is more reliable
+        // Just ignore this report, we calculate from accelerometer below
+        break;
+      case SH2_ACCELEROMETER:
+        imu.accel_x = sensorValue.un.accelerometer.x;
+        imu.accel_y = sensorValue.un.accelerometer.y;
+        imu.accel_z = sensorValue.un.accelerometer.z;
 
-          // Calculate heel and pitch from accelerometer (gravity reference)
-          // Chip is mounted with X pointing UP, Y pointing STARBOARD, Z pointing BOW
-          // X ≈ 9.8 when level (gravity)
-          // Y changes with heel (port/starboard tilt)
-          // Z changes with pitch (bow up/down tilt)
+        // Calculate heel and pitch from accelerometer (gravity reference)
+        // Chip is mounted with X pointing UP, Y pointing STARBOARD, Z pointing BOW
+        // X ≈ 9.8 when level (gravity)
+        // Y changes with heel (port/starboard tilt)
+        // Z changes with pitch (bow up/down tilt)
 
-          // Heel: positive = starboard down, negative = port down
-          imu.heel = atan2(imu.accel_y, imu.accel_x) * 180.0 / PI;
+        // Heel: positive = starboard down, negative = port down
+        imu.heel = atan2(imu.accel_y, imu.accel_x) * 180.0 / PI;
 
-          // Pitch: positive = bow up, negative = bow down
-          imu.pitch = atan2(-imu.accel_z, sqrt(imu.accel_y * imu.accel_y + imu.accel_x * imu.accel_x)) * 180.0 / PI;
+        // Pitch: positive = bow up, negative = bow down
+        imu.pitch = atan2(-imu.accel_z, sqrt(imu.accel_y * imu.accel_y + imu.accel_x * imu.accel_x)) * 180.0 / PI;
 
-          // Apply calibration offsets
-          imu.heel -= imuHeelOffset;
-          imu.pitch -= imuPitchOffset;
+        // Apply calibration offsets
+        imu.heel -= imuHeelOffset;
+        imu.pitch -= imuPitchOffset;
 
-          // Normalize to -180 to +180 range
-          while (imu.heel > 180) imu.heel -= 360;
-          while (imu.heel < -180) imu.heel += 360;
-          while (imu.pitch > 180) imu.pitch -= 360;
-          while (imu.pitch < -180) imu.pitch += 360;
-          break;
+        // Normalize to -180 to +180 range
+        while (imu.heel > 180) imu.heel -= 360;
+        while (imu.heel < -180) imu.heel += 360;
+        while (imu.pitch > 180) imu.pitch -= 360;
+        while (imu.pitch < -180) imu.pitch += 360;
+        break;
 
-        case SH2_ROTATION_VECTOR: {
-          // Full rotation vector with magnetometer - use for heading only
-          float qr = sensorValue.un.rotationVector.real;
-          float qi = sensorValue.un.rotationVector.i;
-          float qj = sensorValue.un.rotationVector.j;
-          float qk = sensorValue.un.rotationVector.k;
+      case SH2_ROTATION_VECTOR: {
+        // Full rotation vector with magnetometer - use for heading only
+        float qr = sensorValue.un.rotationVector.real;
+        float qi = sensorValue.un.rotationVector.i;
+        float qj = sensorValue.un.rotationVector.j;
+        float qk = sensorValue.un.rotationVector.k;
 
-          // Yaw (heading) = rotation around Z axis
-          float siny_cosp = 2.0 * (qr * qk + qi * qj);
-          float cosy_cosp = 1.0 - 2.0 * (qj * qj + qk * qk);
-          float heading = atan2(siny_cosp, cosy_cosp) * 180.0 / PI;
+        // Yaw (heading) = rotation around Z axis
+        float siny_cosp = 2.0 * (qr * qk + qi * qj);
+        float cosy_cosp = 1.0 - 2.0 * (qj * qj + qk * qk);
+        float heading = atan2(siny_cosp, cosy_cosp) * 180.0 / PI;
 
-          // Convert to 0-360 range
-          if (heading < 0) heading += 360.0;
-          imu.heading = heading;
-          break;
-        }
+        // Convert to 0-360 range
+        if (heading < 0) heading += 360.0;
+        imu.heading = heading;
+        break;
       }
-    }
-  } else
-#endif
-  {
-    // MPU-6050 direct register read fallback
-    Wire.beginTransmission(MPU6050_ADDR);
-    Wire.write(0x3B);
-    Wire.endTransmission(false);
-    Wire.requestFrom(MPU6050_ADDR, (uint8_t)14, (uint8_t)true);
-    if (Wire.available() >= 14) {
-      int16_t ax = (Wire.read() << 8) | Wire.read();
-      int16_t ay = (Wire.read() << 8) | Wire.read();
-      int16_t az = (Wire.read() << 8) | Wire.read();
-      Wire.read(); Wire.read();  // Skip temperature
-      int16_t gx = (Wire.read() << 8) | Wire.read();
-      int16_t gy = (Wire.read() << 8) | Wire.read();
-      int16_t gz = (Wire.read() << 8) | Wire.read();
-      imu.accel_x = ax / 16384.0;
-      imu.accel_y = ay / 16384.0;
-      imu.accel_z = az / 16384.0;
-      imu.gyro_x = gx / 131.0;
-      imu.gyro_y = gy / 131.0;
-      imu.gyro_z = gz / 131.0;
-      imu.pitch = atan2(imu.accel_y, imu.accel_z) * 180.0 / PI;
-      imu.heel = atan2(-imu.accel_x,
-        sqrt(imu.accel_y * imu.accel_y + imu.accel_z * imu.accel_z)) * 180.0 / PI;
-
-      // Apply calibration offsets
-      imu.heel -= imuHeelOffset;
-      imu.pitch -= imuPitchOffset;
-
-      // Normalize to -180 to +180 range
-      while (imu.heel > 180) imu.heel -= 360;
-      while (imu.heel < -180) imu.heel += 360;
-      while (imu.pitch > 180) imu.pitch -= 360;
-      while (imu.pitch < -180) imu.pitch += 360;
     }
   }
 }
@@ -1726,11 +1744,12 @@ void startLogging() {
   }
 
   // Build file paths
-  char np[64], ip[64], rp[64], wp[64];
+  char np[64], ip[64], rp[64], wp[64], pp[64];
   snprintf(np, sizeof(np), "%s/%s_%s_%s_nav.csv", dd, config.boat_id, ds, ts);
   snprintf(ip, sizeof(ip), "%s/%s_%s_%s_imu.csv", dd, config.boat_id, ds, ts);
   snprintf(rp, sizeof(rp), "%s/%s_%s_%s_raw.rtcm3", dd, config.boat_id, ds, ts);
   snprintf(wp, sizeof(wp), "%s/%s_%s_%s_wind.csv", dd, config.boat_id, ds, ts);
+  snprintf(pp, sizeof(pp), "%s/%s_%s_%s_pres.csv", dd, config.boat_id, ds, ts);
 
   Serial.printf("[LOG] Opening NAV: %s\n", np);
   navFile = SD.open(np, FILE_WRITE);
@@ -1752,6 +1771,13 @@ void startLogging() {
   }
 #endif
 
+  // Pressure file (always open if sensor is present)
+  if (presOK) {
+    Serial.printf("[LOG] Opening PRES: %s\n", pp);
+    presFile = SD.open(pp, FILE_WRITE);
+    Serial.printf("[LOG] PRES file %s\n", presFile ? "OK" : "FAILED");
+  }
+
   if (navFile) {
     logging = true;
     logStart = millis();
@@ -1767,12 +1793,18 @@ void startLogging() {
       windFile.flush();
     }
 #endif
+    if (presFile) {
+      presFile.println("ms,utc,date,pressure_hpa,temp_c,pres_min,pres_max");
+      presFile.flush();
+      resetPressureMinMax();  // Start fresh min/max tracking
+    }
     Serial.println("[LOG] ========================================");
     Serial.printf("[LOG] NAV: %s\n", np);
     Serial.printf("[LOG] IMU: %s\n", ip);
 #if ENABLE_WIND
     if (config.wind_enabled) Serial.printf("[LOG] WIND: %s\n", wp);
 #endif
+    if (presOK) Serial.printf("[LOG] PRES: %s\n", pp);
     Serial.printf("[LOG] RAW: %s\n", rp);
     Serial.println("[LOG] RTCM3 MSM7 raw data -> PPK via RTKLIB");
     Serial.println("[LOG] ========================================");
@@ -2713,7 +2745,10 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintf("Position: %.6f, %.6f\n", gps.lat, gps.lon);
     tprintf("Speed: %.1f kt, Course: %.0f\n", gps.speed_kts, gps.course);
     tprintf("IMU: %s (heel:%.0f pitch:%.0f)\n",
-      imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE", imu.heel, imu.pitch);
+      imuOK ? "BNO085" : "NONE", imu.heel, imu.pitch);
+    tprintf("Pres: %s", presOK ? "" : "NONE");
+    if (presOK) tprintf("%.1f hPa, %.1f°C", pressure.pressure_hpa, pressure.temperature_c);
+    tprintln("");
     tprintf("SD:  %s\n", sdOK ? "OK" : "FAILED");
     tprintf("Battery: %.2fV (%d%%)%s\n", battery.voltage, battery.percent,
       battery.critical ? " CRITICAL!" : "");
@@ -2931,13 +2966,28 @@ void processCommand(String cmd, bool fromTelnet) {
 
   } else if (cmd == "imu") {
     tprintln("=== IMU Details ===");
-    tprintf("Type: %s\n", imuOK ? (useIMU_BNO ? "BNO085" : "MPU6050") : "NONE");
+    tprintf("Type: %s\n", imuOK ? "BNO085" : "NONE");
     tprintf("Heading: %.0f deg (magnetic)\n", imu.heading);
     tprintf("Heel: %.1f deg (starboard +, port -)\n", imu.heel);
     tprintf("Pitch: %.1f deg (bow up +, bow down -)\n", imu.pitch);
     tprintf("Accel: X=%.2f Y=%.2f Z=%.2f\n", imu.accel_x, imu.accel_y, imu.accel_z);
     tprintf("Calibration offsets: heel=%.1f, pitch=%.1f\n", imuHeelOffset, imuPitchOffset);
     tprintln("===================");
+
+  } else if (cmd == "pres" || cmd == "pressure") {
+    tprintln("=== Pressure/Temperature ===");
+    if (presOK) {
+      tprintf("Pressure: %.2f hPa (mbar)\n", pressure.pressure_hpa);
+      tprintf("Temperature: %.1f °C\n", pressure.temperature_c);
+      tprintf("Pressure range (10s window):\n");
+      tprintf("  Min: %.2f hPa\n", pressure.pressure_min);
+      tprintf("  Max: %.2f hPa\n", pressure.pressure_max);
+      tprintf("  Delta: %.2f hPa (gust indicator)\n",
+        pressure.pressure_max - pressure.pressure_min);
+    } else {
+      tprintln("DPS310 not detected");
+    }
+    tprintln("============================");
 
   } else if (cmd == "imutest") {
     tprintln("=== IMU Axis Test (10 seconds) ===");
@@ -3296,6 +3346,7 @@ void processCommand(String cmd, bool fromTelnet) {
         imuFile.flush(); imuFile.close();
         rawFile.flush(); rawFile.close();
         if (windFile) { windFile.flush(); windFile.close(); }
+        if (presFile) { presFile.flush(); presFile.close(); }
         xSemaphoreGive(sdMutex);
       }
       logging = false;
@@ -3382,6 +3433,7 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  imutest    - Test IMU axes (5 sec)");
     tprintln("  cal        - Calibrate IMU (set level)");
     tprintln("  calreset   - Reset IMU calibration");
+    tprintln("  pres       - Pressure/temperature sensor");
     tprintln("  rec        - Manual start recording");
     tprintln("  stoprec    - Manual stop recording");
     tprintln("  recstate   - Show recording state");
@@ -3481,6 +3533,7 @@ void updateRecordingState() {
           imuFile.flush(); imuFile.close();
           rawFile.flush(); rawFile.close();
           if (windFile) { windFile.flush(); windFile.close(); }
+          if (presFile) { presFile.flush(); presFile.close(); }
           xSemaphoreGive(sdMutex);
         }
         logging = false;
@@ -3567,6 +3620,21 @@ void loop() {
     lastIMU = now;
   }
 
+  // Pressure sensor (same interval as IMU for gust detection)
+  static unsigned long lastPres = 0;
+  if (presOK && now - lastPres >= IMU_INTERVAL_MS) {
+    readPressure();
+    if (logging) logPressure();
+    lastPres = now;
+  }
+
+  // Reset pressure min/max every 10 seconds for fresh gust window
+  static unsigned long lastPresReset = 0;
+  if (presOK && now - lastPresReset >= 10000) {
+    resetPressureMinMax();
+    lastPresReset = now;
+  }
+
   if (logging && gps.newGGA) {
     logNav();
     gps.newGGA = false;
@@ -3601,6 +3669,7 @@ void loop() {
 #if ENABLE_WIND
     if (windFile) windFile.flush();
 #endif
+    if (presFile) presFile.flush();
     lastFlush = now;
   }
 
