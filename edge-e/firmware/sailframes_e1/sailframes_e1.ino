@@ -230,6 +230,7 @@ struct Config {
   int gps_rate_hz = 10;
   char wind_mac[20] = "C3:09:6D:1E:8A:FC";  // Calypso Mini MAC (can override in config.txt)
   bool wind_enabled = true;
+  int wind_offset = 0;  // Heading offset in degrees (added to raw AWA for sensor mounting correction)
   // Recording thresholds
   float start_speed_knots = 1.5;
   float stop_speed_knots = 0.5;
@@ -1501,6 +1502,7 @@ void loadConfig() {
     else if (k == "gps_rate_hz") config.gps_rate_hz = v.toInt();
     else if (k == "wind_enabled") config.wind_enabled = (v == "true" || v == "1");
     else if (k == "wind_mac") v.toCharArray(config.wind_mac, sizeof(config.wind_mac));
+    else if (k == "wind_offset") config.wind_offset = v.toInt();
     // Recording thresholds
     else if (k == "start_speed_knots") config.start_speed_knots = v.toFloat();
     else if (k == "stop_speed_knots") config.stop_speed_knots = v.toFloat();
@@ -1517,6 +1519,9 @@ void loadConfig() {
   Serial.printf("[CFG] Wind: %s", config.wind_enabled ? "enabled" : "disabled");
   if (strlen(config.wind_mac) > 0) {
     Serial.printf(" (MAC: %s)", config.wind_mac);
+  }
+  if (config.wind_offset != 0) {
+    Serial.printf(" (offset: %d°)", config.wind_offset);
   }
   Serial.println();
 }
@@ -1937,16 +1942,18 @@ void updateDisplayD2() {
 #if ENABLE_WIND
   if (wind.connected && wind.lastUpdate > 0 && millis() - wind.lastUpdate < 5000) {
     aws = wind.speed_kts;
-    awa = wind.angle_deg;
+    awa = wind.angle_deg + config.wind_offset;
+    if (awa < 0) awa += 360;
+    if (awa >= 360) awa -= 360;
     // Convert AWA to radians (-180 to 180)
     float awaRad = awa * PI / 180.0;
     if (awaRad > PI) awaRad -= 2 * PI;
     // True wind calculation
     float sog = gps.speed_kts;
     // TWS = sqrt(AWS² + SOG² - 2*AWS*SOG*cos(AWA))
-    tws = sqrt(aws*aws + sog*sog + 2*aws*sog*cos(awaRad));
-    // TWA = atan2(AWS*sin(AWA), AWS*cos(AWA) + SOG)
-    float twaRad = atan2(aws * sin(awaRad), aws * cos(awaRad) + sog);
+    tws = sqrt(aws*aws + sog*sog - 2*aws*sog*cos(awaRad));
+    // TWA = atan2(AWS*sin(AWA), AWS*cos(AWA) - SOG)
+    float twaRad = atan2(aws * sin(awaRad), aws * cos(awaRad) - sog);
     twa = twaRad * 180.0 / PI;
     if (twa < 0) twa += 360;
   }
