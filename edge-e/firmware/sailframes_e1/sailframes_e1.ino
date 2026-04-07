@@ -1,5 +1,5 @@
 /*
- * SailFrames E1 — Fleet Tracker Firmware v2.1
+ * SailFrames E1 — Fleet Tracker Firmware v2.2
  *
  * Hardware:
  *   - ESP32 DevKit V1 (ELEGOO)
@@ -8,7 +8,8 @@
  *   - SSD1309 OLED 2.42" 128x64 (I2C: 0x3C)
  *   - MicroSD card module (SPI: MOSI=23, MISO=19, CLK=18, CS=5)
  *   - Calypso Mini wind sensor (BLE) — apparent wind speed/direction
- *   - 18650 Battery Shield (5V → VIN)
+ *   - DWEII USB-C 5V Boost Converter + LiPo cell
+ *   - 100K/100K voltage divider on GPIO34 for battery monitoring
  *
  * Behavior:
  *   Power on → init sensors → configure LG290P for raw RTCM3 output
@@ -64,11 +65,12 @@
 #define SCL_PIN       22
 #define LED_PIN       2   // Built-in LED blinks during logging
 
-// Battery monitoring (PowerBoost 1000C)
-#define BATT_VOLTAGE_PIN  34   // ADC pin for voltage divider
-#define LOW_BATT_PIN      35   // LBO pin from PowerBoost (LOW = critical)
+// Battery monitoring (DWEII USB-C Boost Converter)
+// 100K/100K voltage divider from LiPo B+ to GPIO34
+#define BATT_VOLTAGE_PIN  34   // ADC pin for voltage divider (input-only, no pullup)
+// GPIO35 is now free for future use
 
-// Power control: Use hardware slide switch on PowerBoost 1000C EN pin
+// Power control: Hardware switch on boost converter
 // No software deep sleep - hardware switch cuts all power when OFF
 
 // ============================================================
@@ -188,7 +190,7 @@ struct WindData {
 struct BatteryData {
   float voltage = 0;        // Battery voltage (3.0-4.2V for LiPo)
   int percent = 0;          // Estimated percentage (0-100)
-  bool critical = false;    // LBO pin triggered (< 3.2V)
+  bool critical = false;    // Voltage below 3.3V (overdischarge threshold)
   bool valid = false;       // Have we read the battery yet?
   unsigned long lastRead = 0;
 } battery;
@@ -1132,17 +1134,19 @@ void parseNMEA(const char* s) {
 }
 
 // ============================================================
-// BATTERY MONITORING (PowerBoost 1000C)
+// BATTERY MONITORING (DWEII USB-C Boost Converter)
 // ============================================================
-// Voltage divider: 2x 200Ω resistors
-// Calibrated ratio: 2.27 (measured 4.05V actual vs 3.57V reported with 2.0)
-// TODO: Replace with 100kΩ resistors to reduce idle current
-const float BATT_DIVIDER_RATIO = 2.27;
+// 100K/100K voltage divider from LiPo B+ to GPIO34
+// Divider ratio: nominal 2.0 (100K/100K), calibrated to 2.25
+// ESP32 ADC has ~10-15% non-linearity without calibration
+// Calibrated: 4.165V actual = 3.70V displayed → ratio = 4.165/3.70 * 2.0 = 2.25
+// LiPo range 3.0V-4.2V → ADC sees 1.5V-2.1V (within ESP32 3.3V limit)
+// Current drain: 0.021mA (negligible)
+const float BATT_DIVIDER_RATIO = 2.25;
+const int BATT_SAMPLES = 16;  // Average multiple readings for stability
 
 void setupBattery() {
-  // GPIO35 is input-only, no internal pull-up available
-  // PowerBoost LBO has external pull-up on the board
-  pinMode(LOW_BATT_PIN, INPUT);
+  // GPIO34 is input-only, no internal pull-up (ideal for ADC)
   analogReadResolution(12);  // 12-bit ADC (0-4095)
   analogSetAttenuation(ADC_11db);  // Full 0-3.3V range
   Serial.println("[BATT] Battery monitoring initialized");
@@ -1150,12 +1154,12 @@ void setupBattery() {
 
 float readBatteryVoltage() {
   // Average multiple readings to reduce noise
-  int sum = 0;
-  for (int i = 0; i < 10; i++) {
+  uint32_t sum = 0;
+  for (int i = 0; i < BATT_SAMPLES; i++) {
     sum += analogRead(BATT_VOLTAGE_PIN);
     delayMicroseconds(100);
   }
-  float raw = sum / 10.0;
+  float raw = (float)sum / BATT_SAMPLES;
   float adcVoltage = (raw / 4095.0) * 3.3;  // Voltage at ADC pin
   float voltage = adcVoltage * BATT_DIVIDER_RATIO;  // Actual battery voltage
 
@@ -1171,7 +1175,7 @@ float readBatteryVoltage() {
 
 int getBatteryPercent(float voltage) {
   // Li-ion discharge curve (non-linear lookup table)
-  // Based on typical 18650 discharge profile
+  // Based on typical LiPo discharge profile
   // Voltage drops quickly at start and end, flat in middle
   static const float voltageTable[] = {
     4.20, 4.15, 4.10, 4.05, 4.00, 3.90, 3.80, 3.70, 3.60, 3.50, 3.40, 3.30
@@ -1200,12 +1204,12 @@ int getBatteryPercent(float voltage) {
 }
 
 bool isBatteryCritical() {
-  // PowerBoost LBO goes LOW when battery < 3.2V
-  // Only consider critical if voltage is also measurable (> 0.5V)
+  // Critical if voltage drops below 3.3V (overdischarge protection threshold)
+  // Only consider critical if voltage is measurable (> 0.5V)
   // This prevents false shutdown when battery hardware not connected
-  bool lboLow = digitalRead(LOW_BATT_PIN) == LOW;
   bool voltageValid = battery.voltage > 0.5;
-  return lboLow && voltageValid;
+  bool voltageLow = battery.voltage < 3.3;
+  return voltageValid && voltageLow;
 }
 
 void updateBattery() {
