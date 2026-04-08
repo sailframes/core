@@ -327,6 +327,14 @@ volatile bool triggerUpload = false;
 SemaphoreHandle_t sdMutex = NULL;
 TaskHandle_t uploadTaskHandle = NULL;
 
+// Upload state tracking
+unsigned long lastUploadCheck = 0;
+const unsigned long UPLOAD_CHECK_INTERVAL_MS = 30000;  // Check every 30 seconds
+int uploadRetryCount = 0;
+const int MAX_UPLOAD_RETRIES = 3;
+unsigned long lastUploadAttempt = 0;
+const unsigned long UPLOAD_RETRY_DELAY_MS = 60000;  // Wait 1 minute between retries after failure
+
 // ============================================================
 // WIND SENSOR (CALYPSO BLE)
 // ============================================================
@@ -1057,12 +1065,6 @@ void readGPS() {
           default: rtcmOtherCount++; break;
         }
 
-        // Debug output: show message type on Serial (every 10th frame to reduce spam)
-        if (rtcmFrameCount % 10 == 1 || msgType >= 1077) {
-          Serial.printf("[RTCM3] Type %u, len=%u, total frames=%lu\n",
-            msgType, rtcm.frameTotal, rtcmFrameCount);
-        }
-
         rtcm.state = RTCM3Parser::WAIT_SYNC;
       }
       continue;
@@ -1206,7 +1208,6 @@ void setupBattery() {
   // GPIO34 is input-only, no internal pull-up (ideal for ADC)
   analogReadResolution(12);  // 12-bit ADC (0-4095)
   analogSetAttenuation(ADC_11db);  // Full 0-3.3V range
-  Serial.println("[BATT] Battery monitoring initialized");
 }
 
 float readBatteryVoltage() {
@@ -1219,14 +1220,6 @@ float readBatteryVoltage() {
   float raw = (float)sum / BATT_SAMPLES;
   float adcVoltage = (raw / 4095.0) * 3.3;  // Voltage at ADC pin
   float voltage = adcVoltage * BATT_DIVIDER_RATIO;  // Actual battery voltage
-
-  // Debug: print every 10 seconds (controlled by caller)
-  static unsigned long lastDebug = 0;
-  if (millis() - lastDebug >= 10000) {
-    Serial.printf("[BATT] ADC raw=%.0f, ADC voltage=%.2fV, Battery=%.2fV (%d%%)\n",
-                  raw, adcVoltage, voltage, getBatteryPercent(voltage));
-    lastDebug = millis();
-  }
   return voltage;
 }
 
@@ -2104,8 +2097,9 @@ void markUploaded(const char* filepath) {
   }
 }
 
-// Threshold for using presigned URL (1MB) - larger files bypass API Gateway
-#define PRESIGN_THRESHOLD 1000000
+// Threshold for using presigned URL - larger files bypass API Gateway timeout
+// ESP32 uploads at ~20-50KB/s, API Gateway times out at 29s, so keep threshold low
+#define PRESIGN_THRESHOLD 200000  // 200KB
 
 // Extract presigned URL from JSON response
 // Returns empty string if not found
@@ -2189,12 +2183,21 @@ bool uploadToS3Presigned(const char* filepath, File& file, size_t fileSize, cons
 
 // Request presigned URL from API Gateway
 String requestPresignedUrl(const char* filepath, size_t fileSize) {
+  // Check WiFi before attempting request
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[UPLOAD] WiFi not connected, skipping presign request");
+    return "";
+  }
+
+  Serial.printf("[UPLOAD] Requesting presigned URL (heap: %u)...\n", ESP.getFreeHeap());
+
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(30);
+  client.setHandshakeTimeout(30);
+  client.setTimeout(60);
 
   HTTPClient http;
-  http.setTimeout(30000);
+  http.setTimeout(60000);  // 60 second timeout
   http.setReuse(false);
 
   // Build presign request URL
@@ -2205,8 +2208,6 @@ String requestPresignedUrl(const char* filepath, size_t fileSize) {
   url += filepath;
   url += "&presign=1&size=";
   url += String(fileSize);
-
-  Serial.println("[UPLOAD] Requesting presigned URL...");
 
   if (!http.begin(client, url)) {
     Serial.println("[UPLOAD] Failed to begin presign request");
@@ -2276,7 +2277,8 @@ bool uploadFile(const char* filepath) {
     return true;  // Mark as success so it gets .uploaded marker
   }
 
-  Serial.printf("[UPLOAD] Uploading %s (%u bytes)... Free heap: %u\n", filepath, fileSize, ESP.getFreeHeap());
+  Serial.printf("[UPLOAD] %s (%u bytes) heap:%u rssi:%d\n",
+    filepath, fileSize, ESP.getFreeHeap(), WiFi.RSSI());
 
   // Feed watchdog
   yield();
@@ -2302,9 +2304,19 @@ bool uploadFile(const char* filepath) {
   }
 
   // Small files: Direct upload via API Gateway
+  // Check WiFi before attempting
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[UPLOAD] WiFi disconnected, skipping");
+    file.close();
+    return false;
+  }
+
+  Serial.printf("[UPLOAD] Direct upload (heap: %u)\n", ESP.getFreeHeap());
+
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(30);
+  client.setHandshakeTimeout(30);
+  client.setTimeout(60);
 
   HTTPClient http;
   http.setTimeout(60000);
@@ -2318,8 +2330,6 @@ bool uploadFile(const char* filepath) {
   url += filepath;
 
   yield();
-
-  Serial.printf("[UPLOAD] Direct upload via API Gateway\n");
 
   if (!http.begin(client, url)) {
     Serial.printf("[UPLOAD] Failed to begin HTTP: %s\n", filepath);
@@ -2382,6 +2392,60 @@ int countFilesToUpload(const char* dirname) {
 }
 
 // Scan directory and upload all un-uploaded files
+// Test API Gateway connectivity before uploads
+bool testAPIGatewayConnection() {
+  Serial.printf("[UPLOAD] Testing API Gateway (heap: %u, RSSI: %d)...\n",
+                ESP.getFreeHeap(), WiFi.RSSI());
+
+  // Test DNS
+  IPAddress ip;
+  if (!WiFi.hostByName("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", ip)) {
+    Serial.println("[UPLOAD] DNS FAILED");
+    return false;
+  }
+  Serial.printf("[UPLOAD] DNS OK: %s\n", ip.toString().c_str());
+  yield();
+
+  // Test TCP connection to port 443
+  {
+    WiFiClient testClient;
+    testClient.setTimeout(10);
+    if (!testClient.connect(ip, 443)) {
+      Serial.println("[UPLOAD] TCP FAILED");
+      return false;
+    }
+    testClient.stop();
+  }
+  Serial.println("[UPLOAD] TCP OK");
+
+  // Give memory time to clean up after TCP client destruction
+  yield();
+  delay(100);
+
+  // Test TLS handshake
+  Serial.printf("[UPLOAD] TLS test (heap: %u)...\n", ESP.getFreeHeap());
+
+  WiFiClientSecure tlsClient;
+  tlsClient.setInsecure();  // Skip cert validation
+  tlsClient.setHandshakeTimeout(45);  // Longer timeout for slow connections
+  tlsClient.setTimeout(45);
+
+  if (!tlsClient.connect("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", 443)) {
+    char errBuf[128];
+    int err = tlsClient.lastError(errBuf, sizeof(errBuf));
+    Serial.printf("[UPLOAD] TLS FAILED: %s (err: %d, heap: %u)\n", errBuf, err, ESP.getFreeHeap());
+    return false;
+  }
+  tlsClient.stop();
+  Serial.println("[UPLOAD] TLS OK");
+
+  // Give memory time to clean up
+  yield();
+  delay(50);
+
+  return true;
+}
+
 void uploadDirectory(const char* dirname) {
   // Feed watchdog before directory operations
   yield();
@@ -2559,6 +2623,12 @@ bool connectWiFi() {
         u8g2.sendBuffer();
         delay(2000);
       }
+
+      // Trigger upload check on WiFi connect (reset timer so task checks immediately)
+      lastUploadCheck = 0;
+      uploadRetryCount = 0;  // Reset retries on new connection
+      Serial.println("[WIFI] Upload check triggered on connect");
+
       return true;
     }
 
@@ -2628,15 +2698,7 @@ void checkWiFiUpload() {
     uploadCount = 0;
 
     // Test connectivity before uploading
-    Serial.println("[UPLOAD] Testing TLS connectivity...");
-    Serial.printf("[UPLOAD] Free heap: %u bytes\n", ESP.getFreeHeap());
-    WiFiClientSecure testClient;
-    testClient.setInsecure();
-    testClient.setTimeout(30);
-    if (testClient.connect("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", 443)) {
-      Serial.println("[UPLOAD] Connection test OK");
-      testClient.stop();
-    } else {
+    if (!testAPIGatewayConnection()) {
       Serial.println("[UPLOAD] Connection test FAILED - aborting upload");
       uploading = false;
 #if ENABLE_WIND
@@ -2883,15 +2945,8 @@ void processCommand(String cmd, bool fromTelnet) {
 
       // Test TLS directly to AWS (skip intermediate tests now that BLE is off)
       tprintln("Testing TLS to AWS API Gateway...");
-      tprintf("Free heap: %u bytes\n", ESP.getFreeHeap());
-      WiFiClientSecure testClient;
-      testClient.setInsecure();
-      testClient.setTimeout(30);
-      if (testClient.connect("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", 443)) {
-        tprintln("AWS TLS OK");
-        testClient.stop();
-      } else {
-        tprintf("AWS TLS FAILED (heap: %u)\n", ESP.getFreeHeap());
+      if (!testAPIGatewayConnection()) {
+        tprintln("AWS TLS FAILED");
 #if ENABLE_WIND
         // Reinit BLE and reconnect to wind sensor
         if (config.wind_enabled && strlen(config.wind_mac) > 0) {
@@ -2901,6 +2956,7 @@ void processCommand(String cmd, bool fromTelnet) {
 #endif
         return;
       }
+      tprintln("AWS TLS OK");
 
       tprintln("Calling uploadDirectory...");
       yield();
@@ -3571,26 +3627,70 @@ void uploadTaskFunc(void* param) {
   Serial.println("[UPLOAD] Task started on Core 0");
 
   while (true) {
-    if (triggerUpload && !logging) {
-      triggerUpload = false;
-      Serial.println("[UPLOAD] Upload triggered, attempting connection...");
+    unsigned long now = millis();
+    bool shouldUpload = false;
 
-      // Try to connect to WiFi
+    // Check various upload triggers
+    if (triggerUpload && !logging) {
+      // Recording just stopped - immediate upload attempt
+      triggerUpload = false;
+      shouldUpload = true;
+      uploadRetryCount = 0;  // Reset retry counter for new session
+      Serial.println("[UPLOAD] Triggered: recording stopped");
+    }
+    else if (wifiConnected && !logging && !uploading) {
+      // WiFi connected and not recording - periodic upload attempt
+      if (now - lastUploadCheck >= UPLOAD_CHECK_INTERVAL_MS) {
+        lastUploadCheck = now;
+
+        // Check retry backoff
+        if (uploadRetryCount > 0 && now - lastUploadAttempt < UPLOAD_RETRY_DELAY_MS) {
+          // Still in retry backoff period - skip
+        } else if (uploadRetryCount >= MAX_UPLOAD_RETRIES) {
+          // Max retries reached - wait longer before next attempt
+          if (now - lastUploadAttempt >= UPLOAD_RETRY_DELAY_MS * 5) {
+            uploadRetryCount = 0;  // Reset after extended wait
+            shouldUpload = true;
+            Serial.println("[UPLOAD] Triggered: retry reset");
+          }
+        } else {
+          // Normal periodic attempt - uploadDirectory will skip already-uploaded files
+          shouldUpload = true;
+          Serial.println("[UPLOAD] Triggered: periodic check");
+        }
+      }
+    }
+
+    // Perform upload if triggered
+    if (shouldUpload) {
+      Serial.printf("[UPLOAD] Starting, heap: %u\n", ESP.getFreeHeap());
+      lastUploadAttempt = now;
+
+      // Try to connect to WiFi if not connected
       if (!wifiConnected) {
         connectWiFi();
       }
 
       if (wifiConnected) {
-        Serial.printf("[UPLOAD] Connected, heap: %u bytes\n", ESP.getFreeHeap());
+        // Test connectivity before starting uploads
+        if (!testAPIGatewayConnection()) {
+          Serial.println("[UPLOAD] Connectivity test failed, skipping");
+          uploadRetryCount++;
+        } else {
+          uploading = true;
 
-        // Count and upload files
-        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000))) {
-          uploadDirectory("/sf");
-          xSemaphoreGive(sdMutex);
+          if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000))) {
+            uploadDirectory("/sf");
+            xSemaphoreGive(sdMutex);
+          }
+
+          uploading = false;
+          uploadRetryCount = 0;  // Reset on successful cycle
+          Serial.println("[UPLOAD] Cycle complete");
         }
-        Serial.println("[UPLOAD] Upload complete");
       } else {
-        Serial.println("[UPLOAD] WiFi connection failed");
+        Serial.println("[UPLOAD] WiFi failed");
+        uploadRetryCount++;
       }
     }
 
@@ -3662,7 +3762,19 @@ void loop() {
 #endif
 
   if (now - lastDisp >= DISPLAY_UPDATE_MS) {
-    if (!uploading) {  // Don't override upload display
+    if (uploading) {
+      // Show upload status on display
+      u8g2.clearBuffer();
+      u8g2.setFont(u8g2_font_helvB14_tr);
+      u8g2.drawStr(10, 25, "UPLOADING");
+      u8g2.setFont(u8g2_font_6x10_tr);
+      char buf[32];
+      snprintf(buf, sizeof(buf), "Files: %d", uploadCount);
+      u8g2.drawStr(10, 45, buf);
+      snprintf(buf, sizeof(buf), "WiFi: %s", connectedSSID);
+      u8g2.drawStr(10, 58, buf);
+      u8g2.sendBuffer();
+    } else {
       updateDisplay();
     }
     if (logging && LED_PIN >= 0) digitalWrite(LED_PIN, !digitalRead(LED_PIN));
@@ -3698,18 +3810,7 @@ void loop() {
   // RTCM3 debug output (every 30 seconds) - helps diagnose PPK data logging
   static unsigned long lastRtcmDebug = 0;
   if (now - lastRtcmDebug >= 30000) {
-    Serial.println("[RTCM3] === 30s Summary ===");
-    Serial.printf("[RTCM3] Total frames: %lu (sync bytes: %lu)\n", rtcmFrameCount, rtcmSyncCount);
-    Serial.printf("[RTCM3] MSM7 (PPK): GPS=%lu GLO=%lu GAL=%lu BDS=%lu\n",
-      rtcm1077Count, rtcm1087Count, rtcm1097Count, rtcm1127Count);
-    Serial.printf("[RTCM3] MSM4 (fallback): GPS=%lu GLO=%lu GAL=%lu BDS=%lu\n",
-      rtcm1074Count, rtcm1084Count, rtcm1094Count, rtcm1124Count);
-    Serial.printf("[RTCM3] Eph: GPS=%lu GLO=%lu BDS=%lu GAL=%lu\n",
-      rtcm1019Count, rtcm1020Count, rtcm1042Count, rtcm1046Count);
-    Serial.printf("[RTCM3] Ref: 1006=%lu, Other=%lu\n", rtcm1006Count, rtcmOtherCount);
-    if (rtcm1077Count == 0 && rtcm1087Count == 0 && rtcm1097Count == 0 && rtcm1127Count == 0) {
-      Serial.println("[RTCM3] WARNING: No MSM7 messages! PPK will fail. Check LG290P RTCM config.");
-    }
+    // RTCM3 stats tracked but not printed (use 'status' command to see)
     lastRtcmDebug = now;
   }
 }
