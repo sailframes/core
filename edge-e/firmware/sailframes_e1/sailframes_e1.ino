@@ -226,7 +226,9 @@ struct WiFiNetwork {
 struct Config {
   WiFiNetwork wifi[MAX_WIFI_NETWORKS];
   int wifi_count = 0;
-  char upload_url[256] = "https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/prod/upload";
+  char upload_url[256] = "https://p9s9eia0t6.execute-api.us-east-1.amazonaws.com/prod/upload";  // Legacy, not used
+  char s3_bucket[128] = "sailframes-fleet-data-prod";
+  char s3_region[32] = "us-east-1";
   char boat_id[16] = "E1";
   int gps_rate_hz = 10;
   char wind_mac[20] = "C3:09:6D:1E:8A:FC";  // Calypso Mini MAC (can override in config.txt)
@@ -254,6 +256,8 @@ bool wifiConnected = false;
 bool otaInProgress = false;
 char connectedSSID[64] = "";
 int uploadCount = 0, uploadTotal = 0;
+int uploadSuccess = 0, uploadFailed = 0;
+char uploadCurrentFile[32] = "";  // Short name of file being uploaded
 
 // Get WiFi indicator based on connected SSID
 const char* getWifiIndicator() {
@@ -1908,18 +1912,26 @@ void updateDisplayD1() {
   // Recording state
   const char* recStr = getRecStateStr();
 
-  char statusStr[16] = "";
-  strcat(statusStr, recStr);
-  if (uploading) strcat(statusStr, " UP");
-  else if (wifiConnected) { strcat(statusStr, " "); strcat(statusStr, getWifiIndicator()); }
+  // Build status string safely (increased buffer size)
+  char statusStr[32] = "";
+  strncat(statusStr, recStr, sizeof(statusStr) - strlen(statusStr) - 1);
+  if (uploading) {
+    strncat(statusStr, " UP", sizeof(statusStr) - strlen(statusStr) - 1);
+  } else if (wifiConnected) {
+    strncat(statusStr, " ", sizeof(statusStr) - strlen(statusStr) - 1);
+    strncat(statusStr, getWifiIndicator(), sizeof(statusStr) - strlen(statusStr) - 1);
+  }
 #if ENABLE_WIND
-  if (wind.connected) strcat(statusStr, " C");
+  if (wind.connected) {
+    strncat(statusStr, " C", sizeof(statusStr) - strlen(statusStr) - 1);
+  }
 #endif
 
-  // Status line with recording state
-  snprintf(buf, sizeof(buf), "%s %s %d/%d",
+  // Status line with recording state (use larger buffer)
+  char statusBuf[48];
+  snprintf(statusBuf, sizeof(statusBuf), "%s %s %d/%d",
     config.boat_id, statusStr, dispSats, dispView);
-  u8g2.drawStr(1, 64, buf);
+  u8g2.drawStr(1, 64, statusBuf);
 
   u8g2.sendBuffer();
 }
@@ -2246,11 +2258,50 @@ String requestPresignedUrl(const char* filepath, size_t fileSize) {
   return presignedUrl;
 }
 
-// Upload a single file to S3
-// Small files (<1MB): Direct upload via API Gateway
-// Large files (>=1MB): Request presigned URL, upload directly to S3
+// Extract date from filepath for S3 key
+// Filepath format: /sf/20260405_225030/E1_nav.csv -> 2026-04-05
+String extractDateFromPath(const char* filepath) {
+  String path = String(filepath);
+
+  // Find the session folder (e.g., "20260405_225030")
+  int sfIdx = path.indexOf("/sf/");
+  if (sfIdx >= 0) {
+    int dateStart = sfIdx + 4;  // Skip "/sf/"
+    if (path.length() > dateStart + 8) {
+      String dateStr = path.substring(dateStart, dateStart + 8);
+      // Convert YYYYMMDD to YYYY-MM-DD
+      if (dateStr.length() == 8) {
+        return dateStr.substring(0, 4) + "-" + dateStr.substring(4, 6) + "-" + dateStr.substring(6, 8);
+      }
+    }
+  }
+
+  // Fallback: use GPS date if available (format: DDMMYY)
+  if (strlen(gps.date) >= 6 && (gps.date[4] != '0' || gps.date[5] != '0')) {
+    // gps.date is DDMMYY, convert to YYYY-MM-DD
+    char dateBuf[12];
+    snprintf(dateBuf, sizeof(dateBuf), "20%c%c-%c%c-%c%c",
+             gps.date[4], gps.date[5],  // YY
+             gps.date[2], gps.date[3],  // MM
+             gps.date[0], gps.date[1]); // DD
+    return String(dateBuf);
+  }
+
+  // Last resort: use a placeholder
+  return "unknown-date";
+}
+
+// Upload a single file directly to S3 via HTTP (no TLS)
+// Bypasses API Gateway entirely - bucket policy allows unauthenticated PUT to raw/E1/*
 bool uploadFile(const char* filepath) {
   uploadCount++;
+
+  // Extract short filename for display
+  const char* lastSlash = strrchr(filepath, '/');
+  const char* shortName = lastSlash ? lastSlash + 1 : filepath;
+  strncpy(uploadCurrentFile, shortName, sizeof(uploadCurrentFile) - 1);
+  uploadCurrentFile[sizeof(uploadCurrentFile) - 1] = '\0';
+
   updateDisplay();
 
   // Feed watchdog before file operations
@@ -2260,6 +2311,7 @@ bool uploadFile(const char* filepath) {
   // Verify WiFi is still connected
   if (WiFi.status() != WL_CONNECTED) {
     Serial.printf("[UPLOAD] WiFi disconnected, skipping: %s\n", filepath);
+    uploadFailed++;
     return false;
   }
 
@@ -2285,66 +2337,69 @@ bool uploadFile(const char* filepath) {
   yield();
   delay(10);
 
-  // Check minimum heap for SSL (~45KB needed for TLS handshake)
-  if (ESP.getFreeHeap() < 45000) {
-    Serial.printf("[UPLOAD] Warning: Low heap (%u bytes), SSL may fail\n", ESP.getFreeHeap());
-  }
+  // Extract filename from path
+  String pathStr = String(filepath);
+  int lastSlash = pathStr.lastIndexOf('/');
+  String filename = (lastSlash >= 0) ? pathStr.substring(lastSlash + 1) : pathStr;
 
-  bool success = false;
+  // Extract date for S3 path organization
+  String dateFolder = extractDateFromPath(filepath);
 
-  // Large files: Use presigned URL for direct S3 upload (bypasses API Gateway timeout)
-  if (fileSize >= PRESIGN_THRESHOLD) {
-    String presignedUrl = requestPresignedUrl(filepath, fileSize);
-    if (presignedUrl.length() > 0) {
-      success = uploadToS3Presigned(filepath, file, fileSize, presignedUrl);
-    }
-    file.close();
-    yield();
-    delay(50);
-    return success;
-  }
+  // Build S3 URL: http://{bucket}.s3.{region}.amazonaws.com/raw/{boat_id}/{date}/{filename}
+  String s3Url = "http://";
+  s3Url += config.s3_bucket;
+  s3Url += ".s3.";
+  s3Url += config.s3_region;
+  s3Url += ".amazonaws.com/raw/";
+  s3Url += config.boat_id;
+  s3Url += "/";
+  s3Url += dateFolder;
+  s3Url += "/";
+  s3Url += filename;
 
-  // Small files: Direct upload via API Gateway
-  // Check WiFi before attempting
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[UPLOAD] WiFi disconnected, skipping");
-    file.close();
-    return false;
-  }
+  Serial.printf("[UPLOAD] S3 HTTP PUT: %s\n", s3Url.c_str());
 
-  Serial.printf("[UPLOAD] Direct upload (heap: %u)\n", ESP.getFreeHeap());
-
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setHandshakeTimeout(30);
-  client.setTimeout(60);
+  // Use plain HTTP client (no TLS - bucket policy allows unauthenticated PUT)
+  WiFiClient client;
+  // WiFiClient.setTimeout takes SECONDS in ESP32 Arduino Core
+  client.setTimeout(300);  // 5 minute timeout for large files
 
   HTTPClient http;
-  http.setTimeout(60000);
+  // HTTPClient.setTimeout takes MILLISECONDS
+  http.setTimeout(300000);  // 5 minute timeout
   http.setReuse(false);
-
-  // Build the upload URL with filename as query param
-  String url = String(config.upload_url);
-  url += "?boat=";
-  url += config.boat_id;
-  url += "&file=";
-  url += filepath;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // Follow S3 redirects
 
   yield();
 
-  if (!http.begin(client, url)) {
+  if (!http.begin(client, s3Url)) {
     Serial.printf("[UPLOAD] Failed to begin HTTP: %s\n", filepath);
     file.close();
     return false;
   }
 
-  http.addHeader("Content-Type", "application/octet-stream");
+  // Determine content type
+  String contentType = "application/octet-stream";
+  if (filename.endsWith(".csv")) {
+    contentType = "text/csv";
+  } else if (filename.endsWith(".rtcm3")) {
+    contentType = "application/octet-stream";
+  }
+
+  http.addHeader("Content-Type", contentType);
   http.addHeader("Content-Length", String(fileSize));
+
+  // Add custom metadata headers (x-amz-meta-* prefix for S3)
+  http.addHeader("x-amz-meta-boat-id", config.boat_id);
+  http.addHeader("x-amz-meta-original-path", filepath);
 
   yield();
 
+  unsigned long startTime = millis();
   int httpCode = http.sendRequest("PUT", &file, fileSize);
+  unsigned long elapsed = (millis() - startTime) / 1000;
 
+  String response = http.getString();
   file.close();
   http.end();
 
@@ -2352,7 +2407,9 @@ bool uploadFile(const char* filepath) {
   delay(50);
 
   if (httpCode == 200 || httpCode == 201 || httpCode == 204) {
-    Serial.printf("[UPLOAD] Success: %s (HTTP %d)\n", filepath, httpCode);
+    Serial.printf("[UPLOAD] Success: %s (HTTP %d, %lus)\n", filepath, httpCode, elapsed);
+    uploadSuccess++;
+    updateDisplay();
     return true;
   } else {
     const char* errMsg = "";
@@ -2362,7 +2419,14 @@ bool uploadFile(const char* filepath) {
     else if (httpCode == -4) errMsg = "NOT_CONNECTED";
     else if (httpCode == -5) errMsg = "CONNECTION_LOST";
     else if (httpCode == -11) errMsg = "READ_TIMEOUT";
+    else if (httpCode == 403) errMsg = "FORBIDDEN (check bucket policy)";
+    else if (httpCode == 400) errMsg = "BAD_REQUEST";
     Serial.printf("[UPLOAD] Failed: %s (HTTP %d %s)\n", filepath, httpCode, errMsg);
+    if (response.length() > 0 && response.length() < 500) {
+      Serial.printf("[UPLOAD] Response: %s\n", response.c_str());
+    }
+    uploadFailed++;
+    updateDisplay();
     return false;
   }
 }
@@ -2392,64 +2456,34 @@ int countFilesToUpload(const char* dirname) {
   return count;
 }
 
-// Scan directory and upload all un-uploaded files
-// Test API Gateway connectivity before uploads
-bool testAPIGatewayConnection() {
-  // Show heap stats including largest contiguous block (critical for TLS)
+// Test S3 connectivity via HTTP (no TLS needed)
+bool testS3Connection() {
   size_t freeHeap = ESP.getFreeHeap();
-  size_t maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  Serial.printf("[UPLOAD] Testing API Gateway (heap: %u, maxBlock: %u, RSSI: %d)...\n",
-                freeHeap, maxBlock, WiFi.RSSI());
+  Serial.printf("[UPLOAD] Testing S3 connectivity (heap: %u, RSSI: %d)...\n",
+                freeHeap, WiFi.RSSI());
 
-  // TLS RSA operations need ~16KB contiguous block
-  if (maxBlock < 20000) {
-    Serial.printf("[UPLOAD] WARNING: Largest block %u bytes may be too small for TLS\n", maxBlock);
-  }
+  // Build S3 hostname
+  String s3Host = String(config.s3_bucket) + ".s3." + String(config.s3_region) + ".amazonaws.com";
 
   // Test DNS
   IPAddress ip;
-  if (!WiFi.hostByName("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", ip)) {
-    Serial.println("[UPLOAD] DNS FAILED");
+  if (!WiFi.hostByName(s3Host.c_str(), ip)) {
+    Serial.printf("[UPLOAD] DNS FAILED for %s\n", s3Host.c_str());
     return false;
   }
-  Serial.printf("[UPLOAD] DNS OK: %s\n", ip.toString().c_str());
+  Serial.printf("[UPLOAD] DNS OK: %s -> %s\n", s3Host.c_str(), ip.toString().c_str());
   yield();
 
-  // Test TCP connection to port 443
-  {
-    WiFiClient testClient;
-    testClient.setTimeout(10);
-    if (!testClient.connect(ip, 443)) {
-      Serial.println("[UPLOAD] TCP FAILED");
-      return false;
-    }
-    testClient.stop();
-  }
-  Serial.println("[UPLOAD] TCP OK");
-
-  // Give memory time to clean up after TCP client destruction
-  yield();
-  delay(200);
-
-  // Test TLS handshake
-  maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-  Serial.printf("[UPLOAD] TLS test (heap: %u, maxBlock: %u)...\n", ESP.getFreeHeap(), maxBlock);
-
-  WiFiClientSecure tlsClient;
-  tlsClient.setInsecure();  // Skip cert validation
-  tlsClient.setHandshakeTimeout(45);  // Longer timeout for slow connections
-  tlsClient.setTimeout(45);
-
-  if (!tlsClient.connect("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", 443)) {
-    char errBuf[128];
-    int err = tlsClient.lastError(errBuf, sizeof(errBuf));
-    Serial.printf("[UPLOAD] TLS FAILED: %s (err: %d, heap: %u)\n", errBuf, err, ESP.getFreeHeap());
+  // Test TCP connection to port 80 (HTTP)
+  WiFiClient testClient;
+  testClient.setTimeout(10);
+  if (!testClient.connect(ip, 80)) {
+    Serial.println("[UPLOAD] TCP port 80 FAILED");
     return false;
   }
-  tlsClient.stop();
-  Serial.println("[UPLOAD] TLS OK");
+  testClient.stop();
+  Serial.println("[UPLOAD] TCP OK (HTTP ready)");
 
-  // Give memory time to clean up
   yield();
   delay(50);
 
@@ -2706,9 +2740,12 @@ void checkWiFiUpload() {
 
     uploading = true;
     uploadCount = 0;
+    uploadSuccess = 0;
+    uploadFailed = 0;
+    uploadCurrentFile[0] = '\0';
 
     // Test connectivity before uploading
-    if (!testAPIGatewayConnection()) {
+    if (!testS3Connection()) {
       Serial.println("[UPLOAD] Connection test FAILED - aborting upload");
       uploading = false;
 #if ENABLE_WIND
@@ -2955,7 +2992,7 @@ void processCommand(String cmd, bool fromTelnet) {
 
       // Test TLS directly to AWS (skip intermediate tests now that BLE is off)
       tprintln("Testing TLS to AWS API Gateway...");
-      if (!testAPIGatewayConnection()) {
+      if (!testS3Connection()) {
         tprintln("AWS TLS FAILED");
 #if ENABLE_WIND
         // Reinit BLE and reconnect to wind sensor
@@ -3684,6 +3721,9 @@ void uploadTaskFunc(void* param) {
         // Set uploading=true BEFORE TLS test to pause sensors in main loop
         uploading = true;
         uploadCount = 0;
+        uploadSuccess = 0;
+        uploadFailed = 0;
+        uploadCurrentFile[0] = '\0';
 
         // Give main loop time to see the flag and stop sensor reads
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -3694,7 +3734,7 @@ void uploadTaskFunc(void* param) {
         // Test connectivity before starting uploads (skip after repeated failures)
         bool connOK = true;
         if (uploadRetryCount < 2) {
-          connOK = testAPIGatewayConnection();
+          connOK = testS3Connection();
           if (!connOK) {
             Serial.println("[UPLOAD] Connectivity test failed");
           }
@@ -3709,6 +3749,11 @@ void uploadTaskFunc(void* param) {
           uploadRetryCount++;
         } else {
           if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000))) {
+            // Count files for progress display
+            uploadTotal = countFilesToUpload("/sf");
+            Serial.printf("[UPLOAD] Found %d files to upload\n", uploadTotal);
+            updateDisplay();
+
             uploadDirectory("/sf");
             xSemaphoreGive(sdMutex);
           }
@@ -3795,16 +3840,38 @@ void loop() {
 
   if (now - lastDisp >= DISPLAY_UPDATE_MS) {
     if (uploading) {
-      // Show upload status on display
+      // Show upload status with progress bar
       u8g2.clearBuffer();
-      u8g2.setFont(u8g2_font_helvB14_tr);
-      u8g2.drawStr(10, 25, "UPLOADING");
+      u8g2.setFont(u8g2_font_helvB12_tr);
+      u8g2.drawStr(5, 14, "UPLOADING");
+
+      // Progress bar (full width)
+      int pct = (uploadTotal > 0) ? (uploadCount * 100 / uploadTotal) : 0;
+      u8g2.drawFrame(5, 18, 118, 12);  // Outer frame
+      if (pct > 0) {
+        u8g2.drawBox(7, 20, (114 * pct) / 100, 8);  // Fill
+      }
+
+      // Progress text: "3/10 (2 ok, 1 fail)"
       u8g2.setFont(u8g2_font_6x10_tr);
-      char buf[32];
-      snprintf(buf, sizeof(buf), "Files: %d", uploadCount);
-      u8g2.drawStr(10, 45, buf);
+      char buf[40];
+      if (uploadFailed > 0) {
+        snprintf(buf, sizeof(buf), "%d/%d (%d ok %d fail)",
+                 uploadCount, uploadTotal, uploadSuccess, uploadFailed);
+      } else {
+        snprintf(buf, sizeof(buf), "%d/%d done", uploadCount, uploadTotal);
+      }
+      u8g2.drawStr(5, 42, buf);
+
+      // Current file (truncated)
+      char shortFile[22];
+      strncpy(shortFile, uploadCurrentFile, 21);
+      shortFile[21] = '\0';
+      u8g2.drawStr(5, 54, shortFile);
+
+      // WiFi SSID
       snprintf(buf, sizeof(buf), "WiFi: %s", connectedSSID);
-      u8g2.drawStr(10, 58, buf);
+      u8g2.drawStr(5, 64, buf);
       u8g2.sendBuffer();
     } else {
       updateDisplay();

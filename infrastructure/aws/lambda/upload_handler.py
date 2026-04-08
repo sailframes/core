@@ -50,6 +50,8 @@ def extract_date_from_path(file_path):
     Handles formats:
       - /mnt/sailframes-data/2026-04-01/gps/track.csv -> 2026-04-01
       - E1_20260401_143022_nav.csv -> 2026-04-01
+
+    Returns None if date cannot be extracted (caller should try CSV content).
     """
     # First try to extract YYYY-MM-DD from path
     date_match = re.search(r'(\d{4}-\d{2}-\d{2})', file_path)
@@ -63,7 +65,56 @@ def extract_date_from_path(file_path):
         if len(part) == 8 and part.isdigit():
             return f"{part[:4]}-{part[4:6]}-{part[6:8]}"
 
-    # Fallback to today
+    # Return None - caller should try to extract from CSV content
+    return None
+
+
+def extract_date_from_csv_content(csv_content, filename):
+    """Extract date from CSV content.
+
+    For E1 nav files with gps_date column (DDMMYY format).
+    Falls back to today's date if not found.
+    """
+    if not filename.endswith('.csv') or '_nav.csv' not in filename:
+        return datetime.now().strftime('%Y-%m-%d')
+
+    try:
+        # Parse CSV to find gps_date column
+        lines = csv_content.split('\n')
+        if len(lines) < 2:
+            return datetime.now().strftime('%Y-%m-%d')
+
+        # Parse header to find gps_date column index
+        header = lines[0].strip().split(',')
+        gps_date_idx = None
+        for i, col in enumerate(header):
+            if col.strip() == 'gps_date':
+                gps_date_idx = i
+                break
+
+        if gps_date_idx is None:
+            print(f"No gps_date column in CSV, using today's date")
+            return datetime.now().strftime('%Y-%m-%d')
+
+        # Look for first row with valid gps_date
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            fields = line.strip().split(',')
+            if len(fields) > gps_date_idx:
+                gps_date = fields[gps_date_idx].strip()
+                if len(gps_date) == 6:
+                    # Parse DDMMYY format
+                    day = int(gps_date[:2])
+                    month = int(gps_date[2:4])
+                    year = 2000 + int(gps_date[4:6])
+                    if 1 <= day <= 31 and 1 <= month <= 12:
+                        result = f"{year}-{month:02d}-{day:02d}"
+                        print(f"Extracted date from CSV gps_date column: {result}")
+                        return result
+    except Exception as e:
+        print(f"Error parsing CSV for date: {e}")
+
     return datetime.now().strftime('%Y-%m-%d')
 
 
@@ -80,11 +131,16 @@ def lambda_handler(event, context):
         # Extract filename from path
         filename = file_path.split('/')[-1] if '/' in file_path else file_path
 
-        # Extract date folder
+        # Extract date folder (may be None if not in path/filename)
         date_folder = extract_date_from_path(file_path)
 
-        # Build S3 key
-        s3_key = f"raw/{boat_id}/{date_folder}/{filename}"
+        # For presigned URLs, we can't read CSV content, so fall back to today
+        if date_folder is None and request_presign:
+            date_folder = datetime.now().strftime('%Y-%m-%d')
+            print(f"Presigned URL request without date in path, using today: {date_folder}")
+
+        # Build S3 key (may be updated later if we extract date from CSV content)
+        s3_key = f"raw/{boat_id}/{date_folder}/{filename}" if date_folder else None
 
         # Handle presigned URL request for large files
         if request_presign:
@@ -110,7 +166,11 @@ def lambda_handler(event, context):
                 ExpiresIn=PRESIGN_EXPIRY
             )
 
-            print(f"Generated presigned URL for: {s3_key} ({file_size} bytes)")
+            # Convert to HTTP for ESP32 E1 devices (TLS is broken on Arduino Core 3.3.7)
+            # S3 supports both HTTP and HTTPS - fleet data is not sensitive
+            presigned_url = presigned_url.replace('https://', 'http://', 1)
+
+            print(f"Generated presigned URL (HTTP) for: {s3_key} ({file_size} bytes)")
 
             return {
                 'statusCode': 200,
@@ -140,6 +200,13 @@ def lambda_handler(event, context):
             body = base64.b64decode(body)
         elif isinstance(body, str):
             body = body.encode('utf-8')
+
+        # If date_folder wasn't in path/filename, try to extract from CSV content
+        if date_folder is None:
+            csv_content = body.decode('utf-8', errors='ignore') if isinstance(body, bytes) else body
+            date_folder = extract_date_from_csv_content(csv_content, filename)
+            s3_key = f"raw/{boat_id}/{date_folder}/{filename}"
+            print(f"Extracted date from CSV content: {date_folder}")
 
         # Determine content type
         content_type = 'application/octet-stream'

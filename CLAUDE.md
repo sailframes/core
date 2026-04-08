@@ -238,24 +238,41 @@ to sequential `session_NNN` if GPS date/time is not valid at recording start.
 
 ### E1 Wi-Fi Upload Architecture
 
-The E1 uses a two-tier upload strategy to handle API Gateway's 29-second timeout:
+**IMPORTANT:** ESP32 Arduino Core 3.3.7 has broken TLS (mbedTLS BIGNUM allocation
+failures during RSA operations). The E1 uploads directly to S3 via HTTP, bypassing
+API Gateway entirely.
 
-| File Size | Method | Endpoint |
-|-----------|--------|----------|
-| < 1 MB | Direct POST | API Gateway → Lambda → S3 |
-| ≥ 1 MB | Presigned URL | API Gateway → Lambda (get URL) → Direct S3 PUT |
+| Method | Endpoint |
+|--------|----------|
+| Direct S3 PUT | `http://{bucket}.s3.{region}.amazonaws.com/raw/E1/{date}/{filename}` |
 
-**Upload flow for large files:**
-1. Request presigned URL via POST to `/upload?boat=E1&file=PATH&presign=1&size=BYTES`
-2. Lambda generates presigned S3 PUT URL (1-hour expiry)
-3. ESP32 uploads directly to S3 using plain HTTP (no TLS overhead)
-4. S3 accepts the upload with metadata (boat_id, original_path)
+**Upload flow:**
+1. E1 connects to known Wi-Fi network at yacht club
+2. Tests DNS and TCP connectivity to S3 (port 80, no TLS)
+3. Uploads files directly to S3 via HTTP PUT
+4. S3 bucket policy allows unauthenticated PUT to `raw/E1/*` paths
 
-**Why HTTP instead of HTTPS for S3:**
-- ESP32 TLS is slow and memory-constrained
+**S3 Path Format:**
+- `raw/E1/{date}/{filename}` (e.g., `raw/E1/2026-04-07/E1_20260407_143022_nav.csv`)
+- Date extracted from session folder name or GPS time
+
+**Why HTTP instead of HTTPS:**
+- ESP32 TLS is fundamentally broken in Arduino Core 3.3.7 (mbedTLS bug)
+- Even with 49KB contiguous heap, RSA operations fail with BIGNUM errors
 - Fleet data (GPS, IMU) is not sensitive
-- S3 supports both HTTP and HTTPS
-- Reduces upload time significantly for large RTCM3 files
+- S3 supports HTTP natively
+- No need for API Gateway or presigned URLs
+
+**S3 Bucket Policy Required:**
+```json
+{
+  "Sid": "E1DirectHTTPUpload",
+  "Effect": "Allow",
+  "Principal": "*",
+  "Action": "s3:PutObject",
+  "Resource": "arn:aws:s3:::sailframes-fleet-data-prod/raw/E1/*"
+}
+```
 
 **Upload marker files:**
 - After successful upload, creates `filename.uploaded` marker
@@ -264,19 +281,15 @@ The E1 uses a two-tier upload strategy to handle API Gateway's 29-second timeout
 
 ### E1 BLE/Wi-Fi Radio Conflict
 
-**Issue:** ESP32's shared radio and **TLS memory requirements** (~40-50KB heap for
-SSL buffers) cause conflicts when running BLE + Wi-Fi + HTTPS simultaneously.
+**Issue:** ESP32 has a single shared radio for BLE and Wi-Fi. Both cannot operate
+simultaneously with full reliability.
 
-**Symptoms:**
-- HTTP error -1 (CONNECTION_REFUSED/TIMEOUT) during uploads
-- TLS handshake failures even with good Wi-Fi signal
-- Heap exhaustion crashes
+**Current behavior:** BLE (wind sensor) is fully deinitialized before Wi-Fi uploads,
+then reinitialized after. Now that uploads use plain HTTP (not HTTPS), this is
+somewhat conservative but still recommended for reliability.
 
-**Current behavior:** BLE is fully deinitialized before Wi-Fi uploads, then
-reinitialized after. This is conservative but reliable.
-
-**Note:** Plain HTTP (no TLS) has much lower memory pressure and may work with
-BLE still active. Future optimization: skip BLE deinit when upload_url uses HTTP.
+**Future optimization:** Since uploads now use HTTP (no TLS memory pressure), it
+may be possible to keep BLE active during uploads. Testing needed.
 
 **Solution — BLE deinit sequence before Wi-Fi operations:**
 ```cpp
@@ -945,6 +958,12 @@ contract or data schema, update this file so other sessions pick it up.
     caused immediate wake, GPS module stayed powered. Replaced with hardware slide
     switch on PowerBoost 1000C EN pin for reliable power control.
 
+18. **ESP32 TLS broken in Arduino Core 3.3.7** — mbedTLS has BIGNUM memory allocation
+    failures during RSA operations, even with ~49KB contiguous heap. Error: "RSA - The
+    public key operation failed : BIGNUM - Memory allocation failed (err: -17040)".
+    **Workaround:** E1 uploads directly to S3 via HTTP (no TLS). Bucket policy allows
+    unauthenticated PUT to `raw/E1/*` paths. See `infrastructure/aws/E1_HTTP_UPLOAD_SETUP.md`.
+
 ---
 
 ## Weather Data Integration
@@ -1018,7 +1037,13 @@ Competitive analysis is maintained separately.
   - Fixed GPS session folder naming for days 1-9 and times 00:00-09:59 UTC
   - Added `sendPQTM()` response logging for debugging configuration issues
   - Clarified BLE/WiFi conflict is specifically about TLS memory pressure
+- April 7, 2026: E1 direct S3 HTTP upload (TLS workaround)
+  - Discovered ESP32 Arduino Core 3.3.7 has broken TLS (mbedTLS BIGNUM allocation failure)
+  - Bypassed API Gateway entirely — E1 now uploads directly to S3 via HTTP
+  - Added S3 bucket policy allowing unauthenticated PUT to `raw/E1/*` paths
+  - Removed all TLS/HTTPS from upload path (testS3Connection replaces testAPIGatewayConnection)
+  - Created `infrastructure/aws/E1_HTTP_UPLOAD_SETUP.md` deployment guide
 
 ---
 
-*Last updated: April 5, 2026 — E1 power management, battery monitoring, RTCM3 boot config*
+*Last updated: April 7, 2026 — E1 direct S3 HTTP upload (TLS workaround)*
