@@ -3673,7 +3673,6 @@ void uploadTaskFunc(void* param) {
 
     // Perform upload if triggered
     if (shouldUpload) {
-      Serial.printf("[UPLOAD] Starting, heap: %u\n", ESP.getFreeHeap());
       lastUploadAttempt = now;
 
       // Try to connect to WiFi if not connected
@@ -3682,13 +3681,22 @@ void uploadTaskFunc(void* param) {
       }
 
       if (wifiConnected) {
+        // Set uploading=true BEFORE TLS test to pause sensors in main loop
+        uploading = true;
+        uploadCount = 0;
+
+        // Give main loop time to see the flag and stop sensor reads
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        Serial.printf("[UPLOAD] Starting (heap: %u, maxBlock: %u)\n",
+                      ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
         // Test connectivity before starting uploads
         if (!testAPIGatewayConnection()) {
           Serial.println("[UPLOAD] Connectivity test failed, skipping");
+          uploading = false;
           uploadRetryCount++;
         } else {
-          uploading = true;
-
           if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000))) {
             uploadDirectory("/sf");
             xSemaphoreGive(sdMutex);
