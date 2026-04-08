@@ -3691,9 +3691,20 @@ void uploadTaskFunc(void* param) {
         Serial.printf("[UPLOAD] Starting (heap: %u, maxBlock: %u)\n",
                       ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
-        // Test connectivity before starting uploads
-        if (!testAPIGatewayConnection()) {
-          Serial.println("[UPLOAD] Connectivity test failed, skipping");
+        // Test connectivity before starting uploads (skip after repeated failures)
+        bool connOK = true;
+        if (uploadRetryCount < 2) {
+          connOK = testAPIGatewayConnection();
+          if (!connOK) {
+            Serial.println("[UPLOAD] Connectivity test failed");
+          }
+        } else {
+          // After 2 failures, skip test and try upload directly
+          // HTTPClient might handle TLS differently than WiFiClientSecure
+          Serial.printf("[UPLOAD] Skipping conn test (retry %d), trying upload directly\n", uploadRetryCount);
+        }
+
+        if (!connOK && uploadRetryCount < 2) {
           uploading = false;
           uploadRetryCount++;
         } else {
