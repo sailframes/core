@@ -47,6 +47,7 @@
 #include <U8g2lib.h>
 #include <Adafruit_BNO08x.h>
 #include <Adafruit_DPS310.h>
+#include <esp_heap_caps.h>
 // NimBLE configuration - disable unused features to reduce size
 #define CONFIG_BT_NIMBLE_ROLE_CENTRAL 1
 #define CONFIG_BT_NIMBLE_ROLE_PERIPHERAL 0
@@ -2394,8 +2395,16 @@ int countFilesToUpload(const char* dirname) {
 // Scan directory and upload all un-uploaded files
 // Test API Gateway connectivity before uploads
 bool testAPIGatewayConnection() {
-  Serial.printf("[UPLOAD] Testing API Gateway (heap: %u, RSSI: %d)...\n",
-                ESP.getFreeHeap(), WiFi.RSSI());
+  // Show heap stats including largest contiguous block (critical for TLS)
+  size_t freeHeap = ESP.getFreeHeap();
+  size_t maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[UPLOAD] Testing API Gateway (heap: %u, maxBlock: %u, RSSI: %d)...\n",
+                freeHeap, maxBlock, WiFi.RSSI());
+
+  // TLS RSA operations need ~16KB contiguous block
+  if (maxBlock < 20000) {
+    Serial.printf("[UPLOAD] WARNING: Largest block %u bytes may be too small for TLS\n", maxBlock);
+  }
 
   // Test DNS
   IPAddress ip;
@@ -2420,10 +2429,11 @@ bool testAPIGatewayConnection() {
 
   // Give memory time to clean up after TCP client destruction
   yield();
-  delay(100);
+  delay(200);
 
   // Test TLS handshake
-  Serial.printf("[UPLOAD] TLS test (heap: %u)...\n", ESP.getFreeHeap());
+  maxBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  Serial.printf("[UPLOAD] TLS test (heap: %u, maxBlock: %u)...\n", ESP.getFreeHeap(), maxBlock);
 
   WiFiClientSecure tlsClient;
   tlsClient.setInsecure();  // Skip cert validation
@@ -3721,18 +3731,21 @@ void loop() {
   // Update GPS speed-triggered recording state machine
   updateRecordingState();
 
-  if (now - lastIMU >= IMU_INTERVAL_MS) {
-    readIMU();
-    if (logging) logIMU();
-    lastIMU = now;
-  }
+  // Skip sensor reads during upload to reduce memory fragmentation
+  if (!uploading) {
+    if (now - lastIMU >= IMU_INTERVAL_MS) {
+      readIMU();
+      if (logging) logIMU();
+      lastIMU = now;
+    }
 
-  // Pressure sensor (same interval as IMU for gust detection)
-  static unsigned long lastPres = 0;
-  if (presOK && now - lastPres >= IMU_INTERVAL_MS) {
-    readPressure();
-    if (logging) logPressure();
-    lastPres = now;
+    // Pressure sensor (same interval as IMU for gust detection)
+    static unsigned long lastPres = 0;
+    if (presOK && now - lastPres >= IMU_INTERVAL_MS) {
+      readPressure();
+      if (logging) logPressure();
+      lastPres = now;
+    }
   }
 
   // Reset pressure min/max every 10 seconds for fresh gust window
