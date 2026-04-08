@@ -104,6 +104,15 @@ static NimBLEUUID WIND_SPEED_CHAR_UUID("2A72");      // Apparent Wind Speed (uin
 static NimBLEUUID WIND_DIR_CHAR_UUID("2A73");        // Apparent Wind Direction (uint16, degrees * 100)
 static NimBLEUUID BATTERY_SERVICE_UUID("180F");
 static NimBLEUUID BATTERY_CHAR_UUID("2A19");         // Battery Level (uint8, 0-100%)
+
+// Calypso Data Service (0x180D) - combined wind+battery in single notification
+// Format: [speed_lo, speed_hi, dir_lo, dir_hi, battery] where battery * 10 = %
+static NimBLEUUID DATA_SERVICE_UUID("180D");
+static NimBLEUUID DATA_CHAR_UUID("2A39");            // Combined wind+battery (5 bytes)
+
+// Device Information Service (0x180A) - for reading firmware version
+static NimBLEUUID DEVINFO_SERVICE_UUID("180A");
+static NimBLEUUID FIRMWARE_CHAR_UUID("2A26");        // Firmware Revision String
 // ============================================================
 // NMEA CHECKSUM + PQTM SENDER
 // ============================================================
@@ -171,9 +180,13 @@ struct GPSData {
 } gps;
 
 struct IMUData {
-  float accel_x = 0, accel_y = 0, accel_z = 0;
-  float gyro_x = 0, gyro_y = 0, gyro_z = 0;
+  float accel_x = 0, accel_y = 0, accel_z = 0;       // Raw acceleration (includes gravity)
+  float gyro_x = 0, gyro_y = 0, gyro_z = 0;          // Angular velocity (deg/s)
+  float linaccel_x = 0, linaccel_y = 0, linaccel_z = 0;  // Linear acceleration (gravity removed)
+  float mag_x = 0, mag_y = 0, mag_z = 0;             // Magnetic field (uTesla) for interference analysis
   float heel = 0, pitch = 0, heading = 0;
+  uint8_t stability = 0;    // 0=Unknown, 1=OnTable, 2=Stationary, 3=Stable, 4=Motion
+  uint8_t accuracy = 0;     // Rotation vector accuracy (0-3, 3=highest)
 } imu;
 
 struct WindData {
@@ -186,6 +199,7 @@ struct WindData {
   unsigned long lastUpdate = 0;
   char deviceName[32] = "";
   char deviceAddr[20] = "";
+  char firmware[16] = "";   // Firmware version from Device Information Service
 } wind;
 
 struct BatteryData {
@@ -286,6 +300,7 @@ NimBLEClient* pWindClient = nullptr;
 NimBLERemoteCharacteristic* pWindSpeedChar = nullptr;
 NimBLERemoteCharacteristic* pWindDirChar = nullptr;
 NimBLERemoteCharacteristic* pBatteryChar = nullptr;
+NimBLERemoteCharacteristic* pDataChar = nullptr;      // Combined wind+battery (0x2A39)
 bool windScanning = false;
 bool windOK = false;
 bool bleInitialized = false;  // Track BLE init state for safe deinit
@@ -366,10 +381,27 @@ void windDirNotifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, si
   }
 }
 
-// BLE notification callback for battery
+// BLE notification callback for battery (0x180F / 0x2A19)
 void batteryNotifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
   if (length >= 1) {
     wind.battery = pData[0];
+  }
+}
+
+// BLE notification callback for combined Data Service (0x180D / 0x2A39)
+// Format: [speed_lo, speed_hi, dir_lo, dir_hi, battery] where battery * 10 = %
+void dataNotifyCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+  if (length >= 5) {
+    uint16_t speedRaw = pData[0] | (pData[1] << 8);
+    uint16_t dirRaw = pData[2] | (pData[3] << 8);
+    uint8_t battRaw = pData[4];
+
+    wind.speed_mps = speedRaw / 100.0;
+    wind.speed_kts = wind.speed_mps * 1.94384;
+    wind.angle_deg = dirRaw;
+    wind.battery = battRaw * 10;  // Manual says value * 10 = %
+    wind.newData = true;
+    wind.lastUpdate = millis();
   }
 }
 
@@ -387,6 +419,7 @@ class WindClientCallbacks : public NimBLEClientCallbacks {
     pWindSpeedChar = nullptr;
     pWindDirChar = nullptr;
     pBatteryChar = nullptr;
+    pDataChar = nullptr;
   }
 };
 
@@ -535,17 +568,40 @@ bool connectToCalypso() {
     Serial.println("[WIND] Subscribed to wind direction");
   }
 
-  // Try to get battery service
+  // Try to get battery from Battery Service (0x180F)
   NimBLERemoteService* pBattService = pWindClient->getService(BATTERY_SERVICE_UUID);
   if (pBattService) {
     pBatteryChar = pBattService->getCharacteristic(BATTERY_CHAR_UUID);
     if (pBatteryChar) {
       if (pBatteryChar->canNotify()) {
         pBatteryChar->subscribe(true, batteryNotifyCallback);
-      } else if (pBatteryChar->canRead()) {
-        uint8_t batt = pBatteryChar->readValue<uint8_t>();
-        wind.battery = batt;
+      }
+      if (pBatteryChar->canRead()) {
+        wind.battery = pBatteryChar->readValue<uint8_t>();
         Serial.printf("[WIND] Battery: %d%%\n", wind.battery);
+      }
+    }
+  }
+
+  // Also try Data Service (0x180D) for combined wind+battery notifications
+  NimBLERemoteService* pDataService = pWindClient->getService(DATA_SERVICE_UUID);
+  if (pDataService) {
+    pDataChar = pDataService->getCharacteristic(DATA_CHAR_UUID);
+    if (pDataChar && pDataChar->canNotify()) {
+      pDataChar->subscribe(true, dataNotifyCallback);
+    }
+  }
+
+  // Read firmware version from Device Information Service (0x180A)
+  NimBLERemoteService* pDevInfoService = pWindClient->getService(DEVINFO_SERVICE_UUID);
+  if (pDevInfoService) {
+    NimBLERemoteCharacteristic* pFwChar = pDevInfoService->getCharacteristic(FIRMWARE_CHAR_UUID);
+    if (pFwChar && pFwChar->canRead()) {
+      std::string fw = pFwChar->readValue();
+      if (fw.length() > 0) {
+        strncpy(wind.firmware, fw.c_str(), sizeof(wind.firmware) - 1);
+        wind.firmware[sizeof(wind.firmware) - 1] = '\0';
+        Serial.printf("[WIND] Firmware: %s\n", wind.firmware);
       }
     }
   }
@@ -553,6 +609,30 @@ bool connectToCalypso() {
   wind.connected = true;
   windOK = true;
   Serial.println("[WIND] Connected and streaming");
+
+  // Display wind sensor status on OLED at startup
+  if (oledOK) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_tr);
+    u8g2.drawStr(0, 12, "Wind Sensor OK");
+
+    char buf[32];
+    if (strlen(wind.deviceName) > 0) {
+      snprintf(buf, sizeof(buf), "%s", wind.deviceName);
+      u8g2.drawStr(0, 26, buf);
+    }
+
+    if (wind.battery >= 0) {
+      snprintf(buf, sizeof(buf), "Battery: %d%%", wind.battery);
+      u8g2.drawStr(0, 40, buf);
+    } else {
+      u8g2.drawStr(0, 40, "Battery: --");
+    }
+
+    u8g2.sendBuffer();
+    delay(2000);  // Show for 2 seconds
+  }
+
   return true;
 }
 
@@ -781,6 +861,22 @@ void setup() {
     // Also enable accelerometer for raw data
     if (!bno08x.enableReport(SH2_ACCELEROMETER, IMU_INTERVAL_MS * 1000)) {
       Serial.println("[IMU] WARNING: Failed to enable accelerometer");
+    }
+    // Enable gyroscope for turning rate (tack/gybe detection)
+    if (!bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_INTERVAL_MS * 1000)) {
+      Serial.println("[IMU] WARNING: Failed to enable gyroscope");
+    }
+    // Enable linear acceleration (gravity removed) for impact/wave detection
+    if (!bno08x.enableReport(SH2_LINEAR_ACCELERATION, IMU_INTERVAL_MS * 1000)) {
+      Serial.println("[IMU] WARNING: Failed to enable linear acceleration");
+    }
+    // Enable stability classifier for motion state detection
+    if (!bno08x.enableReport(SH2_STABILITY_CLASSIFIER, 500000)) {  // 500ms, doesn't need high rate
+      Serial.println("[IMU] WARNING: Failed to enable stability classifier");
+    }
+    // Enable magnetometer for interference analysis (helps understand heading drift)
+    if (!bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, IMU_INTERVAL_MS * 1000)) {
+      Serial.println("[IMU] WARNING: Failed to enable magnetometer");
     }
     Serial.println("[IMU] BNO085 OK");
   } else {
@@ -1337,10 +1433,14 @@ void readIMU() {
     bno08x.enableReport(SH2_GAME_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
     bno08x.enableReport(SH2_ROTATION_VECTOR, IMU_INTERVAL_MS * 1000);
     bno08x.enableReport(SH2_ACCELEROMETER, IMU_INTERVAL_MS * 1000);
+    bno08x.enableReport(SH2_GYROSCOPE_CALIBRATED, IMU_INTERVAL_MS * 1000);
+    bno08x.enableReport(SH2_LINEAR_ACCELERATION, IMU_INTERVAL_MS * 1000);
+    bno08x.enableReport(SH2_STABILITY_CLASSIFIER, 500000);
+    bno08x.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, IMU_INTERVAL_MS * 1000);
   }
 
-  // Read only a few events to avoid blocking display updates
-  int maxReads = 3;
+  // Read sensor events - we have 7 reports enabled so need enough reads
+  int maxReads = 10;
   while (maxReads-- > 0 && bno08x.getSensorEvent(&sensorValue)) {
     switch (sensorValue.sensorId) {
       case SH2_GAME_ROTATION_VECTOR:
@@ -1390,8 +1490,42 @@ void readIMU() {
         // Convert to 0-360 range
         if (heading < 0) heading += 360.0;
         imu.heading = heading;
+
+        // Accuracy estimate (0-3, 3=highest calibration)
+        imu.accuracy = sensorValue.status & 0x03;
         break;
       }
+
+      case SH2_GYROSCOPE_CALIBRATED:
+        // Angular velocity in rad/s - convert to deg/s for easier interpretation
+        // Useful for detecting tack/gybe maneuvers (high yaw rate = turning)
+        imu.gyro_x = sensorValue.un.gyroscope.x * 180.0 / PI;  // Roll rate (deg/s)
+        imu.gyro_y = sensorValue.un.gyroscope.y * 180.0 / PI;  // Pitch rate (deg/s)
+        imu.gyro_z = sensorValue.un.gyroscope.z * 180.0 / PI;  // Yaw/turn rate (deg/s)
+        break;
+
+      case SH2_LINEAR_ACCELERATION:
+        // Acceleration with gravity removed - pure motion acceleration
+        // Useful for detecting impacts, waves, sudden movements
+        imu.linaccel_x = sensorValue.un.linearAcceleration.x;
+        imu.linaccel_y = sensorValue.un.linearAcceleration.y;
+        imu.linaccel_z = sensorValue.un.linearAcceleration.z;
+        break;
+
+      case SH2_STABILITY_CLASSIFIER:
+        // Motion state: 0=Unknown, 1=OnTable, 2=Stationary, 3=Stable, 4=Motion
+        // Useful for auto-detecting sailing vs at dock
+        imu.stability = sensorValue.un.stabilityClassifier.classification;
+        break;
+
+      case SH2_MAGNETIC_FIELD_CALIBRATED:
+        // Raw magnetic field in microtesla (uT)
+        // Useful for analyzing magnetic interference from keel, rigging, engine
+        // Earth's field is ~25-65 uT depending on location
+        imu.mag_x = sensorValue.un.magneticField.x;
+        imu.mag_y = sensorValue.un.magneticField.y;
+        imu.mag_z = sensorValue.un.magneticField.z;
+        break;
     }
   }
 }
@@ -1787,7 +1921,7 @@ void startLogging() {
     navFile.println("ms,utc,lat,lon,alt,sog,cog,sat,hdop,fix,gps_date");
     navFile.flush();
     if (imuFile) {
-      imuFile.println("ms,utc,ax,ay,az,gx,gy,gz,heel,pitch");
+      imuFile.println("ms,utc,ax,ay,az,gx,gy,gz,lax,lay,laz,mx,my,mz,heel,pitch,heading,stability,accuracy");
       imuFile.flush();
     }
 #if ENABLE_WIND
@@ -1832,10 +1966,15 @@ void logNav() {
 void logIMU() {
   if (!imuFile || !logging) return;
   unsigned long e = millis() - logStart;
-  imuFile.printf("%lu,%s,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.1f,%.1f\n",
-    e, gps.utc_time, imu.accel_x, imu.accel_y, imu.accel_z,
-    imu.gyro_x, imu.gyro_y, imu.gyro_z, imu.heel, imu.pitch);
-  totalBytes += 120;
+  imuFile.printf("%lu,%s,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.3f,%.3f,%.3f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%u,%u\n",
+    e, gps.utc_time,
+    imu.accel_x, imu.accel_y, imu.accel_z,           // Raw acceleration (with gravity)
+    imu.gyro_x, imu.gyro_y, imu.gyro_z,              // Angular velocity (deg/s)
+    imu.linaccel_x, imu.linaccel_y, imu.linaccel_z,  // Linear acceleration (no gravity)
+    imu.mag_x, imu.mag_y, imu.mag_z,                 // Magnetic field (uT)
+    imu.heel, imu.pitch, imu.heading,                // Orientation
+    imu.stability, imu.accuracy);                    // Motion state & calibration quality
+  totalBytes += 210;
 }
 
 // ============================================================
@@ -2339,8 +2478,8 @@ bool uploadFile(const char* filepath) {
 
   // Extract filename from path
   String pathStr = String(filepath);
-  int lastSlash = pathStr.lastIndexOf('/');
-  String filename = (lastSlash >= 0) ? pathStr.substring(lastSlash + 1) : pathStr;
+  int slashIdx = pathStr.lastIndexOf('/');
+  String filename = (slashIdx >= 0) ? pathStr.substring(slashIdx + 1) : pathStr;
 
   // Extract date for S3 path organization
   String dateFolder = extractDateFromPath(filepath);
@@ -2722,6 +2861,7 @@ void checkWiFiUpload() {
     pWindSpeedChar = nullptr;
     pWindDirChar = nullptr;
     pBatteryChar = nullptr;
+    pDataChar = nullptr;
     bleInitialized = false;
     delay(500);
     Serial.printf("[UPLOAD] BLE deinit done, heap: %u bytes\n", ESP.getFreeHeap());
@@ -2962,6 +3102,7 @@ void processCommand(String cmd, bool fromTelnet) {
       pWindSpeedChar = nullptr;
       pWindDirChar = nullptr;
       pBatteryChar = nullptr;
+      pDataChar = nullptr;
       bleInitialized = false;
       delay(500);
       tprintf("BLE deinit done, heap: %u bytes\n", ESP.getFreeHeap());
@@ -3238,6 +3379,9 @@ void processCommand(String cmd, bool fromTelnet) {
     if (strlen(wind.deviceName) > 0) {
       tprintf("Device: %s (%s)\n", wind.deviceName, wind.deviceAddr);
     }
+    if (strlen(wind.firmware) > 0) {
+      tprintf("Firmware: %s\n", wind.firmware);
+    }
     if (wind.connected) {
       tprintf("Speed: %.1f kts (%.1f m/s)\n", wind.speed_kts, wind.speed_mps);
       tprintf("Direction: %d deg (apparent)\n", wind.angle_deg);
@@ -3306,6 +3450,7 @@ void processCommand(String cmd, bool fromTelnet) {
     pWindSpeedChar = nullptr;
     pWindDirChar = nullptr;
     pBatteryChar = nullptr;
+    pDataChar = nullptr;
     wind.connected = false;
     NimBLEDevice::deinit(true);
     bleInitialized = false;

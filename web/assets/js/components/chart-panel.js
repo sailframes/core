@@ -51,13 +51,32 @@ class ChartPanel {
             pitch:    { label: 'Pitch (°)',     color: '#ffad1f', yAxis: 'yDeg' },
             aws:      { label: 'AWS (kn)',      color: '#00ba7c', yAxis: 'ySpeed' },
             awa:      { label: 'AWA (°)',       color: '#f4212e', yAxis: 'yAngle' },
+            tws:      { label: 'TWS (kn)',      color: '#22d3ee', yAxis: 'ySpeed' },
+            twa:      { label: 'TWA (°)',       color: '#f97316', yAxis: 'yAngle' },
             sog:      { label: 'SOG (kn)',      color: '#e879f9', yAxis: 'ySpeed' },
             heading:  { label: 'Heading (°)',   color: '#38bdf8', yAxis: 'yAngle' },
             course:   { label: 'Course (°)',    color: '#fbbf24', yAxis: 'yAngle' },
             accelX:   { label: 'Accel X (m/s²)',color: '#fb7185', yAxis: 'yAccel' },
             accelY:   { label: 'Accel Y (m/s²)',color: '#4ade80', yAxis: 'yAccel' },
-            pressure: { label: 'Pressure (hPa)',color: '#a78bfa', yAxis: 'yPressure' }
+            turnRate: { label: 'Turn Rate (°/s)',color: '#c084fc', yAxis: 'yTurnRate' },
+            pressure: { label: 'Pressure (hPa)',color: '#a78bfa', yAxis: 'yPressure' },
+            temp:     { label: 'Temp (°C)',     color: '#ef4444', yAxis: 'yTemp' },
+            // NOAA weather station wind speed series
+            buoyCastleWind:   { label: 'Castle Is (kn)', color: '#17bf63', yAxis: 'ySpeed' },
+            buoyBostonWind:   { label: 'Boston 16NM (kn)', color: '#e0245e', yAxis: 'ySpeed' },
+            buoyMassBay:      { label: 'Mass Bay A01 (kn)', color: '#ffad1f', yAxis: 'ySpeed' },
+            buoyLogan:        { label: 'Logan Airport (kn)', color: '#06b6d4', yAxis: 'ySpeed' },
+            buoyBuzzards:     { label: 'Buzzards Bay (kn)', color: '#8b5cf6', yAxis: 'ySpeed' },
+            buoyNantucket:    { label: 'Nantucket (kn)', color: '#f97316', yAxis: 'ySpeed' },
+            // NOAA weather station wind direction series
+            buoyCastleDir:    { label: 'Castle Is Dir (°)', color: '#17bf63', yAxis: 'yAngle', dash: [5, 5] },
+            buoyBostonDir:    { label: 'Boston 16NM Dir (°)', color: '#e0245e', yAxis: 'yAngle', dash: [5, 5] },
+            buoyMassBayDir:   { label: 'Mass Bay Dir (°)', color: '#ffad1f', yAxis: 'yAngle', dash: [5, 5] },
+            buoyLoganDir:     { label: 'Logan Dir (°)', color: '#06b6d4', yAxis: 'yAngle', dash: [5, 5] }
         };
+
+        // Buoy data storage
+        this.buoyData = {};
 
         // Create datasets for each series
         const datasets = Object.entries(this.seriesConfig).map(([key, config]) => ({
@@ -167,11 +186,29 @@ class ChartPanel {
                         min: -5,
                         max: 5
                     },
+                    yTurnRate: {
+                        type: 'linear',
+                        display: 'auto',
+                        position: 'left',
+                        title: { display: true, text: '°/s', color: '#8b98a5' },
+                        ticks: { color: '#8b98a5', font: { size: 10 } },
+                        grid: { display: false },
+                        min: -60,
+                        max: 60
+                    },
                     yPressure: {
                         type: 'linear',
                         display: 'auto',
                         position: 'right',
                         title: { display: true, text: 'hPa', color: '#8b98a5' },
+                        ticks: { color: '#8b98a5', font: { size: 10 } },
+                        grid: { display: false }
+                    },
+                    yTemp: {
+                        type: 'linear',
+                        display: 'auto',
+                        position: 'right',
+                        title: { display: true, text: '°C', color: '#8b98a5' },
                         ticks: { color: '#8b98a5', font: { size: 10 } },
                         grid: { display: false }
                     }
@@ -290,7 +327,7 @@ class ChartPanel {
         this.chart.data.labels = visibleLabels;
 
         // Update each dataset with sliced data
-        const seriesKeys = ['heel', 'pitch', 'aws', 'awa', 'sog', 'heading', 'course', 'accelX', 'accelY', 'pressure'];
+        const seriesKeys = ['heel', 'pitch', 'aws', 'awa', 'tws', 'twa', 'sog', 'heading', 'course', 'accelX', 'accelY', 'turnRate', 'pressure', 'temp', 'buoyCastleWind', 'buoyBostonWind', 'buoyMassBay', 'buoyLogan', 'buoyBuzzards', 'buoyNantucket', 'buoyCastleDir', 'buoyBostonDir', 'buoyMassBayDir', 'buoyLoganDir'];
         this.chart.data.datasets.forEach((dataset, i) => {
             const key = seriesKeys[i];
             if (this.fullData[key]) {
@@ -382,6 +419,35 @@ class ChartPanel {
     }
 
     /**
+     * Calculate true wind from apparent wind and boat speed.
+     * Uses standard vector math: TW = AW - Boat_velocity
+     */
+    _calculateTrueWind(awsKn, awaDeg, sogKn) {
+        if (awsKn == null || awaDeg == null || sogKn == null) {
+            return { tws: null, twa: null };
+        }
+
+        const awaRad = awaDeg * Math.PI / 180;
+
+        // Decompose apparent wind into boat-frame components
+        const awX = awsKn * Math.cos(awaRad) - sogKn;  // fore-aft
+        const awY = awsKn * Math.sin(awaRad);          // lateral
+
+        const tws = Math.sqrt(awX * awX + awY * awY);
+        const twaRad = Math.atan2(awY, awX);
+        let twa = twaRad * 180 / Math.PI;
+
+        // Normalize TWA to -180 to +180 range (negative = port, positive = starboard)
+        if (twa > 180) twa -= 360;
+        if (twa < -180) twa += 360;
+
+        return {
+            tws: Math.round(tws * 10) / 10,
+            twa: Math.round(twa)
+        };
+    }
+
+    /**
      * Load session data
      */
     setData(sessionData) {
@@ -391,10 +457,13 @@ class ChartPanel {
         const labels = [];
         const heel = [], pitch = [];
         const aws = [], awa = [];
+        const tws = [], twa = [];
         const sog = [], course = [];
         const heading = [];
         const accelX = [], accelY = [];
+        const turnRate = [];  // gyro_z (yaw rate) for maneuver detection
         const pressure = [];
+        const temp = [];
 
         this.dataIndex = {};
 
@@ -409,49 +478,163 @@ class ChartPanel {
                 heading.push(point.imu.heading);
                 accelX.push(point.imu.accel_x);
                 accelY.push(point.imu.accel_y);
+                turnRate.push(point.imu.gyro_z);  // Yaw rate (deg/s) for tack/gybe detection
             } else {
                 heel.push(null);
                 pitch.push(null);
                 heading.push(null);
                 accelX.push(null);
                 accelY.push(null);
+                turnRate.push(null);
             }
 
             // Wind data
+            let awsVal = null, awaVal = null;
             if (point.wind) {
-                aws.push(point.wind.aws_kn);
-                awa.push(point.wind.awa);
+                awsVal = point.wind.aws_kn;
+                awaVal = point.wind.awa;
+                aws.push(awsVal);
+                awa.push(awaVal);
             } else {
                 aws.push(null);
                 awa.push(null);
             }
 
             // GPS data
+            let sogVal = null;
             if (point.gps) {
-                sog.push(point.gps.speed_kn);
+                sogVal = point.gps.speed_kn;
+                sog.push(sogVal);
                 course.push(point.gps.course);
             } else {
                 sog.push(null);
                 course.push(null);
             }
 
-            // Pressure data
+            // Calculate true wind from apparent wind and boat speed
+            const trueWind = this._calculateTrueWind(awsVal, awaVal, sogVal);
+            tws.push(trueWind.tws);
+            twa.push(trueWind.twa);
+
+            // Pressure and temperature data
             if (point.pressure) {
                 pressure.push(point.pressure.hpa);
+                temp.push(point.pressure.temp_c);
             } else {
                 pressure.push(null);
+                temp.push(null);
             }
         });
 
         // Store full data for zooming
         this.fullLabels = labels;
-        this.fullData = { heel, pitch, aws, awa, sog, heading, course, accelX, accelY, pressure };
+        this.fullData = { heel, pitch, aws, awa, tws, twa, sog, heading, course, accelX, accelY, turnRate, pressure, temp };
+
+        // Initialize buoy data arrays (will be filled by setBuoyData)
+        this.fullData.buoyCastleWind = new Array(labels.length).fill(null);
+        this.fullData.buoyBostonWind = new Array(labels.length).fill(null);
+        this.fullData.buoyMassBay = new Array(labels.length).fill(null);
+        this.fullData.buoyLogan = new Array(labels.length).fill(null);
+        this.fullData.buoyBuzzards = new Array(labels.length).fill(null);
+        this.fullData.buoyNantucket = new Array(labels.length).fill(null);
+        this.fullData.buoyCastleDir = new Array(labels.length).fill(null);
+        this.fullData.buoyBostonDir = new Array(labels.length).fill(null);
+        this.fullData.buoyMassBayDir = new Array(labels.length).fill(null);
+        this.fullData.buoyLoganDir = new Array(labels.length).fill(null);
+
         this.data.labels = labels;
 
         // Reset zoom and apply data
         this.zoomLevel = 1;
         this._updateZoomLabel();
         this._applyZoom();
+    }
+
+    /**
+     * Set NOAA buoy data and interpolate to match session timestamps
+     */
+    setBuoyData(buoyData) {
+        this.buoyData = buoyData || {};
+        console.log('[ChartPanel] setBuoyData called with', Object.keys(this.buoyData).length, 'buoys');
+
+        if (!this.fullLabels || this.fullLabels.length === 0) {
+            console.log('[ChartPanel] No fullLabels yet, skipping buoy data');
+            return;
+        }
+
+        // Map station IDs to wind speed and direction series
+        const stationWindMap = {
+            'CSIM3': 'buoyCastleWind',
+            '44013': 'buoyBostonWind',
+            '44029': 'buoyMassBay',
+            'KBOS': 'buoyLogan',
+            'BUZM3': 'buoyBuzzards',
+            'NTKM3': 'buoyNantucket'
+        };
+
+        const stationDirMap = {
+            'CSIM3': 'buoyCastleDir',
+            '44013': 'buoyBostonDir',
+            '44029': 'buoyMassBayDir',
+            'KBOS': 'buoyLoganDir'
+        };
+
+        // Interpolate buoy data to match session timestamps
+        for (const [stationId, buoy] of Object.entries(this.buoyData)) {
+            const dataPoints = buoy.data_points || [];
+            if (dataPoints.length === 0) continue;
+
+            // Wind speed
+            const windKey = stationWindMap[stationId];
+            if (windKey) {
+                this.fullLabels.forEach((label, i) => {
+                    const targetTs = new Date(label).getTime() / 1000;
+                    const value = this._interpolateBuoyValue(dataPoints, targetTs, 'wind_speed_kts');
+                    this.fullData[windKey][i] = value;
+                });
+            }
+
+            // Wind direction
+            const dirKey = stationDirMap[stationId];
+            if (dirKey) {
+                this.fullLabels.forEach((label, i) => {
+                    const targetTs = new Date(label).getTime() / 1000;
+                    const value = this._interpolateBuoyValue(dataPoints, targetTs, 'wind_dir');
+                    this.fullData[dirKey][i] = value;
+                });
+            }
+        }
+
+        // Log what we got
+        const castleCount = this.fullData.buoyCastleWind.filter(v => v !== null).length;
+        const bostonCount = this.fullData.buoyBostonWind.filter(v => v !== null).length;
+        console.log(`[ChartPanel] Buoy data interpolated: Castle=${castleCount}, Boston=${bostonCount} points`);
+
+        // Re-apply zoom to update chart with buoy data
+        this._applyZoom();
+    }
+
+    /**
+     * Interpolate a buoy value at a specific timestamp
+     */
+    _interpolateBuoyValue(dataPoints, targetTs, field) {
+        if (!dataPoints || dataPoints.length === 0) return null;
+
+        let before = null;
+        let after = null;
+
+        for (const p of dataPoints) {
+            if (p.unix_ts <= targetTs) before = p;
+            else if (!after) after = p;
+        }
+
+        if (!before && !after) return null;
+        if (!before) return after[field] !== undefined ? after[field] : null;
+        if (!after) return before[field] !== undefined ? before[field] : null;
+        if (!(field in before) || !(field in after)) return before[field] || after[field];
+
+        const ratio = (targetTs - before.unix_ts) / (after.unix_ts - before.unix_ts);
+        return before[field] + ratio * (after[field] - before[field]);
     }
 
     /**

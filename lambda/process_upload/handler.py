@@ -28,7 +28,12 @@ SESSION_MERGE_GAP_MINUTES = 10
 
 
 def lambda_handler(event, context):
-    """Process uploaded CSV files and create downsampled JSON."""
+    """Process uploaded CSV files and create downsampled JSON.
+
+    Processes each S3 record independently so one bad file doesn't block others.
+    Failures are logged and collected, but don't prevent remaining files from processing.
+    """
+    errors = []
     for record in event.get('Records', []):
         bucket = record['s3']['bucket']['name']
         key = record['s3']['object']['key']
@@ -38,8 +43,12 @@ def lambda_handler(event, context):
         try:
             process_file(bucket, key)
         except Exception as e:
-            logger.error(f"Failed to process {key}: {e}")
-            raise
+            logger.error(f"Failed to process {key}: {e}", exc_info=True)
+            errors.append({'key': key, 'error': str(e)})
+
+    if errors:
+        logger.error(f"Failed to process {len(errors)} of {len(event.get('Records', []))} files: {json.dumps(errors)}")
+        return {'statusCode': 207, 'body': json.dumps({'errors': errors, 'message': f'{len(errors)} file(s) failed'})}
 
     return {'statusCode': 200, 'body': 'OK'}
 
@@ -148,11 +157,24 @@ def find_session_to_merge(bucket: str, device_id: str, date: str, new_start_time
 
             end_dt = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
 
-            # Calculate gap: new session starts after existing session ends
+            # Calculate gap between sessions
+            start_dt = None
+            start_time_str = manifest.get('start_time')
+            if start_time_str:
+                try:
+                    start_dt = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    pass
+
             if new_start_dt >= end_dt:
+                # New session starts after existing session ends
                 gap = new_start_dt - end_dt
+            elif start_dt and new_start_dt < start_dt:
+                # New session starts before existing session starts — check gap from new end to existing start
+                # We don't know the new session's end, so use the gap from new start to existing start
+                gap = start_dt - new_start_dt
             else:
-                # New data starts before existing session ends - they overlap, definitely merge
+                # New data overlaps with existing session time range — definitely merge
                 gap = timedelta(seconds=0)
 
             logger.info(f"Session {folder}: end={end_time_str}, new_start={new_start_time}, gap={gap}")
@@ -245,22 +267,29 @@ def extract_start_time_from_filename(filename: str) -> str:
 def extract_session_id_from_filename(filename: str) -> str:
     """Extract session ID from E1 filename.
 
-    E1 filenames: E1_s001_000464_nav.csv, E1_boot17_122131_nav.csv
+    Supports multiple E1 filename formats:
+    - E1_s001_000464_nav.csv -> 's001-000464'
+    - E1_boot17_122131_nav.csv -> 'boot17-122131'
+    - E1_20260407_141829_nav.csv -> '141829' (time-based session ID)
 
-    The session ID includes both the boot/session identifier AND the numeric suffix
-    to distinguish multiple recording sessions on the same boot.
-    Returns session ID (e.g., 's001-000464', 'boot17-122131') or empty string if not found.
+    The session ID is used to group files into separate processed folders.
+    For datetime-based filenames, the HHMMSS time portion serves as the session ID
+    so that separate recording sessions on the same day stay separate.
     """
     import re
     parts = filename.replace('.csv', '').replace('.rtcm3', '').split('_')
 
     session_part = None
     numeric_part = None
+    date_part = None
 
     for part in parts:
         # Match session patterns: s001, s002, boot17, etc.
         if re.match(r'^(s\d+|boot\d+)$', part):
             session_part = part
+        # Match 8-digit date: YYYYMMDD
+        elif len(part) == 8 and part.isdigit() and part[:4] in ('2025', '2026', '2027', '2028'):
+            date_part = part
         # Match any 6-digit numeric part (recording ID or time)
         elif len(part) == 6 and part.isdigit():
             numeric_part = part
@@ -269,6 +298,9 @@ def extract_session_id_from_filename(filename: str) -> str:
         return f"{session_part}-{numeric_part}"
     elif session_part:
         return session_part
+    # Datetime-based filename (E1_YYYYMMDD_HHMMSS_sensor.csv): use time as session ID
+    elif date_part and numeric_part:
+        return numeric_part
     return ''
 
 
@@ -305,7 +337,7 @@ def process_file(bucket: str, key: str):
             sensor_type = 'gps'
         elif '_imu.csv' in filename:
             sensor_type = 'imu'
-        elif '_pressure.csv' in filename or '_baro.csv' in filename:
+        elif '_pressure.csv' in filename or '_pres.csv' in filename or '_baro.csv' in filename:
             sensor_type = 'pressure'
         elif '_wind.csv' in filename:
             sensor_type = 'wind'
@@ -367,7 +399,7 @@ def process_file(bucket: str, key: str):
     elif sensor_type == 'imu':
         data = process_imu(csv_content, actual_date, start_time)
     elif sensor_type == 'pressure':
-        data = process_pressure(csv_content)
+        data = process_pressure(csv_content, actual_date, start_time)
     elif sensor_type == 'wind':
         data = process_wind(csv_content, actual_date, start_time)
     else:
@@ -536,11 +568,25 @@ def process_gps(csv_content: str, date: str = None, start_time: str = None) -> t
 
         by_second[second].append(row)
 
-    # Take sample with max speed per second
+    # Take sample with max speed per second, filtering out invalid records
     result = []
     for second, samples in sorted(by_second.items()):
         if is_e1_format:
-            best = max(samples, key=lambda r: float(r.get('sog', 0) or 0))
+            # Filter out invalid GPS records:
+            # - fix=0 (no fix) produces invalid timestamps/positions
+            # - lat/lon near 0,0 are bogus (even with fix=1/2) — fleet is in Boston Harbor
+            # - hdop > 10 indicates very poor geometry
+            valid_samples = []
+            for s in samples:
+                fix = int(s.get('fix', 0) or 0)
+                lat = abs(float(s.get('lat', 0) or 0))
+                lon = abs(float(s.get('lon', 0) or 0))
+                hdop = float(s.get('hdop', 99) or 99)
+                if fix >= 1 and lat > 1.0 and lon > 1.0 and hdop < 10:
+                    valid_samples.append(s)
+            if not valid_samples:
+                continue
+            best = max(valid_samples, key=lambda r: float(r.get('sog', 0) or 0))
             result.append({
                 't': second + 'Z',
                 'lat': float(best.get('lat', 0) or 0),
@@ -650,15 +696,46 @@ def process_imu(csv_content: str, date: str = None, start_time: str = None) -> l
         avg = lambda field: sum(float(r.get(field, 0) or 0) for r in samples) / n
 
         if is_e1_format:
-            # E1 has heel and pitch directly, ax/ay/az for accel
+            # E1 has heel, pitch, and heading directly, ax/ay/az for accel, gx/gy/gz for gyro
+            # Additional fields added in firmware v2.5+:
+            # - lax/lay/laz: linear acceleration (gravity removed) for impact detection
+            # - stability: motion classifier (0=Unknown,1=OnTable,2=Stationary,3=Stable,4=Motion)
+            # - accuracy: rotation vector calibration quality (0-3, 3=highest)
+            heading_val = avg('heading') if 'heading' in samples[0] else 0
+            gyro_x = avg('gx') if 'gx' in samples[0] else 0
+            gyro_y = avg('gy') if 'gy' in samples[0] else 0
+            gyro_z = avg('gz') if 'gz' in samples[0] else 0
+            linaccel_x = avg('lax') if 'lax' in samples[0] else 0
+            linaccel_y = avg('lay') if 'lay' in samples[0] else 0
+            linaccel_z = avg('laz') if 'laz' in samples[0] else 0
+            mag_x = avg('mx') if 'mx' in samples[0] else 0
+            mag_y = avg('my') if 'my' in samples[0] else 0
+            mag_z = avg('mz') if 'mz' in samples[0] else 0
+            # For stability, take the mode (most common value) not average
+            stability_vals = [int(r.get('stability', 0) or 0) for r in samples]
+            stability = max(set(stability_vals), key=stability_vals.count) if stability_vals else 0
+            # For accuracy, take the minimum (worst case in the second)
+            accuracy_vals = [int(r.get('accuracy', 0) or 0) for r in samples]
+            accuracy = min(accuracy_vals) if accuracy_vals else 0
             result.append({
                 't': second + 'Z',
                 'heel': round(avg('heel'), 1),
                 'pitch': round(avg('pitch'), 1),
-                'heading': 0,  # E1 doesn't have heading from IMU
+                'heading': round(heading_val, 1),
                 'accel_x': round(avg('ax'), 2),
                 'accel_y': round(avg('ay'), 2),
-                'accel_z': round(avg('az'), 2)
+                'accel_z': round(avg('az'), 2),
+                'gyro_x': round(gyro_x, 1),  # Roll rate (deg/s)
+                'gyro_y': round(gyro_y, 1),  # Pitch rate (deg/s)
+                'gyro_z': round(gyro_z, 1),  # Yaw/turn rate (deg/s) - key for maneuver detection
+                'linaccel_x': round(linaccel_x, 3),  # Linear accel X (no gravity)
+                'linaccel_y': round(linaccel_y, 3),  # Linear accel Y (no gravity)
+                'linaccel_z': round(linaccel_z, 3),  # Linear accel Z (no gravity)
+                'mag_x': round(mag_x, 1),  # Magnetic field X (uT)
+                'mag_y': round(mag_y, 1),  # Magnetic field Y (uT)
+                'mag_z': round(mag_z, 1),  # Magnetic field Z (uT)
+                'stability': stability,  # Motion state classifier
+                'accuracy': accuracy,    # Rotation vector calibration quality
             })
         else:
             # S1 format with corrections for mounting orientation
@@ -683,37 +760,100 @@ def process_imu(csv_content: str, date: str = None, start_time: str = None) -> l
     return result
 
 
-def process_pressure(csv_content: str) -> list:
-    """Process pressure data (already 1Hz, minimal transformation)."""
+def process_pressure(csv_content: str, date: str = None, start_time: str = None) -> list:
+    """Process pressure data (already 1Hz, minimal transformation).
+
+    Supports two CSV formats:
+    - S1: utc_time,pressure_hpa,temperature_c,pressure_trend
+    - E1: ms,utc,pressure_hpa,temp_c,pres_min,pres_max
+
+    Args:
+        csv_content: CSV data as string
+        date: Date string (YYYY-MM-DD) for E1 timestamp generation
+        start_time: Start time (HHMMSS) from filename for old E1 format
+    """
     from datetime import timedelta
 
-    # Time correction: Pi5 clock was ~41 minutes ahead (sail started 1pm ET = 17:00 UTC)
-    TIME_CORRECTION_SECONDS = -2460  # -41 minutes
-
     reader = csv.DictReader(StringIO(csv_content))
+    rows = list(reader)
+    if not rows:
+        return []
 
-    result = []
-    for row in reader:
-        ts = row.get('utc_time', '')
-        if not ts:
-            continue
+    # Detect format based on column names
+    first_row = rows[0]
+    is_e1_format = 'ms' in first_row
+    has_utc = 'utc' in first_row
 
-        # Apply time correction
-        try:
-            dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
-            dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
-            corrected_ts = dt_corrected.strftime('%Y-%m-%dT%H:%M:%SZ')
-        except ValueError:
-            corrected_ts = ts[:19] + 'Z'
+    # Time correction only for S1 (Pi5 clock was ~41 minutes ahead)
+    TIME_CORRECTION_SECONDS = 0 if is_e1_format else -2460
 
-        result.append({
-            't': corrected_ts,
-            'hpa': round(float(row.get('pressure_hpa', 0) or 0), 1),
-            'temp_c': round(float(row.get('temperature_c', 0) or 0), 1),
-            'trend': row.get('pressure_trend', '')
-        })
+    # Parse start_time for old E1 format
+    base_seconds = 0
+    if start_time and len(start_time) == 6:
+        base_seconds = int(start_time[:2]) * 3600 + int(start_time[2:4]) * 60 + int(start_time[4:6])
 
-    return result
+    if is_e1_format:
+        by_second = defaultdict(list)
+        for row in rows:
+            if has_utc:
+                utc_raw = row.get('utc', '')
+                if not utc_raw:
+                    continue
+                try:
+                    utc_float = float(utc_raw)
+                    hours = int(utc_float // 10000)
+                    minutes = int((utc_float % 10000) // 100)
+                    seconds = int(utc_float % 100)
+                    second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
+                except ValueError:
+                    continue
+            else:
+                ms = row.get('ms', '')
+                if not ms:
+                    continue
+                try:
+                    sec_offset = int(float(ms) // 1000)
+                    total_sec = base_seconds + sec_offset
+                    hours = (total_sec // 3600) % 24
+                    minutes = (total_sec % 3600) // 60
+                    seconds = total_sec % 60
+                    second = f"{date}T{hours:02d}:{minutes:02d}:{seconds:02d}"
+                except ValueError:
+                    continue
+            by_second[second].append(row)
+
+        result = []
+        for second, samples in sorted(by_second.items()):
+            best = samples[-1]
+            result.append({
+                't': second + 'Z',
+                'hpa': round(float(best.get('pressure_hpa', 0) or 0), 1),
+                'temp_c': round(float(best.get('temp_c', 0) or 0), 1),
+            })
+        return result
+    else:
+        # S1 format
+        result = []
+        for row in rows:
+            ts = row.get('utc_time', '')
+            if not ts:
+                continue
+
+            try:
+                dt = datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+                dt_corrected = dt + timedelta(seconds=TIME_CORRECTION_SECONDS)
+                corrected_ts = dt_corrected.strftime('%Y-%m-%dT%H:%M:%SZ')
+            except ValueError:
+                corrected_ts = ts[:19] + 'Z'
+
+            result.append({
+                't': corrected_ts,
+                'hpa': round(float(row.get('pressure_hpa', 0) or 0), 1),
+                'temp_c': round(float(row.get('temperature_c', 0) or 0), 1),
+                'trend': row.get('pressure_trend', '')
+            })
+
+        return result
 
 
 def process_wind(csv_content: str, date: str = None, start_time: str = None) -> list:
@@ -875,17 +1015,22 @@ def update_manifest(bucket: str, device_id: str, folder: str, sensor_type: str, 
             'end_time': max(times) if times else None
         }
 
-        # Update session bounds
-        all_times = []
-        for sensor_info in manifest['sensors'].values():
-            if sensor_info.get('start_time'):
-                all_times.append(sensor_info['start_time'])
-            if sensor_info.get('end_time'):
-                all_times.append(sensor_info['end_time'])
-
-        if all_times:
-            manifest['start_time'] = min(all_times)
-            manifest['end_time'] = max(all_times)
+        # Update session bounds — prefer GPS times (authoritative),
+        # fall back to all sensors if GPS not yet processed
+        gps_info = manifest['sensors'].get('gps')
+        if gps_info and gps_info.get('start_time') and gps_info.get('end_time'):
+            manifest['start_time'] = gps_info['start_time']
+            manifest['end_time'] = gps_info['end_time']
+        else:
+            all_times = []
+            for sensor_info in manifest['sensors'].values():
+                if sensor_info.get('start_time'):
+                    all_times.append(sensor_info['start_time'])
+                if sensor_info.get('end_time'):
+                    all_times.append(sensor_info['end_time'])
+            if all_times:
+                manifest['start_time'] = min(all_times)
+                manifest['end_time'] = max(all_times)
 
         # Calculate track bounds from GPS
         if sensor_type == 'gps' and data:
@@ -969,11 +1114,29 @@ def update_manifest_rtcm3(bucket: str, device_id: str, folder: str, rtcm3_key: s
         'uploaded_at': datetime.now(timezone.utc).isoformat()
     }
 
-    # Set PPK status to awaiting_cors if not already processed
+    # Trigger PPK pipeline if not already processed
     if manifest.get('ppk_status') not in ['completed', 'processing']:
         manifest['ppk_status'] = 'awaiting_cors'
         manifest['ppk_updated_at'] = datetime.now(timezone.utc).isoformat()
         logger.info(f"Set PPK status to awaiting_cors for {device_id}/{folder}")
+
+        # Trigger CORS download Lambda to check for data and start PPK
+        try:
+            lambda_client = boto3.client('lambda')
+            lambda_client.invoke(
+                FunctionName=os.environ.get('CORS_DOWNLOAD_FUNCTION', 'sailframes-cors-download'),
+                InvocationType='Event',  # Async
+                Payload=json.dumps({
+                    'session': {
+                        'device_id': device_id,
+                        'folder': folder,
+                        'date': date
+                    }
+                })
+            )
+            logger.info(f"Triggered CORS download for {device_id}/{folder}")
+        except Exception as e:
+            logger.warning(f"Failed to trigger CORS download (will retry on schedule): {e}")
 
     manifest['updated_at'] = datetime.now(timezone.utc).isoformat()
 

@@ -30,11 +30,26 @@
 </head>
 <body>
     <header class="header">
-        <h1 class="logo">SailFrames</h1>
+        <a href="/" class="logo-link"><h1 class="logo">SailFrames</h1></a>
         <div class="session-selector">
             <select id="session-select">
                 <option value="">Select a session...</option>
             </select>
+        </div>
+        <div class="session-meta" id="session-meta" style="display: none;">
+            <div class="meta-field">
+                <label for="session-name">Name:</label>
+                <input type="text" id="session-name" placeholder="Session name..." maxlength="50">
+            </div>
+            <div class="meta-field">
+                <label for="boat-select">Boat:</label>
+                <select id="boat-select">
+                    <option value="">Select boat...</option>
+                    <option value="Sonar 23">Sonar 23</option>
+                    <option value="Tesla">Tesla</option>
+                </select>
+            </div>
+            <button id="btn-save-meta" class="btn-save-meta" title="Save changes">Save</button>
         </div>
     </header>
 
@@ -67,12 +82,27 @@
                         <button class="toggle-btn active" data-series="pitch" style="--series-color: #ffad1f;">Pitch</button>
                         <button class="toggle-btn" data-series="aws" style="--series-color: #00ba7c;">AWS</button>
                         <button class="toggle-btn" data-series="awa" style="--series-color: #f4212e;">AWA</button>
+                        <button class="toggle-btn" data-series="tws" style="--series-color: #22d3ee;">TWS</button>
+                        <button class="toggle-btn" data-series="twa" style="--series-color: #f97316;">TWA</button>
                         <button class="toggle-btn" data-series="sog" style="--series-color: #e879f9;">SOG</button>
                         <button class="toggle-btn" data-series="heading" style="--series-color: #38bdf8;">Heading</button>
                         <button class="toggle-btn" data-series="course" style="--series-color: #fbbf24;">Course</button>
                         <button class="toggle-btn" data-series="accelX" style="--series-color: #fb7185;">Accel X</button>
                         <button class="toggle-btn" data-series="accelY" style="--series-color: #4ade80;">Accel Y</button>
+                        <button class="toggle-btn" data-series="turnRate" style="--series-color: #c084fc;">Turn Rate</button>
                         <button class="toggle-btn" data-series="pressure" style="--series-color: #a78bfa;">Pressure</button>
+                        <button class="toggle-btn" data-series="temp" style="--series-color: #ef4444;">Temp</button>
+                        <span class="toggle-divider">|</span>
+                        <button class="toggle-btn" data-series="buoyCastleWind" style="--series-color: #17bf63;">Castle TWS</button>
+                        <button class="toggle-btn" data-series="buoyCastleDir" style="--series-color: #17bf63;">Castle TWD</button>
+                        <button class="toggle-btn" data-series="buoyBostonWind" style="--series-color: #e0245e;">Boston 16NM TWS</button>
+                        <button class="toggle-btn" data-series="buoyBostonDir" style="--series-color: #e0245e;">Boston 16NM TWD</button>
+                        <button class="toggle-btn" data-series="buoyMassBay" style="--series-color: #ffad1f;">Mass Bay TWS</button>
+                        <button class="toggle-btn" data-series="buoyMassBayDir" style="--series-color: #ffad1f;">Mass Bay TWD</button>
+                        <button class="toggle-btn" data-series="buoyLogan" style="--series-color: #06b6d4;">Logan TWS</button>
+                        <button class="toggle-btn" data-series="buoyLoganDir" style="--series-color: #06b6d4;">Logan TWD</button>
+                        <button class="toggle-btn" data-series="buoyBuzzards" style="--series-color: #8b5cf6;">Buzzards Bay</button>
+                        <button class="toggle-btn" data-series="buoyNantucket" style="--series-color: #f97316;">Nantucket</button>
                     </div>
                     <div class="zoom-controls">
                         <button class="zoom-btn" id="btn-zoom-out" title="Zoom Out">−</button>
@@ -112,6 +142,11 @@
         <div class="time-absolute">
             <span id="time-absolute" class="time-label-absolute">--:--:-- UTC</span>
         </div>
+        <div class="trim-controls">
+            <button id="btn-trim-before" class="btn-trim" disabled title="Set start to current position">Trim Before</button>
+            <button id="btn-trim-after" class="btn-trim" disabled title="Set end to current position">Trim After</button>
+            <button id="btn-trim-reset" class="btn-trim btn-trim-reset" style="display:none" title="Reset to original bounds">Reset</button>
+        </div>
     </footer>
 
     <!-- Loading overlay -->
@@ -133,7 +168,7 @@
         </div>
     </div>
 
-    <!-- Scripts -->
+    <!-- Scripts (v2 = buoy data support) -->
     <script>
         // Simple password protection
         (function() {
@@ -169,12 +204,12 @@
             });
         })();
     </script>
-    <script src="./config.js"></script>
-    <script src="./assets/js/utils/time-sync.js"></script>
-    <script src="./assets/js/components/map-view.js"></script>
-    <script src="./assets/js/components/chart-panel.js"></script>
-    <script src="./assets/js/components/video-player.js"></script>
-    <script src="./assets/js/components/timeline.js"></script>
-    <script src="./assets/js/app.js"></script>
+    <script src="./config.js?v=3"></script>
+    <script src="./assets/js/utils/time-sync.js?v=3"></script>
+    <script src="./assets/js/components/map-view.js?v=3"></script>
+    <script src="./assets/js/components/chart-panel.js?v=3"></script>
+    <script src="./assets/js/components/video-player.js?v=3"></script>
+    <script src="./assets/js/components/timeline.js?v=3"></script>
+    <script src="./assets/js/app.js?v=3"></script>
 </body>
 </html>
