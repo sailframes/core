@@ -2081,7 +2081,13 @@ void updateDisplayD1() {
   char statusStr[32] = "";
   strncat(statusStr, recStr, sizeof(statusStr) - strlen(statusStr) - 1);
   if (uploading) {
-    strncat(statusStr, " UP", sizeof(statusStr) - strlen(statusStr) - 1);
+    char upBuf[16];
+    if (uploadTotal > 0) {
+      snprintf(upBuf, sizeof(upBuf), " UP%d/%d", uploadCount, uploadTotal);
+    } else {
+      snprintf(upBuf, sizeof(upBuf), " UP");
+    }
+    strncat(statusStr, upBuf, sizeof(statusStr) - strlen(statusStr) - 1);
   } else if (wifiConnected) {
     strncat(statusStr, " ", sizeof(statusStr) - strlen(statusStr) - 1);
     strncat(statusStr, getWifiIndicator(), sizeof(statusStr) - strlen(statusStr) - 1);
@@ -2179,10 +2185,17 @@ void updateDisplayD2() {
   // Recording state indicator
   const char* recStr = getRecStateStr();
 
-  char statusStr[16] = "";
+  char statusStr[32] = "";
   strcat(statusStr, recStr);
-  if (uploading) strcat(statusStr, " UP");
-  else if (wifiConnected) { strcat(statusStr, " "); strcat(statusStr, getWifiIndicator()); }
+  if (uploading) {
+    char upBuf[16];
+    if (uploadTotal > 0) {
+      snprintf(upBuf, sizeof(upBuf), " UP%d/%d", uploadCount, uploadTotal);
+    } else {
+      snprintf(upBuf, sizeof(upBuf), " UP");
+    }
+    strcat(statusStr, upBuf);
+  } else if (wifiConnected) { strcat(statusStr, " "); strcat(statusStr, getWifiIndicator()); }
 #if ENABLE_WIND
   if (wind.connected) strcat(statusStr, " C");
 #endif
@@ -3857,43 +3870,8 @@ void loop() {
 #endif
 
   if (now - lastDisp >= DISPLAY_UPDATE_MS) {
-    if (uploading) {
-      // Show upload status with progress bar
-      u8g2.clearBuffer();
-      u8g2.setFont(u8g2_font_helvB12_tr);
-      u8g2.drawStr(5, 14, "UPLOADING");
-
-      // Progress bar (full width)
-      int pct = (uploadTotal > 0) ? (uploadCount * 100 / uploadTotal) : 0;
-      u8g2.drawFrame(5, 18, 118, 12);  // Outer frame
-      if (pct > 0) {
-        u8g2.drawBox(7, 20, (114 * pct) / 100, 8);  // Fill
-      }
-
-      // Progress text: "3/10 (2 ok, 1 fail)"
-      u8g2.setFont(u8g2_font_6x10_tr);
-      char buf[40];
-      if (uploadFailed > 0) {
-        snprintf(buf, sizeof(buf), "%d/%d (%d ok %d fail)",
-                 uploadCount, uploadTotal, uploadSuccess, uploadFailed);
-      } else {
-        snprintf(buf, sizeof(buf), "%d/%d done", uploadCount, uploadTotal);
-      }
-      u8g2.drawStr(5, 42, buf);
-
-      // Current file (truncated)
-      char shortFile[22];
-      strncpy(shortFile, uploadCurrentFile, 21);
-      shortFile[21] = '\0';
-      u8g2.drawStr(5, 54, shortFile);
-
-      // WiFi SSID
-      snprintf(buf, sizeof(buf), "WiFi: %s", connectedSSID);
-      u8g2.drawStr(5, 64, buf);
-      u8g2.sendBuffer();
-    } else {
-      updateDisplay();
-    }
+    // Always show live sensor data — upload progress shown in status line (UP 3/10)
+    updateDisplay();
     if (logging && LED_PIN >= 0) digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     lastDisp = now;
   }
