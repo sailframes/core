@@ -2993,81 +2993,21 @@ void processCommand(String cmd, bool fromTelnet) {
       return;
     }
     tprintln("Starting manual upload...");
+    // BLE deinit NOT needed — uploads use plain HTTP, no TLS memory pressure.
+    // BLE and WiFi coexist fine for basic HTTP PUTs.
 
-#if ENABLE_WIND
-    // BLE interferes with WiFi TLS - must fully deinit BLE
-    // Disconnect WiFi first, then deinit BLE, then reconnect WiFi
-    if (bleInitialized) {
-      tprintln("Preparing for upload (BLE/WiFi radio conflict)...");
-
-      // Step 1: Disconnect BLE
-      if (pWindClient && pWindClient->isConnected()) {
-        tprintln("Disconnecting wind sensor...");
-        pWindClient->disconnect();
-        delay(100);
-      }
-
-      // Step 2: Disconnect WiFi if connected
-      if (wifiConnected || WiFi.status() == WL_CONNECTED) {
-        tprintln("Disconnecting WiFi...");
-        WiFi.disconnect(true);
-        wifiConnected = false;
-        delay(200);
-      }
-
-      // Step 3: Deinit BLE (safe now that WiFi is disconnected)
-      tprintln("Deinitializing BLE...");
-      wind.connected = false;
-      // Don't null pointers before deinit - let NimBLE clean up
-      NimBLEDevice::deinit(false);  // false = don't clear all, just deinit
-      // Now safe to null pointers
-      pWindClient = nullptr;
-      pWindSpeedChar = nullptr;
-      pWindDirChar = nullptr;
-      pBatteryChar = nullptr;
-      pDataChar = nullptr;
-      bleInitialized = false;
-      delay(500);
-      tprintf("BLE deinit done, heap: %u bytes\n", ESP.getFreeHeap());
-    }
-#endif
-
-    // Now connect WiFi (BLE is fully off)
     tprintln("Connecting to WiFi...");
     if (connectWiFi()) {
       tprintf("Connected to: %s, IP: %s\n", connectedSSID, WiFi.localIP().toString().c_str());
       tprintf("Free heap: %u bytes\n", ESP.getFreeHeap());
-      tprintf("Stack high water: %u bytes\n", uxTaskGetStackHighWaterMark(NULL));
 
-      // Test connectivity - first check DNS
-      tprintln("Testing DNS resolution...");
-      IPAddress ip;
-      if (!WiFi.hostByName("p9s9eia0t6.execute-api.us-east-1.amazonaws.com", ip)) {
-        tprintln("DNS resolution FAILED");
-#if ENABLE_WIND
-        if (config.wind_enabled && strlen(config.wind_mac) > 0) {
-          tprintln("Reinitializing wind sensor...");
-          initWindSensor();
-        }
-#endif
-        return;
-      }
-      tprintf("DNS OK: %s\n", ip.toString().c_str());
-
-      // Test TLS directly to AWS (skip intermediate tests now that BLE is off)
-      tprintln("Testing TLS to AWS API Gateway...");
+      // Test S3 connectivity
+      tprintln("Testing S3 connection...");
       if (!testS3Connection()) {
-        tprintln("AWS TLS FAILED");
-#if ENABLE_WIND
-        // Reinit BLE and reconnect to wind sensor
-        if (config.wind_enabled && strlen(config.wind_mac) > 0) {
-          tprintln("Reinitializing wind sensor...");
-          initWindSensor();
-        }
-#endif
+        tprintln("S3 connection FAILED");
         return;
       }
-      tprintln("AWS TLS OK");
+      tprintln("S3 OK");
 
       // Set uploading flag so Core 0 task doesn't interfere, and OLED shows progress
       uploading = true;
@@ -3084,21 +3024,6 @@ void processCommand(String cmd, bool fromTelnet) {
       uploadDirectory("/sf");
       uploading = false;
       tprintln("Upload complete");
-#if ENABLE_WIND
-      // Reinitialize BLE and reconnect to wind sensor
-      if (config.wind_enabled && strlen(config.wind_mac) > 0) {
-        tprintln("Reinitializing wind sensor...");
-        initWindSensor();
-      }
-#endif
-    } else {
-#if ENABLE_WIND
-      // WiFi failed, reinit BLE
-      if (config.wind_enabled && strlen(config.wind_mac) > 0) {
-        tprintln("WiFi failed, reinitializing wind sensor...");
-        initWindSensor();
-      }
-#endif
     }
 
   } else if (cmd == "wifi") {
@@ -3803,26 +3728,8 @@ void uploadTaskFunc(void* param) {
     if (shouldUpload) {
       lastUploadAttempt = now;
 
-      // Deinit BLE before WiFi operations (shared radio on ESP32)
-#if ENABLE_WIND
-      if (bleInitialized) {
-        Serial.println("[UPLOAD] Deinitializing BLE for WiFi (shared radio)...");
-        if (pWindClient && pWindClient->isConnected()) {
-          pWindClient->disconnect();
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        wind.connected = false;
-        NimBLEDevice::deinit(false);  // false = safe, true crashes
-        pWindClient = nullptr;
-        pWindSpeedChar = nullptr;
-        pWindDirChar = nullptr;
-        pBatteryChar = nullptr;
-        pDataChar = nullptr;
-        bleInitialized = false;
-        vTaskDelay(pdMS_TO_TICKS(500));
-        Serial.printf("[UPLOAD] BLE deinit done, heap: %u bytes\n", ESP.getFreeHeap());
-      }
-#endif
+      // BLE deinit NOT needed — uploads use plain HTTP (no TLS memory pressure).
+      // ESP32 can time-slice WiFi and BLE on the shared radio for basic HTTP PUTs.
 
       // Try to connect to WiFi if not connected
       if (!wifiConnected) {
@@ -3830,14 +3737,13 @@ void uploadTaskFunc(void* param) {
       }
 
       if (wifiConnected) {
-        // Set uploading=true to pause sensors in main loop and show UPLOADING screen
+        // Set uploading=true to show UPLOADING screen
         uploading = true;
         uploadCount = 0;
         uploadSuccess = 0;
         uploadFailed = 0;
         uploadCurrentFile[0] = '\0';
 
-        // Give main loop time to see the flag and stop sensor reads
         vTaskDelay(pdMS_TO_TICKS(100));
 
         Serial.printf("[UPLOAD] Starting (heap: %u, maxBlock: %u)\n",
@@ -3875,14 +3781,6 @@ void uploadTaskFunc(void* param) {
         Serial.println("[UPLOAD] WiFi connect failed");
         uploadRetryCount++;
       }
-
-      // Reinitialize BLE after upload cycle
-#if ENABLE_WIND
-      if (config.wind_enabled && strlen(config.wind_mac) > 0 && !bleInitialized) {
-        Serial.println("[UPLOAD] Reinitializing wind sensor...");
-        initWindSensor();
-      }
-#endif
 
       // Reset stationary timer to avoid rapid retries
       stationaryStart = 0;
