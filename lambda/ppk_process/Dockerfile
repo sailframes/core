@@ -17,7 +17,7 @@ RUN yum update -y && \
 
 # Clone and build RTKLIB
 RUN cd /tmp && \
-    git clone https://github.com/rtklibexplorer/RTKLIB.git && \
+    git clone -b demo5 https://github.com/rtklibexplorer/RTKLIB.git && \
     cd RTKLIB/app/consapp && \
     cd convbin/gcc && \
     make && \

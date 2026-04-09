@@ -75,6 +75,24 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:s3:::${DataBucketName}'
                   - !Sub 'arn:aws:s3:::${DataBucketName}/*'
+        - PolicyName: DLQAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ProcessUploadDLQ.Arn
+        - PolicyName: LambdaInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:sailframes-cors-download'
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:sailframes-ppk-process'
 
   PiUploaderUser:
     Type: AWS::IAM::User
@@ -98,6 +116,16 @@ Resources:
   # LAMBDA FUNCTIONS
   # ============================================
 
+  # DLQ for failed processing events
+  ProcessUploadDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'sailframes-process-upload-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Project
+          Value: SailFrames
+
   ProcessUploadFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -107,12 +135,50 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 300
       MemorySize: 512
+      DeadLetterConfig:
+        TargetArn: !GetAtt ProcessUploadDLQ.Arn
       Code:
         S3Bucket: !Sub 'sailframes-lambda-code-${Environment}'
         S3Key: process_upload.zip
       Environment:
         Variables:
           DATA_BUCKET: !Ref DataBucketName
+
+  # Alarm on processing errors
+  ProcessUploadErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'sailframes-process-upload-errors-${Environment}'
+      AlarmDescription: Fires when process_upload Lambda has errors (failed session processing)
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ProcessUploadFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # Alarm when DLQ has messages (events that exhausted retries)
+  ProcessUploadDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'sailframes-process-upload-dlq-${Environment}'
+      AlarmDescription: Fires when failed processing events land in DLQ (exhausted retries)
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ProcessUploadDLQ.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
 
   ProcessUploadPermission:
     Type: AWS::Lambda::Permission
@@ -203,6 +269,48 @@ Resources:
       Environment:
         Variables:
           DATA_BUCKET: !Ref DataBucketName
+
+  ApiBuoysFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'sailframes-api-buoys-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Sub 'sailframes-lambda-code-${Environment}'
+        S3Key: api_buoys.zip
+
+  # ============================================
+  # VIDEO LINKING (GoPro to E1 sessions)
+  # ============================================
+
+  LinkVideosFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'sailframes-link-videos-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 120
+      MemorySize: 512
+      Code:
+        S3Bucket: !Sub 'sailframes-lambda-code-${Environment}'
+        S3Key: link_videos.zip
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucketName
+
+  LinkVideosPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LinkVideosFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:aws:s3:::${DataBucketName}'
 
   # ============================================
   # VIDEO TRANSCODING
@@ -342,6 +450,31 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt MediaConvertCompleteRule.Arn
+
+  # ============================================
+  # PPK PIPELINE - CORS DOWNLOAD SCHEDULE
+  # ============================================
+  # Hourly safety net: scans for sessions stuck at awaiting_cors
+  # Primary trigger is process_upload invoking cors_download directly on RTCM3 upload
+
+  CorsDownloadScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'sailframes-cors-download-hourly-${Environment}'
+      Description: Hourly check for sessions needing CORS data for PPK processing
+      ScheduleExpression: 'rate(1 hour)'
+      State: ENABLED
+      Targets:
+        - Id: CorsDownloadLambda
+          Arn: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:sailframes-cors-download'
+
+  CorsDownloadSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: sailframes-cors-download
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CorsDownloadScheduleRule.Arn
 
   # ============================================
   # API GATEWAY
@@ -495,6 +628,44 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref ApiE1Function
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
+  # NOAA Buoy Data endpoints
+  BuoysIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt ApiBuoysFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  BuoysListRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'GET /api/buoys'
+      Target: !Sub 'integrations/${BuoysIntegration}'
+
+  BuoysDataRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'GET /api/buoys/data'
+      Target: !Sub 'integrations/${BuoysIntegration}'
+
+  BuoysSnapshotRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'GET /api/buoys/snapshot'
+      Target: !Sub 'integrations/${BuoysIntegration}'
+
+  BuoysPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiBuoysFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'

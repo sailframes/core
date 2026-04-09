@@ -24,12 +24,12 @@ def lambda_handler(event, context):
     try:
         path_params = event.get('pathParameters', {})
         device_id = path_params.get('device_id')
-        date = path_params.get('date')
+        session = path_params.get('date')  # Can be date or date-session_id
 
-        if not device_id or not date:
-            return error_response(400, 'Missing device_id or date')
+        if not device_id or not session:
+            return error_response(400, 'Missing device_id or session')
 
-        streams = get_video_streams(device_id, date)
+        streams = get_video_streams(device_id, session)
 
         return {
             'statusCode': 200,
@@ -52,16 +52,24 @@ def error_response(status: int, message: str) -> dict:
     }
 
 
-def get_video_streams(device_id: str, date: str) -> dict:
-    """Get video stream info - supports HLS playlists or direct video files."""
+def get_video_streams(device_id: str, session: str) -> dict:
+    """Get video stream info - supports HLS playlists or direct video files.
+
+    Args:
+        device_id: Device ID (e.g., 'E1')
+        session: Session folder name (e.g., '2026-04-02-boot47-162554')
+    """
     streams = {}
 
+    # Extract date from session (first 10 chars: YYYY-MM-DD)
+    date = session[:10] if len(session) >= 10 else session
+
     # Try to get correct times from session manifest
-    manifest_times = get_manifest_video_times(device_id, date)
+    manifest_times = get_manifest_video_times(device_id, session)
 
     # First try HLS streams (transcoded videos)
     for camera in ['cockpit', 'sails']:
-        prefix = f"hls/{device_id}/{date}/{camera}/"
+        prefix = f"hls/{device_id}/{session}/{camera}/"
 
         # Check for playlist
         playlist_key = f"{prefix}playlist.m3u8"
@@ -83,7 +91,7 @@ def get_video_streams(device_id: str, date: str) -> dict:
             start_time, end_time = get_times_from_segments(prefix)
 
         streams[camera] = {
-            'playlist_url': f"https://{CLOUDFRONT_DOMAIN}/hls/{device_id}/{date}/{camera}/playlist.m3u8",
+            'playlist_url': f"https://{CLOUDFRONT_DOMAIN}/hls/{device_id}/{session}/{camera}/playlist.m3u8",
             'start_time': start_time,
             'end_time': end_time,
             'duration_seconds': duration
@@ -91,26 +99,60 @@ def get_video_streams(device_id: str, date: str) -> dict:
 
     # If no HLS streams, check for direct video files from manifest
     if not streams:
-        streams = get_direct_video_streams(device_id, date)
+        streams = get_direct_video_streams(device_id, session)
 
     return streams
 
 
-def get_direct_video_streams(device_id: str, date: str) -> dict:
-    """Get direct video file URLs from manifest (for non-transcoded videos)."""
-    manifest_key = f"processed/{device_id}/{date}/manifest.json"
+def get_direct_video_streams(device_id: str, session: str) -> dict:
+    """Get direct video file URLs from manifest (for non-transcoded videos).
+
+    Prefers concatenated proxy video (LRV) if available for smooth playback.
+
+    Args:
+        device_id: Device ID (e.g., 'E1')
+        session: Session folder name (e.g., '2026-04-02-boot47-162554' or just '2026-04-02')
+    """
+    manifest_key = f"processed/{device_id}/{session}/manifest.json"
     try:
         response = s3.get_object(Bucket=DATA_BUCKET, Key=manifest_key)
         manifest = json.loads(response['Body'].read())
-        videos = manifest.get('videos', [])
 
+        # Prefer proxy video (concatenated LRV) for smooth playback
+        video_proxy = manifest.get('video_proxy')
+        if video_proxy and video_proxy.get('s3_key'):
+            try:
+                presigned_url = s3.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': DATA_BUCKET, 'Key': video_proxy['s3_key']},
+                    ExpiresIn=3600  # 1 hour
+                )
+                return {
+                    'video_proxy': {
+                        'direct_url': presigned_url,
+                        'filename': video_proxy.get('filename', 'video_proxy.mp4'),
+                        'start_time': video_proxy.get('start_time'),
+                        'end_time': video_proxy.get('end_time'),
+                        'duration_seconds': video_proxy.get('duration_sec', 0),
+                        'offset_seconds': video_proxy.get('offset_sec', 0),
+                        'resolution': video_proxy.get('resolution', '240p'),
+                        'is_proxy': True
+                    }
+                }
+            except Exception as e:
+                logger.warning(f"Could not generate presigned URL for proxy video: {e}")
+                # Fall through to individual chapters
+
+        # Fallback to individual chapter videos
+        videos = manifest.get('videos', [])
         if not videos:
             return {}
 
         streams = {}
         for i, video in enumerate(videos):
             # Generate presigned URL for direct access
-            video_key = video.get('url', '')
+            # Support both 's3_key' (new format) and 'url' (old format)
+            video_key = video.get('s3_key') or video.get('url', '')
             if not video_key:
                 continue
 
@@ -129,18 +171,24 @@ def get_direct_video_streams(device_id: str, date: str) -> dict:
                 'direct_url': presigned_url,
                 'filename': video.get('filename', ''),
                 'start_time': video.get('start_time'),
-                'duration_seconds': video.get('duration_sec', 0)
+                'end_time': video.get('end_time'),
+                'duration_seconds': video.get('duration_sec', 0),
+                'offset_seconds': video.get('offset_sec', 0),
+                'chapter': video.get('chapter', 0)
             }
 
         return streams
+    except s3.exceptions.NoSuchKey:
+        logger.warning(f"Manifest not found: {manifest_key}")
+        return {}
     except Exception as e:
         logger.warning(f"Could not read manifest for direct videos: {e}")
         return {}
 
 
-def get_manifest_video_times(device_id: str, date: str) -> dict:
+def get_manifest_video_times(device_id: str, session: str) -> dict:
     """Get video times from session manifest."""
-    manifest_key = f"processed/{device_id}/{date}/manifest.json"
+    manifest_key = f"processed/{device_id}/{session}/manifest.json"
     try:
         response = s3.get_object(Bucket=DATA_BUCKET, Key=manifest_key)
         manifest = json.loads(response['Body'].read())

@@ -29,7 +29,7 @@ def lambda_handler(event, context):
 
         # Parse query parameters
         query_params = event.get('queryStringParameters') or {}
-        sensors = query_params.get('sensors', 'gps,imu,wind,pressure').split(',')
+        sensors = query_params.get('sensors', 'gps,imu,wind,pressure,ppk').split(',')
         start_time = query_params.get('start')
         end_time = query_params.get('end')
         resolution = query_params.get('resolution', 'high')
@@ -83,9 +83,12 @@ def load_session_data(device_id: str, date: str, sensors: list,
 
     # Load each sensor file
     sensor_data = {}
+    # Map sensor names to filenames (most are {sensor}.json, ppk is ppk_gps.json)
+    sensor_file_map = {'ppk': 'ppk_gps'}
     for sensor in sensors:
         sensor = sensor.strip()
-        key = f"processed/{device_id}/{date}/{sensor}.json"
+        filename = sensor_file_map.get(sensor, sensor)
+        key = f"processed/{device_id}/{date}/{filename}.json"
         try:
             response = s3.get_object(Bucket=DATA_BUCKET, Key=key)
             data = json.loads(response['Body'].read().decode('utf-8'))
@@ -141,5 +144,15 @@ def load_session_data(device_id: str, date: str, sensors: list,
     else:
         result['start_time'] = sorted_times[0] if sorted_times else None
         result['end_time'] = sorted_times[-1] if sorted_times else None
+
+    # Include trim bounds if present
+    if manifest.get('trim'):
+        result['trim'] = manifest['trim']
+
+    # Include session name and boat if present
+    if manifest.get('name'):
+        result['name'] = manifest['name']
+    if manifest.get('boat'):
+        result['boat'] = manifest['boat']
 
     return result

@@ -1,6 +1,7 @@
 /**
  * VideoPlayer - HLS video playback synchronized with timeline
  * Videos sync on play, seek, and periodically during playback to prevent drift
+ * Supports multiple video chapters (GoPro splits recordings every ~17 min)
  */
 class VideoPlayer {
     constructor() {
@@ -11,10 +12,12 @@ class VideoPlayer {
             cockpit: document.getElementById('video-cockpit')
         };
         this.videoContainer = document.getElementById('video-container');
-        this.streamInfo = null;
+        this.videoChapters = [];
+        this.currentChapterIndex = -1;
         this.videosReady = { cockpit: false };
         this.syncInterval = null;
         this.isPlaying = false;
+        this._initialLoadComplete = false;  // Don't auto-sync until first chapter loaded
 
         this._setupControls();
     }
@@ -34,7 +37,7 @@ class VideoPlayer {
         // Sync video on any time change (scrubbing, chart clicks, etc.)
         window.timeController.addEventListener('time-change', (e) => {
             if (e.detail.time) {
-                this._seekVideos(e.detail.time);
+                this._syncToTimeline(e.detail.time);
             }
         });
 
@@ -61,33 +64,129 @@ class VideoPlayer {
             }
 
             const data = await response.json();
-            this.streamInfo = data.streams;
+            const streams = data.streams || {};
 
-            // Check if any streams available (HLS or direct)
-            const hasStreams = Object.values(this.streamInfo).some(s => s && (s.playlist_url || s.direct_url));
-            if (!hasStreams) {
+            // Convert to array and sort by chapter number
+            this.videoChapters = Object.entries(streams)
+                .map(([key, info]) => ({ key, ...info }))
+                .filter(v => v.direct_url || v.playlist_url)
+                .sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
+
+            if (this.videoChapters.length === 0) {
                 this.videoContainer.style.display = 'none';
+                // Clear video coverage indicator
+                if (window.timeline) {
+                    window.timeline.setVideoCoverage([]);
+                }
                 return;
+            }
+
+            // Parse start/end times for each chapter
+            this.videoChapters.forEach(ch => {
+                if (ch.start_time) ch._startMs = new Date(ch.start_time).getTime();
+                if (ch.end_time) ch._endMs = new Date(ch.end_time).getTime();
+            });
+
+            const totalDuration = this.videoChapters.reduce((sum, ch) => sum + (ch.duration_seconds || 0), 0);
+            const isProxy = this.videoChapters[0]?.is_proxy;
+            console.log(`Video: ${isProxy ? 'proxy' : this.videoChapters.length + ' chapters'}, ${(totalDuration / 60).toFixed(1)} min`);
+
+            // Notify timeline of video coverage
+            if (window.timeline && this.videoChapters.length > 0) {
+                const videos = this.videoChapters.map(ch => ({
+                    start_time: ch.start_time,
+                    end_time: ch.end_time || (ch.start_time && ch.duration_seconds
+                        ? new Date(new Date(ch.start_time).getTime() + ch.duration_seconds * 1000).toISOString()
+                        : null)
+                }));
+                window.timeline.setVideoCoverage(videos);
             }
 
             // Use block for compact layout, flex for full layout
             this.videoContainer.style.display = this.videoContainer.classList.contains('video-compact') ? 'block' : 'flex';
 
-            // Initialize video for each stream (HLS or direct)
-            for (const [camera, info] of Object.entries(this.streamInfo)) {
-                if (info && info.playlist_url) {
-                    this._initHLS(camera, info);
-                } else if (info && info.direct_url) {
-                    this._initDirect(camera, info);
-                }
-            }
+            // Load the video
+            this._loadChapter(0);
         } catch (error) {
             console.error('Error loading video streams:', error);
             this.videoContainer.style.display = 'none';
+            // Clear video coverage indicator on error
+            if (window.timeline) {
+                window.timeline.setVideoCoverage([]);
+            }
         }
     }
 
-    _initHLS(camera, streamInfo) {
+    /**
+     * Find which chapter covers a given timeline time
+     * Returns chapter index or -1 if no chapter covers this time
+     */
+    _findChapterForTime(time) {
+        if (!time || this.videoChapters.length === 0) return -1;
+
+        const timeMs = time.getTime();
+
+        for (let i = 0; i < this.videoChapters.length; i++) {
+            const ch = this.videoChapters[i];
+            if (ch._startMs && ch._endMs) {
+                // Use precise start/end times
+                if (timeMs >= ch._startMs && timeMs < ch._endMs) {
+                    return i;
+                }
+            } else if (ch._startMs && ch.duration_seconds) {
+                // Calculate end from duration
+                const endMs = ch._startMs + ch.duration_seconds * 1000;
+                if (timeMs >= ch._startMs && timeMs < endMs) {
+                    return i;
+                }
+            }
+        }
+
+        // Check if time is before first chapter or after last chapter
+        const firstCh = this.videoChapters[0];
+        const lastCh = this.videoChapters[this.videoChapters.length - 1];
+
+        if (firstCh._startMs && timeMs < firstCh._startMs) {
+            return -1; // Before video starts
+        }
+
+        if (lastCh._endMs && timeMs >= lastCh._endMs) {
+            return -2; // After video ends
+        }
+
+        return -1;
+    }
+
+    /**
+     * Calculate video position within a chapter for a given timeline time
+     */
+    _calculatePositionInChapter(time, chapter) {
+        if (!time || !chapter || !chapter._startMs) return null;
+        return (time.getTime() - chapter._startMs) / 1000;
+    }
+
+    /**
+     * Load a specific chapter by index
+     */
+    _loadChapter(index, seekPosition = 0) {
+        if (index < 0 || index >= this.videoChapters.length) return;
+
+        // Don't reload if already on this chapter
+        if (index === this.currentChapterIndex && this.videosReady['cockpit']) return;
+
+        const chapter = this.videoChapters[index];
+        console.log(`Loading video: ${chapter.filename || chapter.key}`);
+
+        this.currentChapterIndex = index;
+
+        if (chapter.playlist_url) {
+            this._initHLS('cockpit', chapter, seekPosition);
+        } else if (chapter.direct_url) {
+            this._initDirect('cockpit', chapter, seekPosition);
+        }
+    }
+
+    _initHLS(camera, streamInfo, initialSeek = 0) {
         const video = this.videoElements[camera];
         if (!video) return;
 
@@ -102,11 +201,9 @@ class VideoPlayer {
             const hls = new Hls({
                 enableWorker: true,
                 lowLatencyMode: false,
-                // Large buffer for smooth playback
                 maxBufferLength: 60,
                 maxMaxBufferLength: 120,
                 maxBufferSize: 120 * 1000 * 1000,
-                // Stability settings
                 fragLoadingTimeOut: 20000,
                 manifestLoadingTimeOut: 10000,
                 levelLoadingTimeOut: 10000
@@ -116,17 +213,16 @@ class VideoPlayer {
             hls.attachMedia(video);
 
             hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                console.log(`HLS ready: ${camera}`);
+                console.log(`HLS ready: ${camera}, duration: ${video.duration}s`);
                 this.videosReady[camera] = true;
+                this._initialLoadComplete = true;  // Allow sync after first video loaded
 
-                // Initial seek to current timeline position
-                const currentTime = window.timeController.getCurrentTime();
-                if (currentTime && streamInfo.start_time) {
-                    const streamStart = new Date(streamInfo.start_time).getTime();
-                    const offsetSeconds = (currentTime.getTime() - streamStart) / 1000;
-                    if (offsetSeconds >= 0 && offsetSeconds <= video.duration) {
-                        video.currentTime = offsetSeconds;
-                    }
+                if (initialSeek > 0 && initialSeek <= video.duration) {
+                    video.currentTime = initialSeek;
+                }
+
+                if (this.isPlaying) {
+                    video.play().catch(e => console.warn('Video play failed:', e.message));
                 }
             });
 
@@ -146,25 +242,22 @@ class VideoPlayer {
             video.src = streamInfo.playlist_url;
             video.addEventListener('loadedmetadata', () => {
                 this.videosReady[camera] = true;
-            });
+                this._initialLoadComplete = true;
+                if (initialSeek > 0) video.currentTime = initialSeek;
+                if (this.isPlaying) video.play().catch(() => {});
+            }, { once: true });
         }
     }
 
     /**
      * Initialize direct video playback (MP4/LRV files)
-     * Maps all direct videos to the cockpit video element
      */
-    _initDirect(camera, streamInfo) {
-        // Use cockpit video element for all direct videos (only one video element available)
+    _initDirect(camera, streamInfo, initialSeek = 0) {
         const video = this.videoElements['cockpit'];
         if (!video) return;
 
-        // Map this camera to cockpit element for playback sync
-        this.videoElements[camera] = video;
         this.videosReady[camera] = false;
-
-        // Update streamInfo to use cockpit for seeking
-        this.streamInfo['cockpit'] = streamInfo;
+        this.videosReady['cockpit'] = false;
 
         video.src = streamInfo.direct_url;
         video.load();
@@ -173,17 +266,17 @@ class VideoPlayer {
             console.log(`Direct video ready: ${camera}, duration: ${video.duration}s`);
             this.videosReady[camera] = true;
             this.videosReady['cockpit'] = true;
+            this._initialLoadComplete = true;  // Allow sync after first video loaded
 
-            // Initial seek to current timeline position
-            const currentTime = window.timeController?.getCurrentTime();
-            if (currentTime && streamInfo.start_time) {
-                const streamStart = new Date(streamInfo.start_time).getTime();
-                const offsetSeconds = (currentTime.getTime() - streamStart) / 1000;
-                if (offsetSeconds >= 0 && offsetSeconds <= video.duration) {
-                    video.currentTime = offsetSeconds;
-                    console.log(`Initial seek to ${offsetSeconds.toFixed(1)}s`);
-                }
+            if (initialSeek > 0 && initialSeek <= video.duration) {
+                video.currentTime = initialSeek;
+                console.log(`Initial seek to ${initialSeek.toFixed(1)}s`);
             }
+
+            if (this.isPlaying) {
+                video.play().catch(e => console.warn('Video play failed:', e.message));
+            }
+
             video.removeEventListener('loadedmetadata', onLoaded);
         };
 
@@ -191,56 +284,75 @@ class VideoPlayer {
 
         video.addEventListener('error', (e) => {
             console.error(`Video error ${camera}:`, video.error?.message || 'Unknown error');
-        });
+        }, { once: true });
     }
 
-    _seekVideos(time, force = false) {
-        if (!time || !this.streamInfo) return;
+    /**
+     * Sync video to timeline position - handles chapter switching
+     */
+    _syncToTimeline(time, force = false) {
+        if (!time || this.videoChapters.length === 0) return;
 
-        // Use cockpit video element directly since all videos map to it
+        // Don't auto-sync until first chapter is loaded (prevents jumping on page load)
+        if (!this._initialLoadComplete && !force) return;
+
+        const chapterIndex = this._findChapterForTime(time);
         const video = this.videoElements['cockpit'];
-        const info = this.streamInfo['cockpit'];
 
-        if (!video || !info || !info.start_time) return;
-        if (!this.videosReady['cockpit']) return;
-
-        const streamStart = new Date(info.start_time).getTime();
-        const offsetSeconds = (time.getTime() - streamStart) / 1000;
-
-        if (video.duration && offsetSeconds >= 0 && offsetSeconds <= video.duration) {
-            // Only seek if difference > 0.5s (avoid micro-seeks during playback)
-            const diff = Math.abs(video.currentTime - offsetSeconds);
-            if (force || diff > 0.5) {
-                video.currentTime = offsetSeconds;
+        // Timeline is before first video - show first frame, paused
+        if (chapterIndex === -1) {
+            // Load first chapter if not loaded
+            if (this.currentChapterIndex !== 0) {
+                this._loadChapter(0, 0);
+            } else if (video) {
+                video.pause();
+                video.currentTime = 0;
             }
+            return;
+        }
+
+        // Timeline is after last video
+        if (chapterIndex === -2) {
+            if (video) {
+                video.pause();
+                if (video.duration) video.currentTime = video.duration;
+            }
+            return;
+        }
+
+        const chapter = this.videoChapters[chapterIndex];
+        const positionInChapter = this._calculatePositionInChapter(time, chapter);
+
+        if (positionInChapter === null || positionInChapter < 0) return;
+
+        // Need to switch chapters?
+        if (chapterIndex !== this.currentChapterIndex) {
+            console.log(`Switching from chapter ${this.currentChapterIndex} to ${chapterIndex}`);
+            this._loadChapter(chapterIndex, positionInChapter);
+            return;
+        }
+
+        // Same chapter - just seek if needed
+        if (!video || !this.videosReady['cockpit']) return;
+
+        const diff = Math.abs(video.currentTime - positionInChapter);
+        if (force || diff > 0.5) {
+            video.currentTime = positionInChapter;
         }
     }
 
     _playAll() {
         this.isPlaying = true;
-        const video = this.videoElements['cockpit'];
-        const info = this.streamInfo?.['cockpit'];
-        if (!video || !this.videosReady['cockpit'] || !info) return;
 
         const currentTime = window.timeController.getCurrentTime();
         if (!currentTime) return;
 
-        const videoStart = new Date(info.start_time).getTime();
-        const offsetSeconds = (currentTime.getTime() - videoStart) / 1000;
+        // Sync and potentially switch chapters
+        this._syncToTimeline(currentTime, true);
 
-        // If timeline is before video start, don't play video yet
-        if (offsetSeconds < 0) {
-            console.log(`Timeline before video start, waiting ${(-offsetSeconds).toFixed(0)}s`);
-            video.currentTime = 0;
-            video.pause();
-        } else if (offsetSeconds <= video.duration) {
-            // Timeline is within video range - seek and play
-            video.currentTime = offsetSeconds;
+        const video = this.videoElements['cockpit'];
+        if (video && this.videosReady['cockpit']) {
             video.play().catch(e => console.warn('Video play failed:', e.message));
-        } else {
-            // Timeline is past video end
-            video.currentTime = video.duration;
-            video.pause();
         }
 
         // Start periodic sync check
@@ -258,51 +370,53 @@ class VideoPlayer {
     _startDriftCheck() {
         this._stopDriftCheck();
 
-        // Check every 500ms for sync
+        // Check every 500ms for sync and chapter transitions
         this.syncInterval = setInterval(() => {
             if (!this.isPlaying) return;
 
             const currentTime = window.timeController.getCurrentTime();
+            if (!currentTime) return;
+
+            const chapterIndex = this._findChapterForTime(currentTime);
             const video = this.videoElements['cockpit'];
-            const info = this.streamInfo?.['cockpit'];
 
-            if (!currentTime || !video || !info?.start_time) return;
-
-            const videoStart = new Date(info.start_time).getTime();
-            const expectedOffset = (currentTime.getTime() - videoStart) / 1000;
-
-            // Timeline is before video start - keep video paused at 0
-            if (expectedOffset < 0) {
-                if (!video.paused) {
+            // Timeline is outside video range
+            if (chapterIndex < 0) {
+                if (video && !video.paused) {
                     video.pause();
-                    video.currentTime = 0;
                 }
                 return;
             }
 
-            // Timeline is past video end - pause at end
-            if (expectedOffset > video.duration) {
-                if (!video.paused) {
-                    video.pause();
-                    video.currentTime = video.duration;
-                }
+            // Need to switch chapters?
+            if (chapterIndex !== this.currentChapterIndex) {
+                const chapter = this.videoChapters[chapterIndex];
+                const positionInChapter = this._calculatePositionInChapter(currentTime, chapter);
+                console.log(`Auto-switching to chapter ${chapterIndex}`);
+                this._loadChapter(chapterIndex, positionInChapter || 0);
                 return;
             }
 
-            // Timeline is within video range
-            // Start video if it was waiting
-            if (video.paused) {
-                video.currentTime = expectedOffset;
+            // Check drift within current chapter
+            if (!video || !this.videosReady['cockpit']) return;
+
+            const chapter = this.videoChapters[this.currentChapterIndex];
+            const expectedPosition = this._calculatePositionInChapter(currentTime, chapter);
+
+            if (expectedPosition === null) return;
+
+            // Resume paused video if within range
+            if (video.paused && expectedPosition >= 0 && expectedPosition <= video.duration) {
+                video.currentTime = expectedPosition;
                 video.play().catch(e => console.warn('Video play failed:', e.message));
                 return;
             }
 
-            // Check for drift and correct
-            const actualOffset = video.currentTime;
-            const drift = Math.abs(expectedOffset - actualOffset);
+            // Correct drift
+            const drift = Math.abs(expectedPosition - video.currentTime);
             if (drift > 1) {
                 console.log(`Correcting drift: ${drift.toFixed(1)}s`);
-                video.currentTime = expectedOffset;
+                video.currentTime = expectedPosition;
             }
         }, 500);
     }

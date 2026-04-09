@@ -159,6 +159,10 @@ def process_single_session(device_id: str, folder: str, date: str):
         logger.info(f"CORS data already exists at {cors_key}")
         # Update manifest and trigger PPK
         update_manifest_ppk_status(device_id, folder, 'cors_ready')
+
+        # Trigger PPK processing (was previously missing here)
+        trigger_ppk_processing(device_id, folder, date)
+
         return {
             'session': f"{device_id}/{folder}",
             'status': 'cors_ready',

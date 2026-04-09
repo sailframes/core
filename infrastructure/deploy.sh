@@ -85,7 +85,7 @@ package_lambdas() {
 
     log "Packaging Lambda functions..."
 
-    local functions=("process_upload" "api_sessions" "api_data" "api_video" "api_analysis" "api_e1")
+    local functions=("process_upload" "api_sessions" "api_data" "api_video" "api_analysis" "api_e1" "api_buoys" "link_videos" "transcode_complete" "cors_download")
 
     for func in "${functions[@]}"; do
         local func_dir="$LAMBDA_DIR/$func"
@@ -232,6 +232,7 @@ deploy_website() {
         --cache-control "max-age=31536000" \
         --exclude "*.html" \
         --exclude "config.js" \
+        --exclude "dashboard/*" \
         --profile "$AWS_PROFILE" \
         --region "$REGION"
 
@@ -240,6 +241,21 @@ deploy_website() {
         --exclude "*" \
         --include "*.html" \
         --include "config.js" \
+        --cache-control "max-age=60" \
+        --profile "$AWS_PROFILE" \
+        --region "$REGION"
+
+    # Deploy static dashboard (web/index.html and web/assets/)
+    log "Deploying static dashboard to /dashboard/..."
+
+    # Create config.js for dashboard
+    echo "window.SAILFRAMES_API_URL = '${api_endpoint}';" > "$WEB_DIR/config.js"
+
+    # Sync dashboard static files
+    aws s3 sync "$WEB_DIR" "s3://$website_bucket/dashboard/" \
+        --exclude "frontend/*" \
+        --exclude "api/*" \
+        --exclude ".DS_Store" \
         --cache-control "max-age=60" \
         --profile "$AWS_PROFILE" \
         --region "$REGION"

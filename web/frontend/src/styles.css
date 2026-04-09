@@ -380,6 +380,142 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   color: var(--text-secondary);
 }
 
+/* PPK Details Panel */
+.ppk-details-panel {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.ppk-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.ppk-stat-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  text-align: center;
+}
+
+.ppk-stat-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.ppk-stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ppk-stat-detail {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+.ppk-quality-section {
+  margin-bottom: 12px;
+}
+
+.ppk-quality-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+
+.ppk-quality-bar {
+  display: flex;
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.ppk-quality-segment {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.ppk-quality-fix {
+  background: #10b981;
+}
+
+.ppk-quality-float {
+  background: #f59e0b;
+}
+
+.ppk-quality-single {
+  background: #ef4444;
+}
+
+.ppk-quality-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.ppk-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.ppk-legend-color {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.ppk-timeline {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.ppk-timeline-label {
+  margin-right: 8px;
+}
+
+.ppk-timeline-value {
+  color: var(--text-primary);
+}
+
+.ppk-error-panel {
+  background: rgba(239, 68, 94, 0.1);
+  border-color: rgba(239, 68, 94, 0.3);
+}
+
+.ppk-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.ppk-error-icon {
+  font-size: 16px;
+}
+
+.ppk-error-message {
+  font-size: 13px;
+  color: #ef4444;
+  line-height: 1.4;
+}
+
 @media (max-width: 768px) {
   .app {
     flex-direction: column;
@@ -394,5 +530,8 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   }
   .tab-buttons {
     flex-wrap: wrap;
+  }
+  .ppk-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 }

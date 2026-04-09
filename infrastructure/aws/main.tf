@@ -161,6 +161,78 @@ resource "aws_lambda_permission" "api_gateway" {
   source_arn    = "${aws_apigatewayv2_api.upload_api.execution_arn}/*/*"
 }
 
+# ============================================
+# S3 EVENT NOTIFICATION FOR DATA PROCESSING
+# ============================================
+# Triggers the CloudFormation-deployed ProcessUploadFunction when
+# CSV files are uploaded to the raw/ prefix
+
+data "aws_lambda_function" "process_upload" {
+  function_name = "sailframes-process-upload-${var.environment}"
+}
+
+resource "aws_lambda_permission" "s3_invoke_process_upload" {
+  statement_id  = "AllowS3InvokeProcessUpload"
+  action        = "lambda:InvokeFunction"
+  function_name = data.aws_lambda_function.process_upload.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.fleet_data.arn
+}
+
+resource "aws_s3_bucket_notification" "raw_upload_trigger" {
+  bucket = aws_s3_bucket.fleet_data.id
+
+  # CSV files -> ProcessUpload Lambda (sensor data processing)
+  lambda_function {
+    lambda_function_arn = data.aws_lambda_function.process_upload.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "raw/"
+    filter_suffix       = ".csv"
+  }
+
+  # RTCM3 files -> ProcessUpload Lambda (PPK data)
+  lambda_function {
+    lambda_function_arn = data.aws_lambda_function.process_upload.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "raw/"
+    filter_suffix       = ".rtcm3"
+  }
+
+  # MP4 video files -> LinkVideos Lambda
+  lambda_function {
+    lambda_function_arn = data.aws_lambda_function.link_videos.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "raw/gopro/"
+    filter_suffix       = ".MP4"
+  }
+
+  # LRV proxy video files -> LinkVideos Lambda
+  lambda_function {
+    lambda_function_arn = data.aws_lambda_function.link_videos.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "raw/gopro/"
+    filter_suffix       = ".LRV"
+  }
+
+  depends_on = [
+    aws_lambda_permission.s3_invoke_process_upload,
+    aws_lambda_permission.s3_invoke_link_videos
+  ]
+}
+
+# LinkVideos Lambda for GoPro video uploads
+data "aws_lambda_function" "link_videos" {
+  function_name = "sailframes-link-videos-${var.environment}"
+}
+
+resource "aws_lambda_permission" "s3_invoke_link_videos" {
+  statement_id  = "AllowS3InvokeLinkVideos"
+  action        = "lambda:InvokeFunction"
+  function_name = data.aws_lambda_function.link_videos.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.fleet_data.arn
+}
+
 # Outputs
 output "api_endpoint" {
   value       = "${aws_apigatewayv2_api.upload_api.api_endpoint}/prod/upload"
@@ -170,4 +242,14 @@ output "api_endpoint" {
 output "s3_bucket" {
   value       = aws_s3_bucket.fleet_data.id
   description = "S3 bucket for fleet data"
+}
+
+output "process_upload_trigger" {
+  value       = "Enabled: raw/*.csv -> ${data.aws_lambda_function.process_upload.function_name}"
+  description = "S3 event notification for automatic data processing"
+}
+
+output "link_videos_trigger" {
+  value       = "Enabled: raw/gopro/*.MP4, *.LRV -> ${data.aws_lambda_function.link_videos.function_name}"
+  description = "S3 event notification for automatic video linking"
 }

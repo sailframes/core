@@ -48,8 +48,20 @@ const FILE_TYPE_COLORS = {
   nav: "var(--accent)",
   imu: "var(--success)",
   wind: "var(--warning)",
-  rtcm3: "var(--danger)",
+  rtcm3: "#9333ea",  // Purple for RTCM3
+  ppk: "#10b981",    // Green for PPK
   other: "var(--border)",
+};
+
+// PPK status display config
+const PPK_STATUS_CONFIG = {
+  awaiting_cors: { label: "Awaiting CORS", color: "#f59e0b", icon: "⏳" },
+  cors_downloading: { label: "Downloading CORS", color: "#3b82f6", icon: "⬇️" },
+  cors_ready: { label: "CORS Ready", color: "#3b82f6", icon: "✓" },
+  processing: { label: "Processing PPK", color: "#8b5cf6", icon: "⚙️" },
+  completed: { label: "PPK Complete", color: "#10b981", icon: "✓" },
+  failed: { label: "PPK Failed", color: "#ef4444", icon: "✗" },
+  cors_error: { label: "CORS Error", color: "#ef4444", icon: "!" },
 };
 
 export default function E1DateDetail() {
@@ -58,6 +70,7 @@ export default function E1DateDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [deleting, setDeleting] = useState(null);
+  const [expandedSessions, setExpandedSessions] = useState(new Set());
 
   const fetchSessions = () => {
     setLoading(true);
@@ -103,6 +116,9 @@ export default function E1DateDetail() {
           timezoneAbbr: getBostonTimezoneAbbr(session.start_time),
           durationMinutes: session.duration_minutes,
           sensors: session.sensors || {},
+          ppkStatus: session.ppk_status,
+          ppkStats: session.ppk_stats,
+          ppkError: session.ppk_error,
         };
       })
       .sort((a, b) => a.startTime.localeCompare(b.startTime));
@@ -200,7 +216,192 @@ export default function E1DateDetail() {
     if (sensors.gps) types.push("nav");
     if (sensors.imu) types.push("imu");
     if (sensors.wind) types.push("wind");
+    if (sensors.rtcm3) types.push("rtcm3");
     return types;
+  };
+
+  const togglePpkExpand = (sessionId) => {
+    setExpandedSessions((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(sessionId)) {
+        newSet.delete(sessionId);
+      } else {
+        newSet.add(sessionId);
+      }
+      return newSet;
+    });
+  };
+
+  // CORS station display names
+  const CORS_STATIONS = {
+    mami: { name: "Mass Maritime", location: "Buzzards Bay, MA" },
+    bosm: { name: "Boston", location: "Boston, MA" },
+    njgt: { name: "NJ Gateway", location: "New Jersey" },
+  };
+
+  // Render PPK details panel
+  const renderPpkDetails = (session) => {
+    const stats = session.ppkStats;
+    if (!stats) return null;
+
+    const total = (stats.fix_count || 0) + (stats.float_count || 0) + (stats.single_count || 0);
+    const fixPct = total > 0 ? ((stats.fix_count || 0) / total * 100) : 0;
+    const floatPct = total > 0 ? ((stats.float_count || 0) / total * 100) : 0;
+    const singlePct = total > 0 ? ((stats.single_count || 0) / total * 100) : 0;
+
+    const corsInfo = CORS_STATIONS[stats.cors_station] || { name: stats.cors_station?.toUpperCase(), location: "Unknown" };
+
+    // Format accuracy - combine N/E as horizontal
+    const avgNE = stats.avg_sdn && stats.avg_sde
+      ? Math.sqrt(stats.avg_sdn ** 2 + stats.avg_sde ** 2)
+      : null;
+
+    return (
+      <div className="ppk-details-panel">
+        <div className="ppk-stats-grid">
+          <div className="ppk-stat-card">
+            <div className="ppk-stat-label">Fix Rate</div>
+            <div className="ppk-stat-value">{stats.fix_rate}%</div>
+            <div className="ppk-stat-detail">{stats.fix_count?.toLocaleString()} fixed</div>
+          </div>
+          <div className="ppk-stat-card">
+            <div className="ppk-stat-label">Points</div>
+            <div className="ppk-stat-value">{stats.points?.toLocaleString()}</div>
+            <div className="ppk-stat-detail">
+              {session.durationMinutes ? `~${Math.round(stats.points / session.durationMinutes / 60)}Hz` : ""}
+            </div>
+          </div>
+          <div className="ppk-stat-card">
+            <div className="ppk-stat-label">Accuracy</div>
+            <div className="ppk-stat-value">
+              {avgNE ? `${avgNE.toFixed(2)}m` : "—"}
+            </div>
+            <div className="ppk-stat-detail">
+              {stats.avg_sdu ? `${stats.avg_sdu.toFixed(2)}m Up` : "horizontal"}
+            </div>
+          </div>
+          <div className="ppk-stat-card">
+            <div className="ppk-stat-label">Base Station</div>
+            <div className="ppk-stat-value">{stats.cors_station?.toUpperCase() || "—"}</div>
+            <div className="ppk-stat-detail">{corsInfo.name}</div>
+          </div>
+        </div>
+
+        <div className="ppk-quality-section">
+          <div className="ppk-quality-label">Quality Breakdown</div>
+          <div className="ppk-quality-bar">
+            {fixPct > 0 && (
+              <div
+                className="ppk-quality-segment ppk-quality-fix"
+                style={{ width: `${fixPct}%` }}
+                title={`Fix: ${stats.fix_count} (${fixPct.toFixed(1)}%)`}
+              />
+            )}
+            {floatPct > 0 && (
+              <div
+                className="ppk-quality-segment ppk-quality-float"
+                style={{ width: `${floatPct}%` }}
+                title={`Float: ${stats.float_count} (${floatPct.toFixed(1)}%)`}
+              />
+            )}
+            {singlePct > 0 && (
+              <div
+                className="ppk-quality-segment ppk-quality-single"
+                style={{ width: `${singlePct}%` }}
+                title={`Single: ${stats.single_count} (${singlePct.toFixed(1)}%)`}
+              />
+            )}
+          </div>
+          <div className="ppk-quality-legend">
+            <span className="ppk-legend-item">
+              <span className="ppk-legend-color ppk-quality-fix" /> Fix {fixPct.toFixed(1)}%
+            </span>
+            <span className="ppk-legend-item">
+              <span className="ppk-legend-color ppk-quality-float" /> Float {floatPct.toFixed(1)}%
+            </span>
+            <span className="ppk-legend-item">
+              <span className="ppk-legend-color ppk-quality-single" /> Single {singlePct.toFixed(1)}%
+            </span>
+          </div>
+        </div>
+
+        {stats.processed_at && (
+          <div className="ppk-timeline">
+            <span className="ppk-timeline-label">Processed:</span>
+            <span className="ppk-timeline-value">
+              {new Date(stats.processed_at).toLocaleString("en-US", {
+                timeZone: BOSTON_TIMEZONE,
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              })}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Render PPK error panel
+  const renderPpkError = (session) => {
+    if (!session.ppkError) return null;
+
+    return (
+      <div className="ppk-details-panel ppk-error-panel">
+        <div className="ppk-error">
+          <span className="ppk-error-icon">⚠️</span>
+          <span className="ppk-error-message">{session.ppkError}</span>
+        </div>
+      </div>
+    );
+  };
+
+  // Render PPK status badge (clickable for completed/failed sessions)
+  const renderPpkStatus = (session) => {
+    if (!session.ppkStatus && !session.sensors.rtcm3) return null;
+
+    const status = session.ppkStatus || "no_rtcm3";
+    const config = PPK_STATUS_CONFIG[status];
+
+    if (!config) return null;
+
+    const isExpandable = status === "completed" || status === "failed";
+    const isExpanded = expandedSessions.has(session.sessionId);
+
+    return (
+      <div
+        onClick={isExpandable ? () => togglePpkExpand(session.sessionId) : undefined}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "4px 8px",
+          borderRadius: 4,
+          background: `${config.color}20`,
+          border: `1px solid ${config.color}40`,
+          fontSize: 12,
+          cursor: isExpandable ? "pointer" : "default",
+          userSelect: "none",
+        }}
+        title={isExpandable ? "Click to expand details" : (session.ppkError || "")}
+      >
+        <span>{config.icon}</span>
+        <span style={{ color: config.color, fontWeight: 500 }}>
+          {config.label}
+          {session.ppkStats && session.ppkStatus === "completed" && (
+            <span style={{ fontWeight: 400, marginLeft: 4 }}>
+              ({session.ppkStats.fix_rate}% fix)
+            </span>
+          )}
+        </span>
+        {isExpandable && (
+          <span style={{ marginLeft: 4, transition: "transform 0.2s", transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)" }}>
+            ▼
+          </span>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -292,6 +493,7 @@ export default function E1DateDetail() {
                       {session.durationMinutes} min
                     </span>
                   )}
+                  {renderPpkStatus(session)}
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button
@@ -318,6 +520,10 @@ export default function E1DateDetail() {
                   </button>
                 </div>
               </div>
+
+              {/* Expandable PPK details panel */}
+              {expandedSessions.has(session.sessionId) && session.ppkStatus === "completed" && renderPpkDetails(session)}
+              {expandedSessions.has(session.sessionId) && session.ppkStatus === "failed" && renderPpkError(session)}
             </div>
           ))}
         </div>

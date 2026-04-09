@@ -240,7 +240,17 @@ def get_video_times(prefix: str) -> tuple:
     except Exception:
         pass
 
-    start_time = segments[0].strftime('%Y-%m-%dT%H:%M:%SZ')
-    end_time = segments[-1].strftime('%Y-%m-%dT%H:%M:%SZ')
+    start_time = segments[0]
+    # Calculate end_time from start + duration (more accurate than last segment timestamp)
+    if duration > 0:
+        from datetime import timedelta
+        end_dt = start_time + timedelta(seconds=duration)
+    else:
+        end_dt = segments[-1]
 
-    return start_time, end_time, round(duration, 1)
+    start_str = start_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+    end_str = end_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    logger.info(f"Video times: start={start_str}, end={end_str}, duration={duration:.1f}s")
+
+    return start_str, end_str, round(duration, 1)

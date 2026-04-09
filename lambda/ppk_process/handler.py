@@ -71,16 +71,20 @@ def lambda_handler(event, context):
 
         # Get session info from manifest for CORS file selection and RTCM3 file
         session_hour = None
+        session_end_hour = None
         rtcm3_s3_key = None
         try:
             manifest_key = f"processed/{device_id}/{folder}/manifest.json"
             response = s3.get_object(Bucket=DATA_BUCKET, Key=manifest_key)
             manifest = json.loads(response['Body'].read().decode('utf-8'))
             start_time = manifest.get('start_time', '')
+            end_time = manifest.get('end_time', '')
             if start_time:
-                # Parse ISO timestamp to get hour (e.g., "2026-04-07T14:18:29Z")
                 session_hour = int(start_time[11:13])
                 logger.info(f"Session start time: {start_time}, hour: {session_hour}")
+            if end_time:
+                session_end_hour = int(end_time[11:13])
+                logger.info(f"Session end time: {end_time}, end_hour: {session_end_hour}")
             # Get RTCM3 file path from manifest
             if 'sensors' in manifest and 'rtcm3' in manifest['sensors']:
                 rtcm3_s3_key = manifest['sensors']['rtcm3'].get('s3_key')
@@ -98,11 +102,21 @@ def lambda_handler(event, context):
             if not rtcm3_path:
                 raise ValueError("No RTCM3 file found for session")
 
-            # Download CORS base station data (with session hour for correct file selection)
-            base_files = download_cors_data(date, cors_station, tmpdir, session_hour)
+            # Download CORS base station data (with session hours for correct file selection)
+            base_files = download_cors_data(date, cors_station, tmpdir, session_hour, session_end_hour)
 
             if not base_files.get('obs'):
                 raise ValueError("CORS observation file not available")
+
+            # Log base obs header for diagnostics
+            base_obs_path = base_files['obs']
+            logger.info(f"Base obs file size: {base_obs_path.stat().st_size} bytes")
+            with open(base_obs_path, 'r') as f:
+                for line in f:
+                    if 'TYPES OF OBSERV' in line or 'SYS / # / OBS TYPES' in line or 'RINEX VERSION' in line or 'APPROX POSITION' in line:
+                        logger.info(f"Base header: {line.rstrip()}")
+                    if 'END OF HEADER' in line:
+                        break
 
             # Convert RTCM3 to RINEX
             rover_obs, rover_nav = convert_rtcm3_to_rinex(rtcm3_path, tmpdir)
@@ -116,6 +130,34 @@ def lambda_handler(event, context):
                 base_gnav=base_files.get('gnav'),
                 output_dir=tmpdir
             )
+
+            # List all files in tmpdir for diagnostics
+            all_files = list(tmpdir.glob('*'))
+            logger.info(f"Files in tmpdir: {[(f.name, f.stat().st_size) for f in all_files]}")
+
+            # Also check /tmp for trace
+            tmp_files = list(Path('/tmp').glob('*.trace')) + list(Path('/tmp').glob('trace*'))
+            logger.info(f"Trace files in /tmp: {[(f.name, f.stat().st_size) for f in tmp_files]}")
+
+            # Upload trace file for diagnostics (rnx2rtkp writes to solution_file.trace)
+            trace_path = tmpdir / 'solution.pos.trace'
+            if not trace_path.exists():
+                trace_path = tmpdir / 'solution.trace'
+            if not trace_path.exists():
+                trace_path = Path('/tmp/trace.txt')
+            if trace_path.exists():
+                trace_size = trace_path.stat().st_size
+                logger.info(f"Trace file: {trace_size} bytes")
+                # Upload first 500KB of trace for analysis
+                with open(trace_path, 'r') as f:
+                    trace_head = f.read(500000)
+                s3.put_object(
+                    Bucket=DATA_BUCKET,
+                    Key=f"processed/{device_id}/{folder}/ppk_trace.txt",
+                    Body=trace_head,
+                    ContentType='text/plain'
+                )
+                logger.info("Uploaded PPK trace file")
 
             # Parse solution and upload results
             ppk_data = parse_ppk_solution(solution_file)
@@ -240,14 +282,19 @@ def download_rover_data(device_id: str, folder: str, tmpdir: Path, rtcm3_s3_key:
     return local_path
 
 
-def download_cors_data(date: str, station: str, tmpdir: Path, session_hour: int = None) -> dict:
+def download_cors_data(date: str, station: str, tmpdir: Path,
+                       session_hour: int = None, session_end_hour: int = None) -> dict:
     """Download CORS base station data from S3.
+
+    Downloads and concatenates all hourly CORS files spanning the session.
+    A session from 17:53-20:19 UTC needs hours 17, 18, 19, 20.
 
     Args:
         date: Date string (YYYY-MM-DD)
         station: CORS station ID (e.g., 'mami')
         tmpdir: Temporary directory for downloads
-        session_hour: Hour of session start (0-23) to select correct hourly file
+        session_hour: Hour of session start (0-23)
+        session_end_hour: Hour of session end (0-23)
 
     Returns:
         Dict with 'obs', 'nav', 'gnav' paths
@@ -258,7 +305,7 @@ def download_cors_data(date: str, station: str, tmpdir: Path, session_hour: int 
 
     cors_prefix = f"cors/{station}/{year}/{doy:03d}/"
 
-    logger.info(f"Downloading CORS data from {cors_prefix}, session_hour={session_hour}")
+    logger.info(f"Downloading CORS data from {cors_prefix}, hours={session_hour}-{session_end_hour}")
 
     files = {}
 
@@ -267,61 +314,92 @@ def download_cors_data(date: str, station: str, tmpdir: Path, session_hour: int 
         Prefix=cors_prefix
     )
 
-    # NOAA CORS hourly files: a=hour 0, b=hour 1, ... o=hour 14, ... x=hour 23
-    # Each letter represents one hour of data
-    # Full day file ends with '0' (e.g., mami0970.26o.gz)
-    hourly_letter = None
-    if session_hour is not None:
-        # Convert hour 0-23 to letter a-x
-        hourly_letter = chr(ord('a') + session_hour)
-        logger.info(f"Session hour {session_hour} maps to hourly file letter '{hourly_letter}'")
-
-    # Collect all available observation files
-    obs_files = []
+    # Build lookup of available observation files by hourly letter
+    obs_by_letter = {}
+    full_day_obs = None
     for obj in response.get('Contents', []):
         key = obj['Key']
         filename = key.split('/')[-1]
+        base = filename.replace('.gz', '')
 
-        if filename.endswith('.gz') and 'o' in filename[-6:-3]:
-            obs_files.append((key, filename))
+        # Match observation files (end in .XXo where XX is year)
+        if filename.endswith('.gz') and len(base) >= 5 and base.endswith('o'):
+            letter = base[-5]  # e.g., 'a' for hour 0, '0' for full-day
+            if letter == '0':
+                full_day_obs = (key, filename)
+                logger.info(f"Found full-day file: {filename}")
+            elif letter.isalpha():
+                obs_by_letter[letter] = (key, filename)
 
-    logger.info(f"Found {len(obs_files)} observation files: {[f[1] for f in obs_files]}")
+    logger.info(f"Available hourly files: {sorted(obs_by_letter.keys())}, full_day: {full_day_obs is not None}")
 
-    # Select best observation file:
-    # 1. Prefer full-day file (ends with '0' before extension)
-    # 2. Otherwise use the correct hourly file based on session time
-    selected_obs = None
-    for key, filename in obs_files:
-        # Check for full-day file (e.g., mami0970.26o.gz - has '0' before the extension)
-        base = filename.replace('.gz', '')  # mami0970.26o
-        if len(base) >= 5 and base[-5] == '0':
-            selected_obs = (key, filename)
-            logger.info(f"Found full-day file: {filename}")
-            break
-
-        # Check for matching hourly file
-        if hourly_letter and len(base) >= 5 and base[-5] == hourly_letter:
-            selected_obs = (key, filename)
-            logger.info(f"Found matching hourly file: {filename}")
-
-    # Fallback: use first available if no match
-    if not selected_obs and obs_files:
-        selected_obs = obs_files[0]
-        logger.warning(f"No matching CORS file, using fallback: {selected_obs[1]}")
-
-    # Download selected observation file
-    if selected_obs:
-        key, filename = selected_obs
+    # Prefer full-day file (covers entire session)
+    if full_day_obs:
+        key, filename = full_day_obs
         local_gz = tmpdir / filename
         s3.download_file(DATA_BUCKET, key, str(local_gz))
-
         local_file = tmpdir / filename[:-3]
         with gzip.open(local_gz, 'rb') as f_in:
             with open(local_file, 'wb') as f_out:
                 f_out.write(f_in.read())
-
         files['obs'] = local_file
-        logger.info(f"Using observation file: {local_file}")
+        logger.info(f"Using full-day observation file: {local_file}")
+    else:
+        # Download and concatenate hourly files spanning the session
+        start_h = session_hour if session_hour is not None else 0
+        end_h = session_end_hour if session_end_hour is not None else start_h
+
+        needed_hours = list(range(start_h, end_h + 1))
+        logger.info(f"Need hourly files for hours: {needed_hours}")
+
+        hourly_obs_files = []
+        for h in needed_hours:
+            letter = chr(ord('a') + h)
+            if letter in obs_by_letter:
+                key, filename = obs_by_letter[letter]
+                local_gz = tmpdir / filename
+                s3.download_file(DATA_BUCKET, key, str(local_gz))
+                local_file = tmpdir / filename[:-3]
+                with gzip.open(local_gz, 'rb') as f_in:
+                    with open(local_file, 'wb') as f_out:
+                        f_out.write(f_in.read())
+                hourly_obs_files.append(local_file)
+                logger.info(f"Downloaded hourly file: {filename} (hour {h})")
+            else:
+                logger.warning(f"Missing CORS hourly file for hour {h} (letter '{letter}')")
+
+        if hourly_obs_files:
+            if len(hourly_obs_files) == 1:
+                files['obs'] = hourly_obs_files[0]
+            else:
+                # Concatenate: keep header from first file, append data from rest
+                combined_file = tmpdir / 'base_combined.obs'
+                with open(combined_file, 'w') as out:
+                    # Write first file completely (header + data)
+                    with open(hourly_obs_files[0], 'r') as f:
+                        out.write(f.read())
+                    # Append data (skip header) from remaining files
+                    for obs_file in hourly_obs_files[1:]:
+                        past_header = False
+                        with open(obs_file, 'r') as f:
+                            for line in f:
+                                if past_header:
+                                    out.write(line)
+                                elif 'END OF HEADER' in line:
+                                    past_header = True
+                files['obs'] = combined_file
+                logger.info(f"Concatenated {len(hourly_obs_files)} hourly files into {combined_file}")
+        elif obs_by_letter:
+            # Fallback: use any available hourly file
+            first_key, first_file = next(iter(obs_by_letter.values()))
+            local_gz = tmpdir / first_file
+            s3.download_file(DATA_BUCKET, first_key, str(local_gz))
+            local_file = tmpdir / first_file[:-3]
+            with gzip.open(local_gz, 'rb') as f_in:
+                with open(local_file, 'wb') as f_out:
+                    f_out.write(f_in.read())
+            files['obs'] = local_file
+            logger.warning(f"Using fallback observation file: {local_file}")
 
     # Download navigation files (from CORS or IGS broadcast)
     nav_files_downloaded = []
@@ -397,7 +475,7 @@ def convert_rtcm3_to_rinex(rtcm3_path: Path, tmpdir: Path) -> tuple:
         '-od',  # Include doppler in output
         '-os',  # Include SNR in output
         '-f', '5',  # Number of frequencies (L1-L5)
-        '-v', '2.11',  # RINEX 2.11 to match CORS files
+        '-v', '3.04',  # RINEX 3 output — demo5 handles mixed 2/3 matching
         str(rtcm3_path)
     ]
 
@@ -440,6 +518,17 @@ def convert_rtcm3_to_rinex(rtcm3_path: Path, tmpdir: Path) -> tuple:
         if obs_size < 1000:
             logger.warning(f"Observation file very small ({obs_size} bytes)")
 
+        # Count data records (non-header, non-comment lines)
+        data_lines = 0
+        with open(obs_path, 'r') as f:
+            past_header = False
+            for line in f:
+                if past_header:
+                    data_lines += 1
+                elif 'END OF HEADER' in line:
+                    past_header = True
+        logger.info(f"Rover obs file: {obs_size} bytes, {data_lines} data lines")
+
         return obs_path, nav_path if nav_path.exists() else None
 
     except subprocess.TimeoutExpired:
@@ -459,6 +548,7 @@ def run_ppk_processing(rover_obs: Path, rover_nav: Path,
         '-p', '2',  # Positioning mode: 2=kinematic
         '-m', str(PPK_CONFIG['elevation_mask']),
         '-o', str(solution_path),
+        '-x', '3',  # Trace level 3
     ]
 
     # Add input files
@@ -573,13 +663,17 @@ def parse_ppk_solution(solution_file: Path) -> dict:
 
     total = len(positions)
     fix_rate = (fix_count / total * 100) if total > 0 else 0
+    float_rate = (float_count / total * 100) if total > 0 else 0
+    differential_rate = ((fix_count + float_count) / total * 100) if total > 0 else 0
 
     logger.info(f"Parsed {total} positions: {fix_count} fix, {float_count} float, {single_count} single")
-    logger.info(f"Fix rate: {fix_rate:.1f}%")
+    logger.info(f"Fix rate: {fix_rate:.1f}%, Float rate: {float_rate:.1f}%, Differential rate: {differential_rate:.1f}%")
 
     return {
         'positions': positions,
         'fix_rate': round(fix_rate, 1),
+        'float_rate': round(float_rate, 1),
+        'differential_rate': round(differential_rate, 1),
         'fix_count': fix_count,
         'float_count': float_count,
         'single_count': single_count,

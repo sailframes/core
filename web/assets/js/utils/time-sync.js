@@ -8,6 +8,8 @@ class TimeController extends EventTarget {
         this._currentTime = null;
         this._startTime = null;
         this._endTime = null;
+        this._originalStartTime = null;
+        this._originalEndTime = null;
         this._playbackRate = 1.0;
         this._isPlaying = false;
         this._lastTick = null;
@@ -16,17 +18,35 @@ class TimeController extends EventTarget {
 
     /**
      * Set the session time bounds
+     * @param {string} startTime - Session start time
+     * @param {string} endTime - Session end time
+     * @param {object} trim - Optional trim bounds { start, end }
      */
-    setSession(startTime, endTime) {
-        this._startTime = new Date(startTime);
-        this._endTime = new Date(endTime);
+    setSession(startTime, endTime, trim = null) {
+        this._originalStartTime = new Date(startTime);
+        this._originalEndTime = new Date(endTime);
+
+        // Apply trim if present
+        if (trim && trim.start) {
+            this._startTime = new Date(trim.start);
+        } else {
+            this._startTime = new Date(this._originalStartTime);
+        }
+
+        if (trim && trim.end) {
+            this._endTime = new Date(trim.end);
+        } else {
+            this._endTime = new Date(this._originalEndTime);
+        }
+
         this._currentTime = new Date(this._startTime);
 
         this.dispatchEvent(new CustomEvent('session-loaded', {
             detail: {
                 start: this._startTime,
                 end: this._endTime,
-                duration: this._endTime - this._startTime
+                duration: this._endTime - this._startTime,
+                isTrimmed: this.isTrimmed()
             }
         }));
 
@@ -180,6 +200,89 @@ class TimeController extends EventTarget {
                 elapsed: this.getElapsed()
             }
         }));
+    }
+
+    /**
+     * Set trim bounds (updates effective start/end without changing original)
+     * @param {Date|string|null} trimStart - New start time (null to keep current)
+     * @param {Date|string|null} trimEnd - New end time (null to keep current)
+     */
+    setTrim(trimStart, trimEnd) {
+        if (trimStart !== null) {
+            this._startTime = new Date(trimStart);
+        }
+        if (trimEnd !== null) {
+            this._endTime = new Date(trimEnd);
+        }
+
+        // Reset current time to new start
+        this._currentTime = new Date(this._startTime);
+
+        this.dispatchEvent(new CustomEvent('trim-change', {
+            detail: {
+                start: this._startTime,
+                end: this._endTime,
+                duration: this._endTime - this._startTime,
+                isTrimmed: this.isTrimmed()
+            }
+        }));
+
+        this._notifyTimeChange();
+    }
+
+    /**
+     * Reset trim to original session bounds
+     */
+    resetTrim() {
+        if (!this._originalStartTime || !this._originalEndTime) return;
+
+        this._startTime = new Date(this._originalStartTime);
+        this._endTime = new Date(this._originalEndTime);
+        this._currentTime = new Date(this._startTime);
+
+        this.dispatchEvent(new CustomEvent('trim-change', {
+            detail: {
+                start: this._startTime,
+                end: this._endTime,
+                duration: this._endTime - this._startTime,
+                isTrimmed: false
+            }
+        }));
+
+        this._notifyTimeChange();
+    }
+
+    /**
+     * Check if session is currently trimmed
+     */
+    isTrimmed() {
+        if (!this._originalStartTime || !this._originalEndTime) return false;
+        return (
+            this._startTime.getTime() !== this._originalStartTime.getTime() ||
+            this._endTime.getTime() !== this._originalEndTime.getTime()
+        );
+    }
+
+    /**
+     * Get current trim bounds for saving
+     */
+    getTrimBounds() {
+        return {
+            start: this._startTime?.toISOString(),
+            end: this._endTime?.toISOString(),
+            originalStart: this._originalStartTime?.toISOString(),
+            originalEnd: this._originalEndTime?.toISOString()
+        };
+    }
+
+    /**
+     * Get original (untrimmed) session bounds
+     */
+    getOriginalBounds() {
+        return {
+            start: this._originalStartTime,
+            end: this._originalEndTime
+        };
     }
 }
 

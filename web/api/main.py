@@ -350,30 +350,61 @@ def get_sensor_data(
     end: float | None = None,
     resolution: int = Query(1, description="Downsample factor"),
 ):
-    """Get sensor time-series data for a session."""
-    result = {}
+    """Get sensor time-series data for a session, merged by timestamp.
+
+    Returns data in merged format expected by frontend:
+    {
+        data: [{t, gps: {...}, imu: {...}, pressure: {...}, wind: {...}}, ...],
+        start_time: "...",
+        end_time: "..."
+    }
+    """
+    # Load each sensor's data
+    sensor_data = {}
     for sensor in sensors.split(","):
         sensor = sensor.strip()
         key = f"{DATA_PREFIX}/{device_id}/{date}/{sensor}.json"
         try:
             data = _load_json(key)
             records = data if isinstance(data, list) else data.get("data", [])
-
-            # Time filtering
-            if start is not None:
-                records = [r for r in records if r.get("timestamp", 0) >= start]
-            if end is not None:
-                records = [r for r in records if r.get("timestamp", 0) <= end]
-
-            # Downsample
-            if resolution > 1:
-                records = records[::resolution]
-
-            result[sensor] = records
+            sensor_data[sensor] = records
         except HTTPException:
-            result[sensor] = []
+            sensor_data[sensor] = []
 
-    return result
+    # Merge by timestamp - collect all unique timestamps
+    merged = {}  # timestamp -> {t, gps: {...}, imu: {...}, ...}
+
+    for sensor, records in sensor_data.items():
+        for record in records:
+            t = record.get("t")
+            if not t:
+                continue
+            if t not in merged:
+                merged[t] = {"t": t}
+            # Nest sensor data under sensor key (exclude 't' from nested object)
+            sensor_record = {k: v for k, v in record.items() if k != "t"}
+            merged[t][sensor] = sensor_record
+
+    # Sort by timestamp and convert to list
+    data = [merged[t] for t in sorted(merged.keys())]
+
+    # Time filtering using ISO string comparison (works for chronological order)
+    # Note: start/end params are currently unused as frontend filters via timeController
+    # TODO: Support ISO string time bounds if needed
+
+    # Downsample
+    if resolution > 1:
+        data = data[::resolution]
+
+    # Calculate time bounds
+    start_time = data[0]["t"] if data else None
+    end_time = data[-1]["t"] if data else None
+
+    return {
+        "data": data,
+        "start_time": start_time,
+        "end_time": end_time,
+    }
 
 
 # --- Analysis ---
@@ -537,6 +568,106 @@ def delete_session(device_id: str, date: str):
         "device_id": device_id,
         "date": date,
         "files_deleted": deleted_count,
+    }
+
+
+# --- NOAA Buoy Data ---
+
+from .noaa_buoys import (
+    BOSTON_BUOYS,
+    get_all_buoys_data,
+    get_buoy_snapshot,
+    fetch_buoy_data_for_timerange,
+)
+
+
+@app.get("/api/buoys")
+def list_buoys():
+    """List all Boston Harbor area buoys with their metadata."""
+    buoys = []
+    for station_id, meta in BOSTON_BUOYS.items():
+        buoys.append({
+            "station_id": station_id,
+            "name": meta["name"],
+            "lat": meta["lat"],
+            "lon": meta["lon"],
+            "type": meta["type"],
+            "data_types": meta["data"],
+            "color": meta["color"],
+        })
+    return {"buoys": buoys}
+
+
+@app.get("/api/buoys/data")
+def get_buoys_data(
+    start_ts: float = Query(..., description="Start timestamp (Unix)"),
+    end_ts: float = Query(..., description="End timestamp (Unix)"),
+):
+    """
+    Get NOAA buoy data for all Boston Harbor buoys within a time range.
+    Returns metadata and time-series data for each buoy.
+    """
+    data = get_all_buoys_data(start_ts, end_ts)
+
+    # Format response
+    result = {}
+    for station_id, buoy in data.items():
+        result[station_id] = {
+            "station_id": station_id,
+            "name": buoy["name"],
+            "lat": buoy["lat"],
+            "lon": buoy["lon"],
+            "color": buoy["color"],
+            "type": buoy["type"],
+            "has_data": buoy["has_data"],
+            "data_points": buoy["data_points"],
+        }
+
+    return {"buoys": result}
+
+
+@app.get("/api/buoys/snapshot")
+def get_buoys_snapshot(
+    timestamp: float = Query(..., description="Target timestamp (Unix)"),
+    start_ts: float = Query(None, description="Session start (for caching)"),
+    end_ts: float = Query(None, description="Session end (for caching)"),
+):
+    """
+    Get interpolated buoy values at a specific timestamp.
+    Useful for real-time display during timeline scrubbing.
+    """
+    # Use provided range or default to +/- 4 hours
+    if start_ts is None:
+        start_ts = timestamp - 4 * 3600
+    if end_ts is None:
+        end_ts = timestamp + 4 * 3600
+
+    buoys_data = get_all_buoys_data(start_ts, end_ts)
+    snapshot = get_buoy_snapshot(buoys_data, timestamp)
+
+    return {"timestamp": timestamp, "buoys": snapshot}
+
+
+@app.get("/api/buoys/{station_id}/data")
+def get_single_buoy_data(
+    station_id: str,
+    start_ts: float = Query(..., description="Start timestamp (Unix)"),
+    end_ts: float = Query(..., description="End timestamp (Unix)"),
+):
+    """Get data for a specific buoy within a time range."""
+    if station_id not in BOSTON_BUOYS:
+        raise HTTPException(404, f"Unknown buoy: {station_id}")
+
+    meta = BOSTON_BUOYS[station_id]
+    data_points = fetch_buoy_data_for_timerange(station_id, start_ts, end_ts)
+
+    return {
+        "station_id": station_id,
+        "name": meta["name"],
+        "lat": meta["lat"],
+        "lon": meta["lon"],
+        "color": meta["color"],
+        "data_points": data_points,
     }
 
 
