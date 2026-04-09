@@ -116,7 +116,7 @@ static NimBLEUUID FIRMWARE_CHAR_UUID("2A26");        // Firmware Revision String
 // ============================================================
 // NMEA CHECKSUM + PQTM SENDER
 // ============================================================
-void sendPQTM(const char* body) {
+bool sendPQTM(const char* body) {
   uint8_t cs = 0;
   for (int i = 0; body[i] != '\0'; i++) cs ^= body[i];
   char buf[128];
@@ -135,6 +135,8 @@ void sendPQTM(const char* body) {
   char resp[256];
   int idx = 0;
   int lineCount = 0;
+  bool gotOK = false;
+  bool gotError = false;
   unsigned long start = millis();
 
   while (millis() - start < 500 && lineCount < 3) {
@@ -148,7 +150,10 @@ void sendPQTM(const char* body) {
             Serial.printf("[RSP] %s\n", resp);
             // Check for error response
             if (strstr(resp, "ERROR") || strstr(resp, "NACK")) {
-              Serial.println("[GPS] WARNING: Command failed!");
+              Serial.printf("[GPS] FAILED: %s\n", body);
+              gotError = true;
+            } else if (strstr(resp, "OK") || strstr(resp, "PQTM")) {
+              gotOK = true;
             }
           }
           idx = 0;
@@ -162,8 +167,10 @@ void sendPQTM(const char* body) {
 
   // Show if no response received
   if (lineCount == 0) {
-    Serial.println("[RSP] (no response)");
+    Serial.printf("[RSP] (no response for: %s)\n", body);
   }
+
+  return gotOK && !gotError;
 }
 
 // ============================================================
@@ -683,8 +690,11 @@ void logWind() {
   if (!windFile || !logging || !wind.newData) return;
 
   unsigned long e = millis() - logStart;
+  // Apply 180° correction - Calypso sensor reports opposite direction
+  // Also apply any user-configured wind_offset
+  int correctedAwa = (wind.angle_deg + 180 + config.wind_offset) % 360;
   windFile.printf("%lu,%s,%.2f,%.2f,%d,%d\n",
-    e, gps.utc_time, wind.speed_kts, wind.speed_mps, wind.angle_deg, wind.battery);
+    e, gps.utc_time, wind.speed_kts, wind.speed_mps, correctedAwa, wind.battery);
   totalBytes += 60;
   wind.newData = false;
 }
@@ -1032,6 +1042,9 @@ void configureLG290P() {
   Serial.println("[GPS] Configuring LG290P for PPK...");
 
   // Step 1: Query firmware version
+  // NOTE: MSM7 must be configured via QGNSS on Windows (UART PQTMCFGRTCM
+  // doesn't actually switch MSM type on firmware AANR01A06S)
+  // Do NOT factory reset (PQTMRESTOREPAR) — it wipes the QGNSS MSM7 config
   Serial.println("[GPS] Querying firmware version...");
   sendPQTM("PQTMVERNO");
 
@@ -1040,9 +1053,10 @@ void configureLG290P() {
   sendPQTM("PQTMCFGRCVRMODE,R");
   delay(300);
 
-  // Step 3: Set base station mode if not already set
-  // This enables MSM output capability
-  // Mode 2 = base station (required for MSM output)
+  // Step 3: Set base station mode (mode 2)
+  // Required for RTCM3 MSM output via PQTMCFGRTCM
+  // Note: base mode suppresses ephemeris (1019/1020/1042) — PPK Lambda
+  // uses IGS broadcast nav file as ephemeris source instead
   Serial.println("[GPS] Setting base station mode for MSM output...");
   sendPQTM("PQTMCFGRCVRMODE,W,2");
   delay(200);
@@ -1086,17 +1100,29 @@ void configureLG290P() {
   sendPQTM("PQTMCFGRTCM,W,7,0,-90,07,06,1,0");
   delay(200);
 
-  // Step 9: Verify configuration
+  // Step 9: Re-send ephemeris rate commands AFTER restart
+  // These may need RTCM3 protocol active (enabled after restart)
+  Serial.println("[GPS] Enabling ephemeris messages (post-restart)...");
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1019,1");  // GPS ephemeris
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1020,1");  // GLONASS ephemeris
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1042,1");  // BeiDou ephemeris
+  sendPQTM("PQTMCFGMSGRATE,W,RTCM3-1046,1");  // Galileo ephemeris
+  delay(200);
+
+  // Step 10: Verify configuration — read back rates to confirm
   Serial.println("[GPS] Verifying configuration...");
   sendPQTM("PQTMCFGRCVRMODE,R");
   sendPQTM("PQTMCFGRTCM,R");
+  sendPQTM("PQTMCFGMSGRATE,R,RTCM3-1019");  // Verify GPS ephemeris rate
+  sendPQTM("PQTMCFGMSGRATE,R,RTCM3-1020");  // Verify GLONASS ephemeris rate
+  sendPQTM("PQTMCFGMSGRATE,R,RTCM3-1042");  // Verify BeiDou ephemeris rate
+  sendPQTM("PQTMCFGMSGRATE,R,RTCM3-1046");  // Verify Galileo ephemeris rate
 
   Serial.println("[GPS] Configuration complete:");
   Serial.println("[GPS]   Mode: Base station (for MSM output)");
   Serial.println("[GPS]   NMEA: GGA, RMC, GSA, GSV (for OLED)");
-  Serial.println("[GPS]   RTCM3: MSM4 (1074/1084/1094/1124)");
-  Serial.println("[GPS]   Ephemeris: 1019, 1020, 1042, 1046");
-  Serial.println("[GPS]   Note: SOG/COG work in base mode (Doppler-based)");
+  Serial.println("[GPS]   RTCM3: MSM7 (1077/1087/1097/1127)");
+  Serial.println("[GPS]   Ephemeris: via IGS broadcast nav (base mode suppresses 1019/1020/1042)");
 }
 
 // ============================================================
@@ -2087,7 +2113,8 @@ void updateDisplayD2() {
 #if ENABLE_WIND
   if (wind.connected && wind.lastUpdate > 0 && millis() - wind.lastUpdate < 5000) {
     aws = wind.speed_kts;
-    awa = wind.angle_deg + config.wind_offset;
+    // Apply 180° correction - Calypso sensor reports opposite direction
+    awa = wind.angle_deg + 180 + config.wind_offset;
     if (awa < 0) awa += 360;
     if (awa >= 360) awa -= 360;
     // Convert AWA to radians (-180 to 180)

@@ -46,6 +46,14 @@ body {
     color: var(--accent);
 }
 
+.logo-link {
+    text-decoration: none;
+}
+
+.logo-link:hover .logo {
+    opacity: 0.8;
+}
+
 .session-selector select {
     background: var(--bg-panel);
     color: var(--text-primary);
@@ -60,6 +68,65 @@ body {
 .session-selector select:focus {
     outline: none;
     border-color: var(--accent);
+}
+
+/* Session metadata */
+.session-meta {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-left: auto;
+}
+
+.meta-field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.meta-field label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.meta-field input,
+.meta-field select {
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+}
+
+.meta-field input {
+    width: 160px;
+}
+
+.meta-field input:focus,
+.meta-field select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.btn-save-meta {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 6px 14px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.btn-save-meta:hover {
+    background: var(--accent-hover);
+}
+
+.btn-save-meta:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 /* Main layout */
@@ -178,6 +245,76 @@ body {
     color: var(--accent);
 }
 
+/* Wind overlay on map */
+.wind-overlay {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    z-index: 1000;
+    display: flex;
+    gap: 12px;
+    pointer-events: none;
+}
+
+.wind-section {
+    background: rgba(15, 20, 25, 0.9);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    min-width: 100px;
+}
+
+.wind-section.apparent {
+    border-left: 3px solid #f4212e;
+}
+
+.wind-section.true {
+    border-left: 3px solid #22d3ee;
+}
+
+.wind-title {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.wind-arrow {
+    width: 40px;
+    height: 40px;
+    margin: 4px auto;
+    position: relative;
+}
+
+.wind-arrow svg {
+    width: 100%;
+    height: 100%;
+    transition: transform 0.3s ease;
+}
+
+.wind-values {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 0.8rem;
+}
+
+.wind-value label {
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+}
+
+.wind-value span:last-child {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* Make map-panel position relative for wind overlay */
+.map-panel {
+    position: relative;
+}
+
 /* Data panel */
 .data-panel {
     flex: 1;
@@ -201,6 +338,40 @@ body {
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
+}
+
+/* Track layer toggles in map header */
+.track-toggles {
+    display: flex;
+    gap: 6px;
+    margin: 0 12px;
+}
+
+.track-toggle {
+    background: var(--bg-panel);
+    border: 2px solid var(--track-color, var(--border));
+    color: var(--text-secondary);
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.track-toggle:hover:not(.disabled) {
+    background: var(--bg-secondary);
+}
+
+.track-toggle.active {
+    background: var(--track-color, var(--accent));
+    color: white;
+    border-color: var(--track-color, var(--accent));
+}
+
+.track-toggle.disabled {
+    opacity: 0.35;
+    cursor: default;
 }
 
 .chart-toggles {
@@ -229,6 +400,23 @@ body {
     background: var(--series-color, var(--accent));
     color: white;
     border-color: var(--series-color, var(--accent));
+}
+
+.toggle-divider {
+    color: var(--border);
+    font-size: 0.9rem;
+    padding: 0 4px;
+    user-select: none;
+}
+
+/* Buoy markers on map */
+.buoy-marker {
+    background: transparent !important;
+    border: none !important;
+}
+
+.buoy-marker svg {
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
 }
 
 .zoom-controls {
@@ -560,6 +748,35 @@ body {
     min-width: 120px;
 }
 
+/* Timeline track container */
+.timeline-track {
+    flex: 1;
+    position: relative;
+    height: 20px;
+    display: flex;
+    align-items: center;
+}
+
+/* Video coverage indicator */
+.video-coverage {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    height: 6px;
+    transform: translateY(-50%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+.video-coverage .video-segment {
+    position: absolute;
+    height: 100%;
+    background: var(--success);
+    opacity: 0.5;
+    border-radius: 3px;
+}
+
 .timeline {
     flex: 1;
     -webkit-appearance: none;
@@ -568,6 +785,8 @@ body {
     background: var(--bg-panel);
     border-radius: 3px;
     cursor: pointer;
+    position: relative;
+    z-index: 1;
 }
 
 .timeline::-webkit-slider-thumb {
@@ -592,6 +811,48 @@ body {
     background: var(--accent);
     cursor: pointer;
     border: none;
+}
+
+/* Trim controls */
+.trim-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-left: 1px solid var(--border);
+    padding-left: 16px;
+    margin-left: 8px;
+}
+
+.btn-trim {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-trim:hover:not(:disabled) {
+    background: var(--warning);
+    color: #000;
+    border-color: var(--warning);
+}
+
+.btn-trim:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.btn-trim-reset {
+    background: var(--bg-panel);
+}
+
+.btn-trim-reset:hover:not(:disabled) {
+    background: var(--error);
+    color: white;
+    border-color: var(--error);
 }
 
 /* Loading overlay */

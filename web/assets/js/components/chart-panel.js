@@ -53,6 +53,7 @@ class ChartPanel {
             awa:      { label: 'AWA (°)',       color: '#f4212e', yAxis: 'yAngle' },
             tws:      { label: 'TWS (kn)',      color: '#22d3ee', yAxis: 'ySpeed' },
             twa:      { label: 'TWA (°)',       color: '#f97316', yAxis: 'yAngle' },
+            twd:      { label: 'TWD (°)',       color: '#a855f7', yAxis: 'yAngle' },
             sog:      { label: 'SOG (kn)',      color: '#e879f9', yAxis: 'ySpeed' },
             heading:  { label: 'Heading (°)',   color: '#38bdf8', yAxis: 'yAngle' },
             course:   { label: 'Course (°)',    color: '#fbbf24', yAxis: 'yAngle' },
@@ -66,8 +67,6 @@ class ChartPanel {
             buoyBostonWind:   { label: 'Boston 16NM (kn)', color: '#e0245e', yAxis: 'ySpeed' },
             buoyMassBay:      { label: 'Mass Bay A01 (kn)', color: '#ffad1f', yAxis: 'ySpeed' },
             buoyLogan:        { label: 'Logan Airport (kn)', color: '#06b6d4', yAxis: 'ySpeed' },
-            buoyBuzzards:     { label: 'Buzzards Bay (kn)', color: '#8b5cf6', yAxis: 'ySpeed' },
-            buoyNantucket:    { label: 'Nantucket (kn)', color: '#f97316', yAxis: 'ySpeed' },
             // NOAA weather station wind direction series
             buoyCastleDir:    { label: 'Castle Is Dir (°)', color: '#17bf63', yAxis: 'yAngle', dash: [5, 5] },
             buoyBostonDir:    { label: 'Boston 16NM Dir (°)', color: '#e0245e', yAxis: 'yAngle', dash: [5, 5] },
@@ -327,7 +326,7 @@ class ChartPanel {
         this.chart.data.labels = visibleLabels;
 
         // Update each dataset with sliced data
-        const seriesKeys = ['heel', 'pitch', 'aws', 'awa', 'tws', 'twa', 'sog', 'heading', 'course', 'accelX', 'accelY', 'turnRate', 'pressure', 'temp', 'buoyCastleWind', 'buoyBostonWind', 'buoyMassBay', 'buoyLogan', 'buoyBuzzards', 'buoyNantucket', 'buoyCastleDir', 'buoyBostonDir', 'buoyMassBayDir', 'buoyLoganDir'];
+        const seriesKeys = ['heel', 'pitch', 'aws', 'awa', 'tws', 'twa', 'twd', 'sog', 'heading', 'course', 'accelX', 'accelY', 'turnRate', 'pressure', 'temp', 'buoyCastleWind', 'buoyBostonWind', 'buoyMassBay', 'buoyLogan', 'buoyCastleDir', 'buoyBostonDir', 'buoyMassBayDir', 'buoyLoganDir'];
         this.chart.data.datasets.forEach((dataset, i) => {
             const key = seriesKeys[i];
             if (this.fullData[key]) {
@@ -457,7 +456,7 @@ class ChartPanel {
         const labels = [];
         const heel = [], pitch = [];
         const aws = [], awa = [];
-        const tws = [], twa = [];
+        const tws = [], twa = [], twd = [];
         const sog = [], course = [];
         const heading = [];
         const accelX = [], accelY = [];
@@ -501,11 +500,12 @@ class ChartPanel {
             }
 
             // GPS data
-            let sogVal = null;
+            let sogVal = null, cogVal = null;
             if (point.gps) {
                 sogVal = point.gps.speed_kn;
+                cogVal = point.gps.course;
                 sog.push(sogVal);
-                course.push(point.gps.course);
+                course.push(cogVal);
             } else {
                 sog.push(null);
                 course.push(null);
@@ -515,6 +515,14 @@ class ChartPanel {
             const trueWind = this._calculateTrueWind(awsVal, awaVal, sogVal);
             tws.push(trueWind.tws);
             twa.push(trueWind.twa);
+
+            // Calculate TWD (True Wind Direction) = COG + TWA
+            if (trueWind.twa != null && cogVal != null) {
+                let twdVal = (cogVal + trueWind.twa + 360) % 360;
+                twd.push(Math.round(twdVal));
+            } else {
+                twd.push(null);
+            }
 
             // Pressure and temperature data
             if (point.pressure) {
@@ -528,15 +536,13 @@ class ChartPanel {
 
         // Store full data for zooming
         this.fullLabels = labels;
-        this.fullData = { heel, pitch, aws, awa, tws, twa, sog, heading, course, accelX, accelY, turnRate, pressure, temp };
+        this.fullData = { heel, pitch, aws, awa, tws, twa, twd, sog, heading, course, accelX, accelY, turnRate, pressure, temp };
 
         // Initialize buoy data arrays (will be filled by setBuoyData)
         this.fullData.buoyCastleWind = new Array(labels.length).fill(null);
         this.fullData.buoyBostonWind = new Array(labels.length).fill(null);
         this.fullData.buoyMassBay = new Array(labels.length).fill(null);
         this.fullData.buoyLogan = new Array(labels.length).fill(null);
-        this.fullData.buoyBuzzards = new Array(labels.length).fill(null);
-        this.fullData.buoyNantucket = new Array(labels.length).fill(null);
         this.fullData.buoyCastleDir = new Array(labels.length).fill(null);
         this.fullData.buoyBostonDir = new Array(labels.length).fill(null);
         this.fullData.buoyMassBayDir = new Array(labels.length).fill(null);
@@ -567,9 +573,7 @@ class ChartPanel {
             'CSIM3': 'buoyCastleWind',
             '44013': 'buoyBostonWind',
             '44029': 'buoyMassBay',
-            'KBOS': 'buoyLogan',
-            'BUZM3': 'buoyBuzzards',
-            'NTKM3': 'buoyNantucket'
+            'KBOS': 'buoyLogan'
         };
 
         const stationDirMap = {

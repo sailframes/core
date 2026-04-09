@@ -964,6 +964,13 @@ contract or data schema, update this file so other sessions pick it up.
     **Workaround:** E1 uploads directly to S3 via HTTP (no TLS). Bucket policy allows
     unauthenticated PUT to `raw/E1/*` paths. See `infrastructure/aws/E1_HTTP_UPLOAD_SETUP.md`.
 
+19. **Calypso wind sensor 180° AWA inversion** — The Calypso Mini ultrasonic anemometer
+    reports Apparent Wind Angle (AWA) 180° inverted from the expected direction. With the
+    sensor mounted bow-mark forward, it reports wind from the opposite side. **Fixed:**
+    Both E1 firmware and S1 wind service now apply `(raw_awa + 180) % 360` correction
+    when logging and displaying wind data. Historical data in S3 was corrected using
+    `scripts/correct_wind_awa.py`.
+
 ---
 
 ## Weather Data Integration
@@ -1043,7 +1050,13 @@ Competitive analysis is maintained separately.
   - Added S3 bucket policy allowing unauthenticated PUT to `raw/E1/*` paths
   - Removed all TLS/HTTPS from upload path (testS3Connection replaces testAPIGatewayConnection)
   - Created `infrastructure/aws/E1_HTTP_UPLOAD_SETUP.md` deployment guide
+- April 8, 2026: Calypso wind sensor 180° AWA correction
+  - Discovered Calypso Mini reports AWA 180° inverted (wind from opposite side)
+  - Fixed E1 firmware (`logWind()` and OLED display) to apply 180° correction
+  - Fixed S1 wind service (`sailframes_wind.py`) to apply 180° correction
+  - Created `scripts/correct_wind_awa.py` to fix historical data in S3
+  - Corrected 64 raw CSV files and 10 processed wind.json files in S3
 
 ---
 
-*Last updated: April 7, 2026 — E1 direct S3 HTTP upload (TLS workaround)*
+*Last updated: April 8, 2026 — Calypso wind sensor 180° AWA correction*

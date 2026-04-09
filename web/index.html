@@ -26,7 +26,7 @@
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/duration.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/utc.js"></script>
 
-    <link rel="stylesheet" href="./assets/css/main.css">
+    <link rel="stylesheet" href="./assets/css/main.css?v=4">
 </head>
 <body>
     <header class="header">
@@ -62,11 +62,35 @@
             </div>
             <div class="panel-header">
                 <h2>Track</h2>
+                <div class="track-toggles">
+                    <button class="track-toggle active" id="toggle-gps-track" title="GNSS Rover: ~2-5m accuracy" style="--track-color: #1d9bf0;">GNSS</button>
+                    <button class="track-toggle disabled" id="toggle-ppk-track" title="PPK: no data" disabled style="--track-color: #f59e0b;">PPK</button>
+                </div>
                 <div class="stats" id="map-stats">
-                    <span class="stat"><label>Speed:</label> <span id="stat-speed">--</span> kn</span>
-                    <span class="stat"><label>Course:</label> <span id="stat-course">--</span>&deg;</span>
+                    <span class="stat"><label>SOG:</label> <span id="stat-speed">--</span> kn</span>
+                    <span class="stat"><label>COG:</label> <span id="stat-course">--</span>&deg;</span>
                 </div>
                 <button id="btn-collapse-map" class="btn-collapse" title="Collapse map">&#x25C0;</button>
+            </div>
+            <!-- Wind data overlay -->
+            <div class="wind-overlay" id="wind-overlay">
+                <div class="wind-section apparent">
+                    <div class="wind-title">Apparent</div>
+                    <div class="wind-arrow" id="wind-arrow-apparent"></div>
+                    <div class="wind-values">
+                        <span class="wind-value"><label>AWA:</label> <span id="stat-awa">--</span>&deg;</span>
+                        <span class="wind-value"><label>AWS:</label> <span id="stat-aws">--</span> kn</span>
+                    </div>
+                </div>
+                <div class="wind-section true">
+                    <div class="wind-title">True</div>
+                    <div class="wind-arrow" id="wind-arrow-true"></div>
+                    <div class="wind-values">
+                        <span class="wind-value"><label>TWA:</label> <span id="stat-twa">--</span>&deg;</span>
+                        <span class="wind-value"><label>TWS:</label> <span id="stat-tws">--</span> kn</span>
+                        <span class="wind-value"><label>TWD:</label> <span id="stat-twd">--</span>&deg;</span>
+                    </div>
+                </div>
             </div>
             <div id="map" class="map-container"></div>
             <div class="resize-handle" id="map-resize-handle"></div>
@@ -84,6 +108,7 @@
                         <button class="toggle-btn" data-series="awa" style="--series-color: #f4212e;">AWA</button>
                         <button class="toggle-btn" data-series="tws" style="--series-color: #22d3ee;">TWS</button>
                         <button class="toggle-btn" data-series="twa" style="--series-color: #f97316;">TWA</button>
+                        <button class="toggle-btn" data-series="twd" style="--series-color: #a855f7;">TWD</button>
                         <button class="toggle-btn" data-series="sog" style="--series-color: #e879f9;">SOG</button>
                         <button class="toggle-btn" data-series="heading" style="--series-color: #38bdf8;">Heading</button>
                         <button class="toggle-btn" data-series="course" style="--series-color: #fbbf24;">Course</button>
@@ -101,8 +126,6 @@
                         <button class="toggle-btn" data-series="buoyMassBayDir" style="--series-color: #ffad1f;">Mass Bay TWD</button>
                         <button class="toggle-btn" data-series="buoyLogan" style="--series-color: #06b6d4;">Logan TWS</button>
                         <button class="toggle-btn" data-series="buoyLoganDir" style="--series-color: #06b6d4;">Logan TWD</button>
-                        <button class="toggle-btn" data-series="buoyBuzzards" style="--series-color: #8b5cf6;">Buzzards Bay</button>
-                        <button class="toggle-btn" data-series="buoyNantucket" style="--series-color: #f97316;">Nantucket</button>
                     </div>
                     <div class="zoom-controls">
                         <button class="zoom-btn" id="btn-zoom-out" title="Zoom Out">−</button>
@@ -136,7 +159,10 @@
         </div>
         <div class="timeline-wrapper">
             <span id="time-current" class="time-label">00:00:00</span>
-            <input type="range" id="timeline" class="timeline" min="0" max="100" value="0">
+            <div class="timeline-track">
+                <div class="video-coverage" id="video-coverage"></div>
+                <input type="range" id="timeline" class="timeline" min="0" max="100" value="0">
+            </div>
             <span id="time-duration" class="time-label">00:00:00</span>
         </div>
         <div class="time-absolute">
@@ -206,10 +232,10 @@
     </script>
     <script src="./config.js?v=3"></script>
     <script src="./assets/js/utils/time-sync.js?v=3"></script>
-    <script src="./assets/js/components/map-view.js?v=3"></script>
-    <script src="./assets/js/components/chart-panel.js?v=3"></script>
-    <script src="./assets/js/components/video-player.js?v=3"></script>
-    <script src="./assets/js/components/timeline.js?v=3"></script>
-    <script src="./assets/js/app.js?v=3"></script>
+    <script src="./assets/js/components/map-view.js?v=4"></script>
+    <script src="./assets/js/components/chart-panel.js?v=4"></script>
+    <script src="./assets/js/components/video-player.js?v=4"></script>
+    <script src="./assets/js/components/timeline.js?v=4"></script>
+    <script src="./assets/js/app.js?v=4"></script>
 </body>
 </html>

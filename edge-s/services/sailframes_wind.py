@@ -334,7 +334,8 @@ async def run_async(config):
 
                         wind_state['speed_mps'] = speed_raw / 100.0
                         wind_state['speed_knots'] = wind_state['speed_mps'] * 1.94384
-                        wind_state['angle_deg'] = dir_raw  # 1° resolution in combined packet
+                        # Apply 180° correction - Calypso sensor reports opposite direction
+                        wind_state['angle_deg'] = (dir_raw + 180) % 360
                         wind_state['battery'] = min(battery_raw * 10, 100)  # 10% steps, cap at 100
 
                         # Battery warnings (throttled to once per minute)
@@ -363,7 +364,8 @@ async def run_async(config):
                 def direction_callback(sender, data):
                     if len(data) >= 2:
                         raw = struct.unpack('<H', data[0:2])[0]
-                        wind_state['angle_deg'] = int(raw / 100.0)
+                        # Apply 180° correction - Calypso sensor reports opposite direction
+                        wind_state['angle_deg'] = (int(raw / 100.0) + 180) % 360
 
                 # Battery notification handler (uint8, percent)
                 def battery_callback(sender, data):
