@@ -3915,21 +3915,21 @@ void loop() {
   // Update GPS speed-triggered recording state machine
   updateRecordingState();
 
-  // Skip sensor reads during upload to reduce memory fragmentation
-  if (!uploading) {
-    if (now - lastIMU >= IMU_INTERVAL_MS) {
-      readIMU();
-      if (logging) logIMU();
-      lastIMU = now;
-    }
+  // Sensor reads are I2C on Core 1, upload runs on Core 0 — no conflict.
+  // SD logging (logIMU/logPressure) is guarded by `logging` which is always
+  // false during upload (task checks !logging before starting).
+  if (now - lastIMU >= IMU_INTERVAL_MS) {
+    readIMU();
+    if (logging) logIMU();
+    lastIMU = now;
+  }
 
-    // Pressure sensor (same interval as IMU for gust detection)
-    static unsigned long lastPres = 0;
-    if (presOK && now - lastPres >= IMU_INTERVAL_MS) {
-      readPressure();
-      if (logging) logPressure();
-      lastPres = now;
-    }
+  // Pressure sensor (same interval as IMU for gust detection)
+  static unsigned long lastPres = 0;
+  if (presOK && now - lastPres >= IMU_INTERVAL_MS) {
+    readPressure();
+    if (logging) logPressure();
+    lastPres = now;
   }
 
   // Reset pressure min/max every 10 seconds for fresh gust window
