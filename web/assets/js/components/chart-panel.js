@@ -7,7 +7,7 @@ class ChartPanel {
         this.data = {};
         this.dataIndex = {};
         this.rawData = {};
-        this.visibleSeries = new Set(['heel', 'pitch']);  // Default visible
+        this.visibleSeries = new Set(['twd', 'pitch']);  // Default visible
         this.zoomLevel = 1;
         this.zoomCenter = 0.5;  // Center of visible range (0-1)
         this.verticalLinePlugin = this._createVerticalLinePlugin();
