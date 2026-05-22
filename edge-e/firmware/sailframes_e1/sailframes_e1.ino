@@ -101,7 +101,7 @@
 // CONFIGURATION
 // ============================================================
 // Firmware version: YYYY.MM.DD.N (date + daily build number)
-#define FW_VERSION    "2026.05.20.20"
+#define FW_VERSION    "2026.05.20.21"
 // v2.0.0 foundation: HW platform / unit role / radio mode skeleton.
 // 10 Hz GNSS + 10 Hz IMU are now baked-in firmware defaults (no longer
 // per-boat config knobs). config.txt holds per-boat / per-club state
@@ -306,6 +306,7 @@ struct MeshPeerState {
     int32_t  last_lon_e7;
     int16_t  last_sog_cm_s;
     int16_t  last_cog_deg10;
+    int16_t  last_heading_deg10;   // Stage 5: from BoatStatePayload.heading_deg10
     int8_t   last_heel_deg;
     uint8_t  unit_role;
     uint8_t  fix_quality;
@@ -313,6 +314,10 @@ struct MeshPeerState {
     uint32_t last_seen_ms;
     uint32_t msg_count;
     uint16_t last_seq;
+    // Stage 5 — RC-side OCS computation per peer.
+    float    rc_distance_m;        // signed perpendicular distance from RC view
+    bool     rc_ocs_called;        // RC has broadcast MSG_INDIVIDUAL_RECALL for this boat
+    uint32_t rc_ocs_called_at_ms;
 };
 
 MeshPeerState   g_mesh_peers[MESH_PEER_MAX];
@@ -1057,16 +1062,17 @@ static void meshOnReceive(const esp_now_recv_info_t* info, const uint8_t* data, 
       g_mesh_peers[idx].sender_id = h->sender_id;
       g_mesh_peers[idx].msg_count = 0;
     }
-    g_mesh_peers[idx].last_lat_e7    = p->lat_e7;
-    g_mesh_peers[idx].last_lon_e7    = p->lon_e7;
-    g_mesh_peers[idx].last_sog_cm_s  = p->sog_cm_s;
-    g_mesh_peers[idx].last_cog_deg10 = p->cog_deg10;
-    g_mesh_peers[idx].last_heel_deg  = p->heel_deg;
-    g_mesh_peers[idx].unit_role      = p->unit_role;
-    g_mesh_peers[idx].fix_quality    = p->fix_quality;
-    g_mesh_peers[idx].sat_count      = p->sat_count;
-    g_mesh_peers[idx].last_seen_ms   = millis();
-    g_mesh_peers[idx].last_seq       = h->seq;
+    g_mesh_peers[idx].last_lat_e7       = p->lat_e7;
+    g_mesh_peers[idx].last_lon_e7       = p->lon_e7;
+    g_mesh_peers[idx].last_sog_cm_s     = p->sog_cm_s;
+    g_mesh_peers[idx].last_cog_deg10    = p->cog_deg10;
+    g_mesh_peers[idx].last_heading_deg10= p->heading_deg10;
+    g_mesh_peers[idx].last_heel_deg     = p->heel_deg;
+    g_mesh_peers[idx].unit_role         = p->unit_role;
+    g_mesh_peers[idx].fix_quality       = p->fix_quality;
+    g_mesh_peers[idx].sat_count         = p->sat_count;
+    g_mesh_peers[idx].last_seen_ms      = millis();
+    g_mesh_peers[idx].last_seq          = h->seq;
     g_mesh_peers[idx].msg_count++;
   }
   else if (h->msg_type == MSG_RACE_ARMED &&
@@ -1084,6 +1090,20 @@ static void meshOnReceive(const esp_now_recv_info_t* info, const uint8_t* data, 
     ocsArm(pin_lat, pin_lon, rc_lat, rc_lon, start_ms);
     Serial.printf("[MESH] MSG_RACE_ARMED from 0x%08lx — race %d T+0 in %ds\n",
                   (unsigned long)h->sender_id, p->race_num, p->seconds_until_start);
+  }
+  else if (h->msg_type == MSG_INDIVIDUAL_RECALL &&
+           len >= (int)(sizeof(MeshHeader) + sizeof(IndividualRecallPayload))) {
+    // Stage 5 — RC unit recalled a specific boat. If that's us,
+    // override boat-local OCS to over_line=true. RC is authoritative.
+    const IndividualRecallPayload* p =
+        (const IndividualRecallPayload*)(data + sizeof(MeshHeader));
+    if (p->target_sender_id == g_mesh_local_sender_id) {
+      // Forward-declare; defined later in the OCS section.
+      extern void ocsForceOver(int16_t rc_distance_cm);
+      ocsForceOver(p->distance_cm);
+      Serial.printf("[MESH] INDIVIDUAL_RECALL for us! RC d=%d cm — forcing OCS=true\n",
+                    p->distance_cm);
+    }
   }
 }
 
@@ -1127,6 +1147,40 @@ bool meshBroadcastRaceArmed(double pin_lat, double pin_lon,
     if (e == ESP_OK) g_mesh_tx_count++;
     else { g_mesh_tx_fail_count++; err = e; }
     if (i < 2) delay(100);
+  }
+  return err == ESP_OK;
+}
+
+// Stage 5 — RC broadcasts when it sees a boat over the line.
+// Target boat receives in meshOnReceive and overrides its local
+// OCS state. Sent 3x for resilience.
+bool meshBroadcastIndividualRecall(uint32_t target_id, int16_t distance_cm) {
+  if (!g_mesh_enabled) return false;
+  uint8_t buf[sizeof(MeshHeader) + sizeof(IndividualRecallPayload)];
+  MeshHeader* h = (MeshHeader*)buf;
+  IndividualRecallPayload* p =
+      (IndividualRecallPayload*)(buf + sizeof(MeshHeader));
+
+  h->magic[0] = MESH_MAGIC_0;
+  h->magic[1] = MESH_MAGIC_1;
+  h->version  = MESH_VERSION;
+  h->msg_type = MSG_INDIVIDUAL_RECALL;
+  h->seq      = g_mesh_seq++;
+  h->ttl      = 0;
+  h->reserved = 0;
+  h->sender_id = g_mesh_local_sender_id;
+  h->gps_time_ms = 0;
+
+  p->target_sender_id = target_id;
+  p->distance_cm      = distance_cm;
+  p->reserved[0] = p->reserved[1] = 0;
+
+  esp_err_t err = ESP_OK;
+  for (int i = 0; i < 3; i++) {
+    esp_err_t e = esp_now_send(MESH_BROADCAST_ADDR, buf, sizeof(buf));
+    if (e == ESP_OK) g_mesh_tx_count++;
+    else { g_mesh_tx_fail_count++; err = e; }
+    if (i < 2) delay(50);
   }
   return err == ESP_OK;
 }
@@ -1414,6 +1468,98 @@ void ocsTick() {
       }
     } else {
       g_ocs.cleared_at_ms = 0;
+    }
+  }
+}
+
+// Stage 5 — called from meshOnReceive when this boat is the
+// target of MSG_INDIVIDUAL_RECALL. Overrides local OCS to true
+// regardless of local computation. RC is authoritative.
+void ocsForceOver(int16_t rc_distance_cm) {
+  if (!g_ocs.armed) return;
+  if (!g_ocs.over_line) {
+    g_ocs.over_line = true;
+    g_ocs.over_since_ms = millis();
+    g_ocs.cleared_at_ms = 0;
+    Serial.printf("[OCS] Forced over_line by RC recall (rc_d=%d cm)\n",
+                  rc_distance_cm);
+  }
+}
+
+// ============================================================
+// v2.0.0 Stage 5 — RC unit fleet OCS aggregation
+// ============================================================
+// Only runs when g_role == ROLE_RC_SIGNAL. Computes OCS for every
+// peer using the RC's authoritative line endpoints. When a peer
+// crosses the OCS threshold post-T+0, RC broadcasts
+// MSG_INDIVIDUAL_RECALL with the target sender_id. The boat
+// receives this in meshOnReceive and forces its local
+// over_line = true (RC is authoritative).
+//
+// Class registry / per-class bow_offset_m is deferred to Stage
+// 5.5; MVP uses the same hardcoded OCS_BOW_OFFSET_M for every
+// peer. Sonar 23 / J/80 fleets have very similar bow offsets
+// (2.4-2.8 m); the difference at 5 kt is ~0.1 m / 80 ms, small
+// vs the 0.5 m hysteresis threshold.
+
+#define RC_TICK_INTERVAL_MS  200    // 5 Hz — receivers broadcast at 2 Hz so this is fast enough
+
+unsigned long g_rc_last_tick_ms = 0;
+
+void rcComputeFleetOCS() {
+  if (g_role != ROLE_RC_SIGNAL) return;
+  if (!g_ocs.armed) return;
+  unsigned long now = millis();
+  if (now - g_rc_last_tick_ms < RC_TICK_INTERVAL_MS) return;
+  g_rc_last_tick_ms = now;
+
+  int32_t time_to_start = (int32_t)(g_ocs.start_time_ms - now);
+  // Only call OCS post-T+0 (with small grace window for clock drift)
+  if (time_to_start > 500) return;
+
+  double ref_lat_rad = ((g_ocs.pin_lat + g_ocs.rc_lat) / 2.0) * PI / 180.0;
+  double m_per_deg_lat = 111320.0;
+  double m_per_deg_lon = 111320.0 * cos(ref_lat_rad);
+
+  double Bx = (g_ocs.rc_lon - g_ocs.pin_lon) * m_per_deg_lon;
+  double By = (g_ocs.rc_lat - g_ocs.pin_lat) * m_per_deg_lat;
+  double lenAB = sqrt(Bx * Bx + By * By);
+  if (lenAB < 0.001) return;
+
+  for (int i = 0; i < g_mesh_peer_count; i++) {
+    MeshPeerState& peer = g_mesh_peers[i];
+    // Skip if no recent fix
+    if (peer.fix_quality == 0 || peer.last_lat_e7 == 0) continue;
+    if (now - peer.last_seen_ms > 5000) continue;  // stale (>5s no msg)
+
+    double peer_lat = peer.last_lat_e7 / 1e7;
+    double peer_lon = peer.last_lon_e7 / 1e7;
+
+    // Bow position: use heading from BoatStatePayload when boat is
+    // slow, COG when fast. peer.last_sog_cm_s is cm/s; 100 cm/s ≈ 2 kt.
+    float heading_deg = (peer.last_sog_cm_s > 100)
+                          ? (peer.last_cog_deg10 / 10.0f)
+                          : (peer.last_heading_deg10 / 10.0f);
+    float heading_rad = heading_deg * (float)PI / 180.0f;
+
+    double bow_lat = peer_lat +
+        (OCS_BOW_OFFSET_M * cos(heading_rad)) / m_per_deg_lat;
+    double bow_lon = peer_lon +
+        (OCS_BOW_OFFSET_M * sin(heading_rad)) / m_per_deg_lon;
+
+    double Px = (bow_lon - g_ocs.pin_lon) * m_per_deg_lon;
+    double Py = (bow_lat - g_ocs.pin_lat) * m_per_deg_lat;
+    double cross = Bx * Py - By * Px;
+    float d_signed = (float)(cross / lenAB);
+    peer.rc_distance_m = d_signed;
+
+    if (d_signed < -OCS_THRESHOLD_M && !peer.rc_ocs_called) {
+      peer.rc_ocs_called = true;
+      peer.rc_ocs_called_at_ms = now;
+      int16_t d_cm = (int16_t)(d_signed * 100.0f);
+      Serial.printf("[RC] OCS: peer 0x%08lx d=%.2fm — broadcasting recall\n",
+                    (unsigned long)peer.sender_id, d_signed);
+      meshBroadcastIndividualRecall(peer.sender_id, d_cm);
     }
   }
 }
@@ -5503,6 +5649,39 @@ void processCommand(String cmd, bool fromTelnet) {
       }
     }
 
+  } else if (cmd == "fleet") {
+    // Stage 5 — RC unit's fleet OCS view.
+    // Shows per-peer distance from start line + RC-side OCS state.
+    // RC-only because boats don't compute fleet-wide OCS.
+    if (g_role != ROLE_RC_SIGNAL) {
+      tprintf("fleet: only meaningful when role=rc_signal (current role=%d)\n",
+              (int)g_role);
+    } else if (!g_ocs.armed) {
+      tprintln("fleet: OCS not armed (no race armed; use 'race arm ...')");
+    } else {
+      unsigned long now = millis();
+      int32_t time_to_start = (int32_t)(g_ocs.start_time_ms - now);
+      tprintf("fleet (RC view): %d peers, T%+ds, line %.6f,%.6f -> %.6f,%.6f\n",
+              g_mesh_peer_count, time_to_start / 1000,
+              g_ocs.pin_lat, g_ocs.pin_lon, g_ocs.rc_lat, g_ocs.rc_lon);
+      for (int i = 0; i < g_mesh_peer_count; i++) {
+        const MeshPeerState& p = g_mesh_peers[i];
+        const char* ocs_state =
+            p.rc_ocs_called ? "OCS"
+                            : (p.rc_distance_m < 0 ? "over" : "ok ");
+        tprintf("  0x%08lx role=%u fix=%u sat=%2u sog=%.1fkt hdg=%4.0f d=%+6.2fm %s%s\n",
+                (unsigned long)p.sender_id,
+                (unsigned)p.unit_role,
+                (unsigned)p.fix_quality,
+                (unsigned)p.sat_count,
+                p.last_sog_cm_s / 51.4444,
+                p.last_heading_deg10 / 10.0,
+                p.rc_distance_m,
+                ocs_state,
+                p.rc_ocs_called ? "*" : "");
+      }
+    }
+
   } else if (cmd == "help") {
     tprintln("=== Commands ===");
     tprintln("  status     - Show device status");
@@ -5542,6 +5721,7 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  flags      - Show v2.0.0 feature flag state");
     tprintln("  radiomode  - Show current radio mode");
     tprintln("  mesh       - ESP-NOW peer mesh status + peers seen");
+    tprintln("  fleet      - RC view of fleet OCS (RC-only)");
     tprintln("  statusup   - Upload fleet health snapshot to S3 now");
     tprintln("  configsync - Fetch cloud config from S3 (observe-only)");
     tprintln("  ocs        - Show OCS state (Stage 4)");
@@ -6157,6 +6337,9 @@ void loop() {
 
   g_loopSection = "ocs";
   ocsTick();
+
+  g_loopSection = "rc-ocs";
+  rcComputeFleetOCS();
 
   g_loopSection = "serial-cmd";
   handleSerialCommand();

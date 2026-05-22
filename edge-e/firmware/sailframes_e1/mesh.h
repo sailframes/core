@@ -76,6 +76,23 @@ struct __attribute__((packed)) RaceArmedPayload {
 };
 static_assert(sizeof(RaceArmedPayload) == 24, "RaceArmedPayload must be 24 bytes");
 
+// Stage 5 — RC unit broadcasts when it detects a boat over the
+// start line at T+0. Target boat (matched by sender_id hash)
+// receives this and overrides its local OCS state to over=true,
+// regardless of what its own computation said. The RC unit's
+// call is authoritative because it knows the canonical line
+// endpoints and applies a unified bow_offset_m per class.
+//
+// Distance is the RC's measurement at the moment of recall —
+// useful for post-race auditing if the boat's local state
+// disagrees with the RC's.
+struct __attribute__((packed)) IndividualRecallPayload {
+    uint32_t target_sender_id;   // FNV1a hash of boat being recalled
+    int16_t  distance_cm;        // signed; negative = course side (OCS)
+    uint8_t  reserved[2];
+};
+static_assert(sizeof(IndividualRecallPayload) == 8, "IndividualRecallPayload must be 8 bytes");
+
 // FNV-1a 32-bit hash of a NUL-terminated string. Stable across boots
 // and across the fleet — every E1/E2/.../B1 hashes its boat_id the
 // same way, so receivers can identify senders without a peer registry.
