@@ -101,7 +101,7 @@
 // CONFIGURATION
 // ============================================================
 // Firmware version: YYYY.MM.DD.N (date + daily build number)
-#define FW_VERSION    "2026.05.20.21"
+#define FW_VERSION    "2026.05.22.01"
 // v2.0.0 foundation: HW platform / unit role / radio mode skeleton.
 // 10 Hz GNSS + 10 Hz IMU are now baked-in firmware defaults (no longer
 // per-boat config knobs). config.txt holds per-boat / per-club state
@@ -1343,10 +1343,31 @@ void meshTick() {
 //   - No LED (E1 has none; future B1 has LEDs). State surfaced
 //     via telnet `ocs` command.
 
-#define OCS_BOW_OFFSET_M           2.4f    // Sonar 23 default
+#define OCS_BOW_OFFSET_M           2.4f    // Sonar 23 default (used when class registry has no entry)
 #define OCS_THRESHOLD_M            0.5f    // must be >50cm over to call OCS
 #define OCS_CLEAR_THRESHOLD_M      0.5f    // must be >50cm back to clear
 #define OCS_CLEAR_DWELL_MS         2000    // sustained-clear time before un-latching
+
+// Stage 5.5 — per-class bow_offset registry (RC-only)
+// Loaded from /sf/classes.csv at boot when role=rc_signal.
+// CSV format (header optional):
+//   boat_id,class,bow_offset_m
+//   E1,Sonar23,2.4
+//   E2,Sonar23,2.4
+//   F1,J80,2.8
+// FNV-1a hash of boat_id is the key — same hash used as ESP-NOW sender_id,
+// so RC matches incoming MeshHeader.sender_id directly without re-hashing.
+#define CLASS_REGISTRY_MAX  32
+
+struct ClassRegistryEntry {
+    uint32_t sender_id;        // FNV-1a hash of boat_id, used to match peer
+    char     boat_id[16];      // raw boat_id for telnet display
+    char     class_name[16];   // e.g. "Sonar23", "J80"
+    float    bow_offset_m;
+};
+
+ClassRegistryEntry g_class_registry[CLASS_REGISTRY_MAX];
+int g_class_registry_count = 0;
 #define OCS_TICK_INTERVAL_MS       100     // 10 Hz — matches GPS fix rate
 
 struct OCSState {
@@ -1475,14 +1496,39 @@ void ocsTick() {
 // Stage 5 — called from meshOnReceive when this boat is the
 // target of MSG_INDIVIDUAL_RECALL. Overrides local OCS to true
 // regardless of local computation. RC is authoritative.
+//
+// Stage 5.5 — also logs RC-vs-local OCS disagreement to
+// /sf/ocs_disagree.log when the deltas exceed a threshold.
+// Disagreement is interesting data: if RC's bow_offset_m for this
+// boat is wrong, or the boat's IMU heading is bad, or there's
+// large clock skew between fixes, the boat's local OCS state will
+// not match RC's. Post-race we mine this log to tune the registry.
 void ocsForceOver(int16_t rc_distance_cm) {
-  if (!g_ocs.armed) return;
-  if (!g_ocs.over_line) {
+  float rc_d_m = rc_distance_cm / 100.0f;
+  float local_d_m = g_ocs.distance_to_line_m;
+  bool local_over = g_ocs.over_line;
+
+  if (g_ocs.armed && !g_ocs.over_line) {
     g_ocs.over_line = true;
     g_ocs.over_since_ms = millis();
     g_ocs.cleared_at_ms = 0;
-    Serial.printf("[OCS] Forced over_line by RC recall (rc_d=%d cm)\n",
-                  rc_distance_cm);
+    Serial.printf("[OCS] Forced over_line by RC recall (rc_d=%.2fm, local_d=%.2fm)\n",
+                  rc_d_m, local_d_m);
+  }
+
+  // Stage 5.5 — log every recall to /sf/ocs_disagree.log with
+  // RC's view and our local state at the moment of recall. Files
+  // are uploaded post-race like the rest of the session CSVs.
+  char iso[24];
+  bool have_time = formatGpsIso(iso, sizeof(iso));
+  File f = SD.open("/sf/ocs_disagree.log", FILE_APPEND);
+  if (f) {
+    f.printf("t=%s armed=%d local_over=%d rc_d=%.2fm local_d=%.2fm delta=%.2fm\n",
+             have_time ? iso : "no-fix",
+             g_ocs.armed ? 1 : 0,
+             local_over ? 1 : 0,
+             rc_d_m, local_d_m, rc_d_m - local_d_m);
+    f.close();
   }
 }
 
@@ -1542,10 +1588,14 @@ void rcComputeFleetOCS() {
                           : (peer.last_heading_deg10 / 10.0f);
     float heading_rad = heading_deg * (float)PI / 180.0f;
 
+    // Stage 5.5 — per-class bow offset from /sf/classes.csv lookup.
+    // Unknown peers fall through to OCS_BOW_OFFSET_M.
+    float bow_offset = bowOffsetForSender(peer.sender_id);
+
     double bow_lat = peer_lat +
-        (OCS_BOW_OFFSET_M * cos(heading_rad)) / m_per_deg_lat;
+        (bow_offset * cos(heading_rad)) / m_per_deg_lat;
     double bow_lon = peer_lon +
-        (OCS_BOW_OFFSET_M * sin(heading_rad)) / m_per_deg_lon;
+        (bow_offset * sin(heading_rad)) / m_per_deg_lon;
 
     double Px = (bow_lon - g_ocs.pin_lon) * m_per_deg_lon;
     double Py = (bow_lat - g_ocs.pin_lat) * m_per_deg_lat;
@@ -1725,6 +1775,7 @@ void setup() {
         cardType == CARD_SD ? "SD" :
         cardType == CARD_SDHC ? "SDHC" : "UNKNOWN");
       loadConfig();
+      loadClassRegistry();  // Stage 5.5 — RC-only, no-op for racing boats
       loadIMUCalibration();
 
       // Append a boot record so we can reconstruct reset history later
@@ -2557,6 +2608,81 @@ void loadConfig() {
                 hwName(g_hw), roleName(g_role), config.config_version);
   Serial.printf("[CFG] Sample rates (firmware-baked): IMU %d ms | GNSS fix %d ms\n",
                 IMU_INTERVAL_MS, 1000 / 10);  // GNSS via PQTMCFGFIXRATE,W,100
+}
+
+// Stage 5.5 — per-class bow_offset registry, loaded from /sf/classes.csv.
+// Only meaningful on RC unit (role=rc_signal); racing boats just use their
+// own OCS_BOW_OFFSET_M constant via ocsTick(). Quietly skipped on roles
+// other than rc_signal to save SD I/O at boot.
+//
+// File format (header optional; case-insensitive):
+//   boat_id,class,bow_offset_m
+//   E1,Sonar23,2.4
+//   F1,J80,2.8
+//
+// Lines starting with '#' or whitespace-only are skipped. Empty file
+// or missing file is non-fatal — RC falls back to OCS_BOW_OFFSET_M for
+// every peer.
+void loadClassRegistry() {
+  g_class_registry_count = 0;
+  if (g_role != ROLE_RC_SIGNAL) return;
+
+  File f = SD.open("/sf/classes.csv", FILE_READ);
+  if (!f) f = SD.open("/classes.csv", FILE_READ);  // fallback to root
+  if (!f) {
+    Serial.println("[CLASS] No classes.csv — RC will use OCS_BOW_OFFSET_M for all peers");
+    return;
+  }
+  Serial.println("[CLASS] Loading classes.csv");
+
+  while (f.available() && g_class_registry_count < CLASS_REGISTRY_MAX) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line.startsWith("#")) continue;
+    // Skip header row if it starts with "boat_id" (case-insensitive)
+    String low = line; low.toLowerCase();
+    if (low.startsWith("boat_id")) continue;
+
+    int c1 = line.indexOf(',');
+    if (c1 < 0) continue;
+    int c2 = line.indexOf(',', c1 + 1);
+    if (c2 < 0) continue;
+
+    String boat = line.substring(0, c1); boat.trim();
+    String cls  = line.substring(c1 + 1, c2); cls.trim();
+    String bow  = line.substring(c2 + 1); bow.trim();
+    if (boat.length() == 0) continue;
+
+    ClassRegistryEntry& e = g_class_registry[g_class_registry_count];
+    boat.toCharArray(e.boat_id, sizeof(e.boat_id));
+    cls.toCharArray(e.class_name, sizeof(e.class_name));
+    e.bow_offset_m = bow.toFloat();
+    if (e.bow_offset_m <= 0.0f) e.bow_offset_m = OCS_BOW_OFFSET_M;
+    e.sender_id = boatIdHash(e.boat_id);
+    g_class_registry_count++;
+  }
+  f.close();
+
+  Serial.printf("[CLASS] Loaded %d entries:\n", g_class_registry_count);
+  for (int i = 0; i < g_class_registry_count; i++) {
+    Serial.printf("[CLASS]   %s (0x%08lx) class=%s bow=%.2fm\n",
+                  g_class_registry[i].boat_id,
+                  (unsigned long)g_class_registry[i].sender_id,
+                  g_class_registry[i].class_name,
+                  g_class_registry[i].bow_offset_m);
+  }
+}
+
+// Lookup bow_offset_m for a given peer sender_id. Returns the
+// hardcoded default when registry has no entry — safe fallback so
+// new boats joining the fleet without a registry entry still get
+// OCS computed (just with the class-default bow offset).
+float bowOffsetForSender(uint32_t sender_id) {
+  for (int i = 0; i < g_class_registry_count; i++) {
+    if (g_class_registry[i].sender_id == sender_id)
+      return g_class_registry[i].bow_offset_m;
+  }
+  return OCS_BOW_OFFSET_M;
 }
 
 // ============================================================
@@ -5669,16 +5795,36 @@ void processCommand(String cmd, bool fromTelnet) {
         const char* ocs_state =
             p.rc_ocs_called ? "OCS"
                             : (p.rc_distance_m < 0 ? "over" : "ok ");
-        tprintf("  0x%08lx role=%u fix=%u sat=%2u sog=%.1fkt hdg=%4.0f d=%+6.2fm %s%s\n",
+        tprintf("  0x%08lx role=%u fix=%u sat=%2u sog=%.1fkt hdg=%4.0f bow=%.2fm d=%+6.2fm %s%s\n",
                 (unsigned long)p.sender_id,
                 (unsigned)p.unit_role,
                 (unsigned)p.fix_quality,
                 (unsigned)p.sat_count,
                 p.last_sog_cm_s / 51.4444,
                 p.last_heading_deg10 / 10.0,
+                bowOffsetForSender(p.sender_id),
                 p.rc_distance_m,
                 ocs_state,
                 p.rc_ocs_called ? "*" : "");
+      }
+    }
+
+  } else if (cmd == "classes") {
+    // Stage 5.5 — dump per-class bow_offset registry loaded from
+    // /sf/classes.csv. RC-only (boats use OCS_BOW_OFFSET_M directly).
+    if (g_class_registry_count == 0) {
+      tprintf("classes: registry empty (default bow=%.2fm applied to all peers)\n",
+              OCS_BOW_OFFSET_M);
+    } else {
+      tprintf("classes: %d entries loaded from /sf/classes.csv\n",
+              g_class_registry_count);
+      for (int i = 0; i < g_class_registry_count; i++) {
+        const ClassRegistryEntry& e = g_class_registry[i];
+        tprintf("  %-12s (0x%08lx) class=%-12s bow=%.2fm\n",
+                e.boat_id,
+                (unsigned long)e.sender_id,
+                e.class_name,
+                e.bow_offset_m);
       }
     }
 
@@ -5722,6 +5868,7 @@ void processCommand(String cmd, bool fromTelnet) {
     tprintln("  radiomode  - Show current radio mode");
     tprintln("  mesh       - ESP-NOW peer mesh status + peers seen");
     tprintln("  fleet      - RC view of fleet OCS (RC-only)");
+    tprintln("  classes    - Show /sf/classes.csv bow_offset registry (RC-only)");
     tprintln("  statusup   - Upload fleet health snapshot to S3 now");
     tprintln("  configsync - Fetch cloud config from S3 (observe-only)");
     tprintln("  ocs        - Show OCS state (Stage 4)");
