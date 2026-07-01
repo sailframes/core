@@ -130,7 +130,7 @@
 #define B1_BATT_CUTOFF_V    3.30f       // off-pad auto-power-off threshold (LiPo overdischarge guard)
 #define B1_BATT_CUTOFF_MS   20000       // ...sustained this long (ride out GNSS/TFT sag transients)
 #define B1_CHARGED_V        4.15f       // battery-plateau "charged" inference (no TP4056 STDBY pin wired)
-#define B1_IDLE_OFF_MS      900000UL    // 15 min charged+uploaded+idle on pad -> store-and-forget off
+#define B1_IDLE_OFF_MS      5000UL      // 5 s charged+uploaded+idle on pad -> store-and-forget off
 // QI_PRESENT debounce, asymmetric (hysteresis): quick to latch ON (docking
 // stops recording promptly) but slow to release OFF, so a brief Qi-link wobble
 // from imperfect pad coupling doesn't flip the display or reset the on-pad
@@ -147,7 +147,7 @@
 // the E fleet, and vice versa. Bump the line for the platform you changed; CI
 // builds + publishes each variant at its own version.
 #ifdef BUILD_B1
-#define FW_VERSION    "2026.06.29.05"   // B (LC29HEA)
+#define FW_VERSION    "2026.07.01.01"   // B (LC29HEA)
 #else
 #define FW_VERSION    "2026.06.29.02"   // E (LG290P)
 #endif
@@ -497,6 +497,7 @@ char uploadCurrentFile[32] = "";  // Short name of file being uploaded
 bool g_b1Parked            = false;  // latch released; loop() is in the parked early-return
 bool g_b1QiPresent         = false;  // debounced: device is on the Qi pad
 bool g_b1ParkScreenDrawn   = false;  // parked screen painted once
+bool g_b1ParkedCharged     = false;  // parked via the charged+idle path (show the 100% screen)
 bool g_b1ChargeShown       = false;  // on-pad charging screen painted once
 bool g_b1ChargeScreenActive = false; // charging screen currently owns the display
 unsigned long g_b1LowBattSinceMs = 0;  // 0 = not currently below cutoff while off-pad
@@ -3104,6 +3105,7 @@ static bool b1ReadQiPresent() {
 // parks (non-blocking) until the unit is lifted, at which point it dies.
 void b1EnterParked(const char* reason) {
   if (g_b1Parked) return;
+  g_b1ParkedCharged = (strcmp(reason, "idle-on-pad") == 0);  // charged+uploaded store-and-forget
   Serial.printf("[B1PWR] POWER OFF (%s) — releasing latch.\n", reason);
   if (logging) {
     if (navFile)  { navFile.flush();  navFile.close(); }
@@ -3130,10 +3132,19 @@ void b1ParkedLoop() {
   digitalWrite(PWR_HOLD_PIN, LOW);
   if (oledOK && !g_b1ParkScreenDrawn) {
     tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("POWERED OFF", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 20, 4);
-    tft.drawString("lift off pad to finish", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 20, 2);
+    if (g_b1ParkedCharged) {
+      // Charged + uploaded store-and-forget: confirm it topped off before it cut power.
+      tft.setTextColor(TFT_GREEN, TFT_BLACK);
+      tft.drawString("100% CHARGED", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 44, 4);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString("POWERED OFF", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 2, 4);
+      tft.drawString("lift off pad", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 42, 2);
+    } else {
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawString("POWERED OFF", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 20, 4);
+      tft.drawString("lift off pad to finish", SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 20, 2);
+    }
     tft.setTextDatum(TL_DATUM);
     g_b1ParkScreenDrawn = true;
   }
