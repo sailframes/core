@@ -147,7 +147,7 @@
 // the E fleet, and vice versa. Bump the line for the platform you changed; CI
 // builds + publishes each variant at its own version.
 #ifdef BUILD_B1
-#define FW_VERSION    "2026.06.29.03"   // B (LC29HEA)
+#define FW_VERSION    "2026.06.29.04"   // B (LC29HEA)
 #else
 #define FW_VERSION    "2026.06.29.02"   // E (LG290P)
 #endif
@@ -2929,14 +2929,10 @@ void parseNMEA(const char* s) {
 // Calibrated: 4.165V actual = 3.70V displayed → ratio = 4.165/3.70 * 2.0 = 2.25
 // LiPo range 3.0V-4.2V → ADC sees 1.5V-2.1V (within ESP32 3.3V limit)
 // Current drain: 0.021mA (negligible)
-#ifdef BUILD_B1
-// B1 calibrated 2026-06-29: multimeter 4.096V (no load) read as 4.41V at ratio
-// 2.25 -> corrected ratio = 2.25 * 4.096/4.41 = 2.09. (B1's divider is nearer
-// the nominal 2.0 than E1's; the 2.25 was an E1-specific ADC-nonlinearity fudge.)
-const float BATT_DIVIDER_RATIO = 2.09;
-#else
+// E only. B1 uses the factory-calibrated analogReadMilliVolts path with a true
+// 2.0 divider ratio (see readBatteryVoltage) — the raw-analogRead + single ratio
+// fudge (2.09) under-read near full and capped the B1 gauge ~90% on a full pack.
 const float BATT_DIVIDER_RATIO = 2.25;
-#endif
 const int BATT_SAMPLES = 16;  // Average multiple readings for stability
 
 void setupBattery() {
@@ -2946,28 +2942,49 @@ void setupBattery() {
 }
 
 float readBatteryVoltage() {
-  // Average multiple readings to reduce noise
   uint32_t sum = 0;
+#ifdef BUILD_B1
+  // B1: factory-calibrated ADC path. Raw analogRead*(3.3/4095) is nonlinear near
+  // the top of the range and under-read ~0.03V at full (a rested-full 4.16V pack
+  // read ~4.13V -> 90%). analogReadMilliVolts applies the ESP32 eFuse ADC
+  // calibration for accurate mV. Divider R1/R2 = 100k/100k -> x2.0
+  // (B1_V013_AUDIT.md). Verified against a 4.159V multimeter reading.
+  for (int i = 0; i < BATT_SAMPLES; i++) {
+    sum += analogReadMilliVolts(BATT_VOLTAGE_PIN);
+    delayMicroseconds(100);
+  }
+  return (sum / (float)BATT_SAMPLES) / 1000.0f * 2.0f;
+#else
   for (int i = 0; i < BATT_SAMPLES; i++) {
     sum += analogRead(BATT_VOLTAGE_PIN);
     delayMicroseconds(100);
   }
   float raw = (float)sum / BATT_SAMPLES;
   float adcVoltage = (raw / 4095.0) * 3.3;  // Voltage at ADC pin
-  float voltage = adcVoltage * BATT_DIVIDER_RATIO;  // Actual battery voltage
-  return voltage;
+  return adcVoltage * BATT_DIVIDER_RATIO;    // Actual battery voltage
+#endif
 }
 
 int getBatteryPercent(float voltage) {
-  // Li-ion discharge curve (non-linear lookup table)
-  // Based on typical LiPo discharge profile
-  // Voltage drops quickly at start and end, flat in middle
+  // Voltage -> state-of-charge lookup (LiPo discharge curve, flat in the middle).
+#ifdef BUILD_B1
+  // B1 rested-LiPo curve: a LiPo rests at ~4.15V when full (it only sits at
+  // 4.20V while actively being charged), so 4.15V maps to 100% here — otherwise
+  // a fully-charged pack caps ~95% forever. 3.30V = 0% (overdischarge cutoff).
+  static const float voltageTable[] = {
+    4.15, 4.10, 4.05, 4.00, 3.90, 3.85, 3.80, 3.75, 3.70, 3.60, 3.50, 3.40, 3.30
+  };
+  static const int percentTable[] = {
+    100,   92,   85,   76,   60,   52,   44,   35,   26,   14,    6,    2,    0
+  };
+#else
   static const float voltageTable[] = {
     4.20, 4.15, 4.10, 4.05, 4.00, 3.90, 3.80, 3.70, 3.60, 3.50, 3.40, 3.30
   };
   static const int percentTable[] = {
     100,   95,   85,   75,   65,   50,   35,   20,   12,    6,    2,    0
   };
+#endif
   static const int tableSize = sizeof(voltageTable) / sizeof(voltageTable[0]);
 
   if (voltage >= voltageTable[0]) return 100;
