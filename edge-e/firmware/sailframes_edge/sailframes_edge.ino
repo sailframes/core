@@ -130,7 +130,7 @@
 #define B1_BATT_CUTOFF_V    3.30f       // off-pad auto-power-off threshold (LiPo overdischarge guard)
 #define B1_BATT_CUTOFF_MS   20000       // ...sustained this long (ride out GNSS/TFT sag transients)
 #define B1_CHARGED_V        4.15f       // battery-plateau "charged" inference (no TP4056 STDBY pin wired)
-#define B1_IDLE_OFF_MS      1800000UL   // 30 min charged+uploaded+idle on pad -> store-and-forget off
+#define B1_IDLE_OFF_MS      900000UL    // 15 min charged+uploaded+idle on pad -> store-and-forget off
 // QI_PRESENT debounce, asymmetric (hysteresis): quick to latch ON (docking
 // stops recording promptly) but slow to release OFF, so a brief Qi-link wobble
 // from imperfect pad coupling doesn't flip the display or reset the on-pad
@@ -147,7 +147,7 @@
 // the E fleet, and vice versa. Bump the line for the platform you changed; CI
 // builds + publishes each variant at its own version.
 #ifdef BUILD_B1
-#define FW_VERSION    "2026.06.29.04"   // B (LC29HEA)
+#define FW_VERSION    "2026.06.29.05"   // B (LC29HEA)
 #else
 #define FW_VERSION    "2026.06.29.02"   // E (LG290P)
 #endif
@@ -5740,7 +5740,41 @@ static void drawOTAProgress(int percent, const char* targetVersion, const char* 
   if (!oledOK) return;
   if (percent < 0) percent = 0;
   if (percent > 100) percent = 100;
-
+#ifdef BUILD_B1
+  // Compact layout for the B 240x320 screen. The E 320x480 layout (in #else)
+  // put the font-8 % over the progress bar here, hence the overlap. Smaller %
+  // font (6) and tighter spacing so nothing collides on the shorter screen.
+  const int BAR_X = 20, BAR_W = SCREEN_WIDTH - 40, BAR_Y = 196, BAR_H = 26;
+  if (!g_otaScreenDrawn) {
+    tft.fillScreen(COLOR_WARN);
+    tft.setTextColor(TFT_BLACK, COLOR_WARN);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString("OTA UPDATE", SCREEN_WIDTH/2, 24, 4);
+    if (targetVersion && targetVersion[0]) tft.drawString(targetVersion, SCREEN_WIDTH/2, 56, 4);
+    tft.drawRect(BAR_X - 1, BAR_Y - 1, BAR_W + 2, BAR_H + 2, TFT_BLACK);
+    tft.drawString("DO NOT POWER OFF", SCREEN_WIDTH/2, SCREEN_HEIGHT - 26, 2);
+    g_otaScreenDrawn = true;
+    g_otaLastPctDrawn = -1;
+  }
+  if (phase && phase[0]) {
+    tft.fillRect(0, 78, SCREEN_WIDTH, 22, COLOR_WARN);
+    tft.setTextColor(TFT_BLACK, COLOR_WARN);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(phase, SCREEN_WIDTH/2, 89, 2);
+  }
+  if (percent != g_otaLastPctDrawn) {
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%d%%", percent);
+    tft.fillRect(0, 110, SCREEN_WIDTH, 64, COLOR_WARN);
+    tft.setTextColor(TFT_BLACK, COLOR_WARN);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(buf, SCREEN_WIDTH/2, 140, 6);  // Font 6 = 48 px (digits)
+    int fillW = (BAR_W * percent) / 100;
+    tft.fillRect(BAR_X, BAR_Y, fillW, BAR_H, TFT_BLACK);
+    tft.fillRect(BAR_X + fillW, BAR_Y, BAR_W - fillW, BAR_H, COLOR_WARN);
+    g_otaLastPctDrawn = percent;
+  }
+#else
   if (!g_otaScreenDrawn) {
     tft.fillScreen(COLOR_WARN);
     tft.setTextColor(TFT_BLACK, COLOR_WARN);
@@ -5785,6 +5819,7 @@ static void drawOTAProgress(int percent, const char* targetVersion, const char* 
     tft.fillRect(barX + fillW, barY, barW - fillW, barH, COLOR_WARN);
     g_otaLastPctDrawn = percent;
   }
+#endif
 }
 
 // `manual` = true bypasses the one-shot per-boot guard. The serial
