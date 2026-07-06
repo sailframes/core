@@ -34,26 +34,33 @@ SCHEMA = pa.schema([("time_utc", pa.timestamp("s", tz="UTC"))]
                    + [(f, pa.float32()) for f in OUT_FIELDS])
 
 
-def fetch_year(stn, yr):
-    r = requests.get(URL.format(stn=stn, yr=yr), timeout=60)
-    if r.status_code != 200:
-        return None
-    text = gzip.decompress(r.content).decode("latin-1")
+import datetime as dt
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+MONTHLY_URL = "https://www.ndbc.noaa.gov/data/stdmet/{mo}/{stn}.txt"
+REALTIME_URL = "https://www.ndbc.noaa.gov/data/realtime2/{stn}.txt"
+
+
+def parse_block(text, year=None):
+    """Parse an NDBC stdmet text block (annual / monthly / realtime — same format).
+    Returns {epoch_sec: valsdict}. `year` filters (realtime/monthly may span years)."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return {}
     header = lines[0].lstrip("#").split()
-    # data rows: skip any leading '#'-prefixed rows (names + units)
-    data = [ln.split() for ln in lines if not ln.startswith("#")]
     idx = {name: k for k, name in enumerate(header)}
-    times, cols = [], {f: [] for f in OUT_FIELDS}
-    for row in data:
+    out = {}
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        row = ln.split()
         if len(row) < len(header):
             continue
-        import datetime as dt
         try:
-            t = dt.datetime(int(row[idx["YY"] if "YY" in idx else "#YY"]) if False else int(row[0]),
-                            int(row[1]), int(row[2]), int(row[3]), int(row[4]),
+            t = dt.datetime(int(row[0]), int(row[1]), int(row[2]), int(row[3]), int(row[4]),
                             tzinfo=dt.timezone.utc)
         except Exception:
+            continue
+        if year and t.year != year:
             continue
         vals = {f: None for f in OUT_FIELDS}
         for ncol, (field, miss) in MAP.items():
@@ -65,14 +72,37 @@ def fetch_year(stn, yr):
                 if v in miss or v >= 999:
                     continue
                 vals[field] = v
-        times.append(np.datetime64(t.replace(tzinfo=None), "s"))
-        for f in OUT_FIELDS:
-            cols[f].append(vals[f])
-    if not times:
+        out[int(t.timestamp())] = vals
+    return out
+
+
+def _table_from(byt):
+    if not byt:
         return None
-    return pa.table({"time_utc": pa.array(np.array(times, dtype="datetime64[s]"), type=pa.timestamp("s", tz="UTC")),
-                     **{f: pa.array(cols[f], type=pa.float32()) for f in OUT_FIELDS}},
-                    schema=SCHEMA)
+    times = sorted(byt)
+    return pa.table(
+        {"time_utc": pa.array(np.array([np.datetime64(t, "s") for t in times]), type=pa.timestamp("s", tz="UTC")),
+         **{f: pa.array([byt[t][f] for t in times], type=pa.float32()) for f in OUT_FIELDS}},
+        schema=SCHEMA)
+
+
+def fetch_year(stn, yr):
+    # 1) annual historical archive (published after year-end)
+    r = requests.get(URL.format(stn=stn, yr=yr), timeout=60)
+    if r.status_code == 200:
+        return _table_from(parse_block(gzip.decompress(r.content).decode("latin-1")))
+    # 2) current year: merge available monthly files + the ~45-day realtime feed
+    byt = {}
+    now_year = dt.datetime.now(dt.timezone.utc).year
+    if yr == now_year:
+        for mo in MONTHS:
+            rr = requests.get(MONTHLY_URL.format(mo=mo, stn=stn), timeout=30)
+            if rr.status_code == 200:
+                byt.update(parse_block(rr.text, year=yr))
+        rt = requests.get(REALTIME_URL.format(stn=stn), timeout=30)
+        if rt.status_code == 200:
+            byt.update(parse_block(rt.text, year=yr))   # realtime wins on overlap (freshest)
+    return _table_from(byt)
 
 
 def main():
