@@ -1,0 +1,42 @@
+name: Climatology Daily Update
+
+# Spec §5: extract yesterday (fields year-round; obs + relabel in-season),
+# append, upload to s3://sailframes-data-prod/climatology/, invalidate CloudFront.
+# Keeps sailframes.com/tactics current without manual refreshes.
+
+on:
+  schedule:
+    - cron: '10 6 * * *'      # 06:10 UTC daily — yesterday's HRRR F00 is published by now
+  workflow_dispatch:           # manual trigger (also used for first-run smoke test)
+
+concurrency:
+  group: climatology-daily     # never overlap runs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: Extract yesterday + relabel + publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pipeline deps
+        run: pip install -r climatology/requirements.txt
+
+      - name: Configure AWS credentials (climatology publisher)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_CLIMATOLOGY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_CLIMATOLOGY }}
+          aws-region: us-east-1
+
+      - name: Daily update
+        run: python climatology/daily_update.py

@@ -34,8 +34,30 @@ before any UI.
   thresholds (onshore sector width, R-window) need the 60-day manual validation
   set §6 mandates before they're final — do not trust the type split yet.
 
-Not yet built (remaining Phase 1+): the `/tactics` UI (calendar heatmap, day
-replay, stats) and the GH Actions daily/hourly workflows.
+### Daily update (GitHub Actions)
+
+`daily_update.py` + `.github/workflows/climatology-daily.yml` keep the archive
+current (spec §5). Daily at **06:10 UTC** (+ manual `workflow_dispatch`):
+
+1. Backfill **yesterday's** HRRR fields (year-round) → upload one daily Parquet
+   (the replay archive grows a day at a time — no bulk backfill needed).
+2. **In season (Apr 15–Oct 15):** refresh the current year's obs (44013 via the
+   monthly+realtime current-year path, BED, tide), relabel the season, splice
+   into `labels.parquet` (prior years are immutable), upload.
+3. CloudFront invalidation for the touched paths.
+
+**One-time setup (needs repo admin — I can't create these):**
+- GitHub secrets `AWS_ACCESS_KEY_ID_CLIMATOLOGY` / `AWS_SECRET_ACCESS_KEY_CLIMATOLOGY`
+  for an IAM user scoped to:
+  - `s3:PutObject` + `s3:GetObject` on `arn:aws:s3:::sailframes-data-prod/climatology/*`
+  - `cloudfront:CreateInvalidation` on distribution `EFO342DVGM3QS`
+- Then trigger once via the Actions tab (`workflow_dispatch`) to smoke-test.
+
+Verified locally against prod infra via `AWS_PROFILE=sailframes python
+climatology/daily_update.py` (idempotent).
+
+Not yet built (remaining Phase 1+): the in-season **hourly** `today/latest.parquet`
+feed (§5), obs/tide sync-strips + analog finder (§7) on the UI.
 
 Backfill output goes to `_local/` (gitignored); the real archive uploads to
 `s3://sailframes-data-prod/climatology/` (Phase 0 serving tier proven).
