@@ -13,9 +13,25 @@ before any UI.
 ## Contents
 
 - `PHASE0_FINDINGS.md` — spike results, decisions, spec corrections, open risks.
-- `probe_hrrrzarr.py` — working hrrrzarr reader: resolves bbox→grid window
-  via Lambert Conformal, stitches chunks, value-checks fields. Seed for the
-  future `backfill_hrrr.py`.
+- `probe_hrrrzarr.py` — Phase-0 spike reader (standalone; superseded by `hrrr_grid.py`).
+- `requirements.txt` — pinned pipeline env (use a venv; system python3 is 3.14 w/o these).
+
+### Phase 1 data-ingest pipeline (built + validated on real data)
+
+- `hrrr_grid.py` — shared hrrrzarr access: bbox→grid window, chunk stitch,
+  lat/lon via pyproj. Validated in Phase 0.
+- `make_grid.py` → `grid.json` (nx/ny, per-cell lat/lon, land mask, window). One-time.
+- `backfill_hrrr.py` → `fields/year=/month=/DD.parquet` — 8 fields × 24 F00
+  cycles × 1638 cells (~39k rows, ~450 KB/day). Verified: schema, size, physical
+  values (18Z wind 6.9 m/s, DSWRF 799, etc.), 24/24 cycles, no gaps.
+- `backfill_ndbc.py` → `obs/{stn}/{YYYY}.parquet` (44013 stdmet). Verified 2024.
+- `backfill_coops.py` → `coops/{stn}/{hilo,pred}_{YYYY}.parquet` (tide). Verified 2024.
+
+Not yet built (remaining Phase 1+): `backfill_asos.py` (KBED Tmax for ΔT),
+`label_days.py` (classifier §6), the `/tactics` UI, and the GH Actions workflows.
+
+Backfill output goes to `_local/` (gitignored); the real archive uploads to
+`s3://sailframes-data-prod/climatology/` (Phase 0 serving tier proven).
 
 ## Running the probe
 
