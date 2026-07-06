@@ -27,6 +27,7 @@
         <button class="tx-tab active" data-view="replay">Day replay</button>
         <button class="tx-tab" data-view="calendar">Calendar</button>
         <button class="tx-tab" data-view="stats">Climatology stats</button>
+        <button class="tx-tab" data-view="briefing">Race briefing</button>
         <span class="tx-status" id="tx-status">loading…</span>
     </nav>
 
@@ -35,7 +36,7 @@
         <section class="tx-view" id="view-replay">
             <div class="tx-toolbar">
                 <label>Day
-                    <input type="date" id="tx-date" value="2025-07-01" min="2016-08-23" max="2025-10-15">
+                    <input type="date" id="tx-date" value="2025-07-01" min="2016-08-23" max="2026-10-15">
                 </label>
                 <button id="tx-play" class="tx-btn">▶ Play</button>
                 <input type="range" id="tx-scrub" min="0" max="23" value="18" step="1" class="tx-scrub">
@@ -89,6 +90,18 @@
                     <h3>Tide phase at onset <span class="tx-hint">(hrs rel. Boston HW)</span></h3>
                     <div class="tx-chartbox"><canvas id="tx-chart-tide"></canvas></div>
                 </div>
+            </div>
+        </section>
+
+        <!-- ===== Race briefing / analog finder (§7) ===== -->
+        <section class="tx-view" id="view-briefing" hidden>
+            <div class="tx-toolbar">
+                <button id="tx-brief-fcst" class="tx-btn">▶ Today's forecast</button>
+                <button id="tx-brief-print" class="tx-btn tx-btn-ghost">🖨 One-pager</button>
+                <span class="tx-status" id="tx-brief-run"></span>
+            </div>
+            <div id="tx-briefing" class="tx-briefing">
+                <p class="tx-note">Loading today's briefing…</p>
             </div>
         </section>
     </main>

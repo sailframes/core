@@ -53,11 +53,28 @@ current (spec §5). Daily at **06:10 UTC** (+ manual `workflow_dispatch`):
   - `cloudfront:CreateInvalidation` on distribution `EFO342DVGM3QS`
 - Then trigger once via the Actions tab (`workflow_dispatch`) to smoke-test.
 
-Verified locally against prod infra via `AWS_PROFILE=sailframes python
-climatology/daily_update.py` (idempotent).
+### Hourly briefing feed (GitHub Actions, in-season)
 
-Not yet built (remaining Phase 1+): the in-season **hourly** `today/latest.parquet`
-feed (§5), obs/tide sync-strips + analog finder (§7) on the UI.
+`hourly_update.py` + `.github/workflows/climatology-hourly.yml` (:50, Apr–Oct
+race-hours window; script no-ops outside Apr 15–Oct 15). Each run publishes from
+the latest HRRR run:
+- `today/latest.parquet` — **F00–F18 forecast** fields over the bbox (F00 = `_anl`,
+  F01–F18 = `_fcst`; same schema, so /tactics replays it as "today's forecast").
+- `today/briefing.json` — today's feature vector (morning gradient from obs-so-far
+  + forecast ΔT/cloud/SST + DOY) for the **§7 analog finder**.
+
+The `/tactics` **Race briefing** tab (client-side, DuckDB-WASM) matches today's
+vector against `labels.parquet` (k=30 nearest, ±45 DOY, standardized Euclidean)
+→ P(fill), onset quantiles, fill direction, matched-day list (click→replay), a
+"Today's forecast" replay button, and a print-CSS one-pager.
+(Cloud/DSWRF are shown but excluded from matching until historical labels carry
+`tcdc_am` — see label note.) Uses the same climatology publisher secrets.
+
+Verified end-to-end against prod (`AWS_PROFILE=sailframes`): daily + hourly
+producers idempotent; briefing + forecast render live on sailframes.com/tactics.
+
+Remaining (Phase 2): obs/tide sync-strips on replay; ASCAT overlay; synoptic
+tagging. Classifier still needs the 60-day manual validation to tune thresholds.
 
 Backfill output goes to `_local/` (gitignored); the real archive uploads to
 `s3://sailframes-data-prod/climatology/` (Phase 0 serving tier proven).
