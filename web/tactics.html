@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SailFrames — Tactics & Climatology</title>
+    <link rel="stylesheet" href="./assets/css/main.css?v=10">
+    <!-- Leaflet (site standard map lib; wind field is a canvas overlay) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <link rel="stylesheet" href="./assets/css/tactics.css?v=1">
+    <script src="./config.js"></script>
+    <script src="./assets/js/analytics.js"></script>
+</head>
+<body>
+    <!-- lightweight top bar consistent with other pages -->
+    <header class="tx-nav">
+        <a class="tx-brand" href="./index.html">SailFrames</a>
+        <span class="tx-title">Tactics &amp; Climatology <span class="tx-badge">beta</span></span>
+        <span class="tx-sub">Gloucester → Provincetown · sea-breeze archive</span>
+    </header>
+
+    <main class="tx-wrap">
+        <section class="tx-toolbar">
+            <label>Day
+                <input type="date" id="tx-date" value="2025-07-01" min="2016-08-23" max="2025-10-15">
+            </label>
+            <button id="tx-play" class="tx-btn">▶ Play</button>
+            <input type="range" id="tx-scrub" min="0" max="23" value="18" step="1" class="tx-scrub">
+            <span class="tx-clock" id="tx-clock">—</span>
+            <span class="tx-status" id="tx-status">loading…</span>
+        </section>
+
+        <div class="tx-stage">
+            <div id="tx-map" class="tx-map"></div>
+            <div class="tx-legend" id="tx-legend"></div>
+        </div>
+
+        <p class="tx-note">
+            HRRR 10&nbsp;m wind field (F00 analysis, hourly) over the venue bbox, read
+            straight from static Parquet on CloudFront via DuckDB-WASM — no backend.
+            Scrub or play to watch the sea breeze fill. Calendar, obs/tide strips,
+            stats, and the analog finder come next (spec §8).
+        </p>
+    </main>
+
+    <script type="module" src="./assets/js/tactics-app.js?v=1"></script>
+</body>
+</html>

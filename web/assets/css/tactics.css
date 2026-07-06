@@ -1,0 +1,53 @@
+/* /tactics — sea-breeze climatology. Uses main.css CSS vars (dark theme). */
+.tx-nav {
+  position: fixed; top: 0; left: 0; right: 0; height: 52px; z-index: 1000;
+  display: flex; align-items: center; gap: 14px; padding: 0 18px;
+  background: var(--bg-secondary, #14181f);
+  border-bottom: 1px solid var(--border-color, #2a2a2a);
+}
+.tx-brand { color: var(--accent, #3aa0ff); font-weight: 700; text-decoration: none; font-size: 1.05rem; }
+.tx-title { color: var(--text-primary, #e8edf2); font-weight: 600; }
+.tx-badge {
+  font-size: .62rem; text-transform: uppercase; letter-spacing: .05em;
+  background: var(--accent, #3aa0ff); color: #fff; padding: 1px 6px; border-radius: 8px; vertical-align: middle;
+}
+.tx-sub { color: var(--text-secondary, #8b98a5); font-size: .82rem; margin-left: auto; }
+
+.tx-wrap { max-width: 1200px; margin: 68px auto 24px; padding: 0 16px; }
+
+.tx-toolbar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px;
+  color: var(--text-primary, #e8edf2);
+}
+.tx-toolbar label { font-size: .85rem; color: var(--text-secondary, #8b98a5); display: inline-flex; gap: 6px; align-items: center; }
+.tx-toolbar input[type=date] {
+  background: var(--bg-secondary, #14181f); color: var(--text-primary, #e8edf2);
+  border: 1px solid var(--border-color, #2a2a2a); border-radius: 6px; padding: 5px 8px;
+}
+.tx-btn {
+  background: var(--accent, #3aa0ff); color: #fff; border: none; border-radius: 6px;
+  padding: 7px 14px; cursor: pointer; font-size: .9rem; min-width: 84px;
+}
+.tx-btn:disabled { opacity: .5; cursor: wait; }
+.tx-scrub { flex: 1 1 260px; accent-color: var(--accent, #3aa0ff); }
+.tx-clock { font-family: ui-monospace, Menlo, monospace; font-size: .95rem; min-width: 168px; }
+.tx-status { color: var(--text-secondary, #8b98a5); font-size: .8rem; font-family: ui-monospace, Menlo, monospace; }
+
+.tx-stage { position: relative; }
+.tx-map {
+  height: 68vh; min-height: 460px; border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--border-color, #2a2a2a); background: #0b0f14;
+}
+/* z-index above Leaflet tile/overlay panes (200-400), below controls/legend (500+) */
+.tx-arrows { position: absolute; inset: 0; pointer-events: none; z-index: 450; }
+
+.tx-legend {
+  position: absolute; right: 14px; bottom: 14px; z-index: 500;
+  background: rgba(12,16,22,.82); border: 1px solid var(--border-color, #2a2a2a);
+  border-radius: 8px; padding: 8px 10px; color: var(--text-primary, #e8edf2);
+  font-size: .72rem; font-family: ui-monospace, Menlo, monospace; line-height: 1.5;
+}
+.tx-legend .row { display: flex; align-items: center; gap: 6px; }
+.tx-legend .sw { width: 14px; height: 8px; border-radius: 2px; display: inline-block; }
+
+.tx-note { color: var(--text-secondary, #8b98a5); font-size: .82rem; margin-top: 12px; line-height: 1.5; }
