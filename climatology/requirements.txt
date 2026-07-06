@@ -1,0 +1,11 @@
+# climatology/ Phase 1 pipeline env. Install into a venv:
+#   python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+# (numcodecs needs a compiler-free wheel; py3.11–3.12 recommended. Note: on the
+#  dev box the system default python3 is 3.14 without these — use a venv.)
+boto3>=1.40
+numpy>=2.0
+numcodecs>=0.16      # blosc decode for hrrrzarr chunks
+pyarrow>=17          # Parquet (zstd) read/write
+duckdb>=1.1          # local queries / verification (browser uses duckdb-wasm)
+pyproj>=3.6          # HRRR Lambert Conformal <-> lat/lon
+requests>=2.31       # NDBC / CO-OPS / IEM HTTP fetches
