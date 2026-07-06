@@ -168,6 +168,165 @@ $('tx-date').addEventListener('change', async e => {
   catch (err) { setStatus('no data for ' + e.target.value); }
 });
 
+// ================= Calendar + Stats =================
+const TYPE_COLORS = { F: '#e8603a', R: '#3ec46d', P: '#b06fe0', G: '#e8b13a', N: '#566270', U: '#2a3038' };
+let LABELS = null;        // array of day-label rows
+let labelsLoaded = false;
+
+async function loadLabels() {
+  if (labelsLoaded) return;
+  const url = new URL(`${BASE}/labels.parquet`, location.href).href;
+  const q = async sql => (await dbConn.query(sql)).toArray().map(x => x.toJSON());
+  LABELS = await q(`SELECT * FROM read_parquet('${url}') ORDER BY date`);
+  labelsLoaded = true;
+}
+
+// ---- calendar ----
+function buildTypeLegend() {
+  $('tx-typelegend').innerHTML = Object.entries(TYPE_COLORS).map(([t, c]) =>
+    `<span class="chip"><span class="sw" style="background:${c}"></span>${t}</span>`).join('');
+}
+
+function renderCalendar() {
+  const yearSel = $('tx-year');
+  const year = yearSel.value;
+  const byDate = new Map(LABELS.map(r => [r.date, r]));
+  const months = [];
+  for (const r of LABELS) if (r.date.startsWith(year)) months.push(r.date.slice(0, 7));
+  const uniqMonths = [...new Set(months)].sort();
+  const dow = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  const html = uniqMonths.map(ym => {
+    const [y, m] = ym.split('-').map(Number);
+    const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+    const ndays = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const name = new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+    let cells = '';
+    for (let i = 0; i < first; i++) cells += `<div class="tx-day empty"></div>`;
+    for (let d = 1; d <= ndays; d++) {
+      const ds = `${ym}-${String(d).padStart(2, '0')}`;
+      const rec = byDate.get(ds);
+      if (rec) {
+        cells += `<div class="tx-day" style="background:${TYPE_COLORS[rec.type] || '#2a3038'}" `
+          + `title="${ds} · ${rec.type} · onset ${rec.onset_lt_44013 ?? '—'} · ΔT ${rec.dt_c ?? '—'}" `
+          + `data-date="${ds}">${d}</div>`;
+      } else {
+        cells += `<div class="tx-day empty" style="background:#171b22" title="${ds} · no data">${d}</div>`;
+      }
+    }
+    return `<div class="tx-month"><h4>${name} ${y}</h4>`
+      + `<div class="dow">${dow.map(x => `<span>${x}</span>`).join('')}</div>`
+      + `<div class="tx-days">${cells}</div></div>`;
+  }).join('');
+  $('tx-calendar').innerHTML = html || '<p class="tx-note">No labelled days for this season yet.</p>';
+  $('tx-calendar').querySelectorAll('.tx-day[data-date]').forEach(el =>
+    el.addEventListener('click', () => {
+      $('tx-date').value = el.dataset.date;
+      $('tx-date').dispatchEvent(new Event('change'));
+      switchView('replay');
+    }));
+}
+
+function populateYears() {
+  const years = [...new Set(LABELS.map(r => r.date.slice(0, 4)))].sort().reverse();
+  $('tx-year').innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join('');
+}
+
+// ---- stats ----
+let charts = {};
+function destroyCharts() { Object.values(charts).forEach(c => c && c.destroy()); charts = {}; }
+
+const DIR_SECTORS = [['N', 337.5, 22.5], ['NE', 22.5, 67.5], ['E', 67.5, 112.5], ['SE', 112.5, 157.5],
+                     ['S', 157.5, 202.5], ['SW', 202.5, 247.5], ['W', 247.5, 292.5], ['NW', 292.5, 337.5]];
+const SPD_BUCKETS = [['0-6', 0, 6], ['6-12', 6, 12], ['12-18', 12, 18], ['18+', 18, 99]];
+
+function inSector(dir, lo, hi) { return lo > hi ? (dir >= lo || dir < hi) : (dir >= lo && dir < hi); }
+
+function renderMoneyChart() {
+  // custom canvas heatmap: rows=speed buckets, cols=dir sectors, color=fill rate (F/R/P)
+  const cvs = $('tx-chart-money');
+  const box = cvs.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  cvs.width = box.width * dpr; cvs.height = box.height * dpr;
+  cvs.style.width = box.width + 'px'; cvs.style.height = box.height + 'px';  // constrain display size
+  const g = cvs.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, box.width, box.height);
+  const mL = 44, mB = 26, mT = 6, mR = 8;
+  const gw = box.width - mL - mR, gh = box.height - mT - mB;
+  const cols = DIR_SECTORS.length, rows = SPD_BUCKETS.length;
+  const cw = gw / cols, ch = gh / rows;
+  const labelled = LABELS.filter(r => r.grad_dir != null && r.grad_spd_kt != null && r.type !== 'U');
+  for (let ri = 0; ri < rows; ri++) {
+    for (let ci = 0; ci < cols; ci++) {
+      const [, slo, shi] = SPD_BUCKETS[ri];
+      const [, dlo, dhi] = DIR_SECTORS[ci];
+      const bin = labelled.filter(r => r.grad_spd_kt >= slo && r.grad_spd_kt < shi && inSector(r.grad_dir, dlo, dhi));
+      const x = mL + ci * cw, y = mT + (rows - 1 - ri) * ch;
+      if (bin.length === 0) { g.fillStyle = '#1a1f27'; g.fillRect(x + 1, y + 1, cw - 2, ch - 2); continue; }
+      const fill = bin.filter(r => r.type === 'F' || r.type === 'R' || r.type === 'P').length / bin.length;
+      const c = Math.round(40 + fill * 190);
+      g.fillStyle = `rgb(${c},${Math.round(70 + (1 - fill) * 90)},${Math.round(60 + (1 - fill) * 40)})`;
+      g.fillRect(x + 1, y + 1, cw - 2, ch - 2);
+      g.fillStyle = fill > 0.5 ? '#fff' : '#c9d2dc'; g.font = '11px ui-monospace, Menlo, monospace';
+      g.textAlign = 'center';
+      g.fillText(`${Math.round(fill * 100)}%`, x + cw / 2, y + ch / 2 - 1);
+      g.fillStyle = '#8b98a5'; g.font = '9px ui-monospace'; g.fillText(`n${bin.length}`, x + cw / 2, y + ch / 2 + 11);
+    }
+  }
+  g.fillStyle = '#8b98a5'; g.font = '10px ui-monospace, Menlo, monospace';
+  g.textAlign = 'center';
+  DIR_SECTORS.forEach(([lab], ci) => g.fillText(lab, mL + ci * cw + cw / 2, box.height - 10));
+  g.textAlign = 'right';
+  SPD_BUCKETS.forEach(([lab], ri) => g.fillText(lab + 'kt', mL - 5, mT + (rows - 1 - ri) * ch + ch / 2 + 3));
+}
+
+function histogram(vals, lo, hi, n) {
+  const bins = new Array(n).fill(0); const w = (hi - lo) / n;
+  for (const v of vals) { if (v == null) continue; let k = Math.floor((v - lo) / w); if (k < 0) k = 0; if (k >= n) k = n - 1; bins[k]++; }
+  const labels = bins.map((_, i) => (lo + i * w).toFixed(0));
+  return { bins, labels };
+}
+
+function renderStats() {
+  destroyCharts();
+  renderMoneyChart();
+  const L = LABELS.filter(r => r.type !== 'U');
+  // onset histogram
+  const oh = histogram(L.map(r => r.onset_lt_44013).filter(v => v != null), 10, 19, 9);
+  charts.onset = new Chart($('tx-chart-onset'), {
+    type: 'bar', data: { labels: oh.labels.map(x => x + 'h'), datasets: [{ data: oh.bins, backgroundColor: '#3aa0ff' }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b98a5' } }, y: { ticks: { color: '#8b98a5' } } } }
+  });
+  // type mix
+  const types = ['F', 'R', 'P', 'G', 'N'];
+  charts.types = new Chart($('tx-chart-types'), {
+    type: 'bar', data: { labels: types, datasets: [{ data: types.map(t => LABELS.filter(r => r.type === t).length), backgroundColor: types.map(t => TYPE_COLORS[t]) }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b98a5' } }, y: { ticks: { color: '#8b98a5' } } } }
+  });
+  // tide phase at onset
+  const th = histogram(L.map(r => r.tide_phase_hw_h).filter(v => v != null), -6.2, 6.2, 12);
+  charts.tide = new Chart($('tx-chart-tide'), {
+    type: 'bar', data: { labels: th.labels.map(x => x + 'h'), datasets: [{ data: th.bins, backgroundColor: '#3ec46d' }] },
+    options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b98a5' } }, y: { ticks: { color: '#8b98a5' } } } }
+  });
+}
+
+// ---- tab switching ----
+async function switchView(view) {
+  document.querySelectorAll('.tx-tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+  document.querySelectorAll('.tx-view').forEach(s => s.hidden = (s.id !== 'view-' + view));
+  if (view === 'replay') { setTimeout(() => { map.invalidateSize(); render(); }, 30); }
+  if (view === 'calendar' || view === 'stats') {
+    try {
+      await loadLabels();
+      if (view === 'calendar') { if (!$('tx-year').options.length) { populateYears(); buildTypeLegend(); } renderCalendar(); }
+      else renderStats();
+    } catch (e) { setStatus('labels unavailable: ' + e.message); }
+  }
+}
+document.querySelectorAll('.tx-tab').forEach(t => t.addEventListener('click', () => switchView(t.dataset.view)));
+$('tx-year')?.addEventListener('change', renderCalendar);
+window.addEventListener('resize', () => { if (!$('view-stats').hidden) renderMoneyChart(); });
+
 (async function main() {
   buildLegend();
   try {

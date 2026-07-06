@@ -118,8 +118,11 @@ def classify(date, local, grid, con):
     obs = os.path.join(local, "obs", "44013", f"{date[:4]}.parquet")
     bed = os.path.join(local, "asos", "BED", f"{date[:4]}.parquet")
     fields = os.path.join(local, f"year={date[:4]}", f"month={date[4:6]}", f"{date[6:8]}.parquet")
-    if not (os.path.exists(obs) and os.path.exists(fields)):
+    # obs (44013 buoy) is the primary truth and required; HRRR fields (insolation)
+    # are an optional stored feature — classify without them if that day isn't backfilled.
+    if not os.path.exists(obs):
         return dict(date=date, type="U", qc_flags=1)
+    have_fields = os.path.exists(fields)
 
     series = _buoy_series(con, obs, date)
     qc = 0
@@ -152,14 +155,16 @@ def classify(date, local, grid, con):
     sst = con.execute(f"SELECT avg(t_water) FROM read_parquet('{obs}') WHERE time_utc BETWEEN '{sa}' AND '{sb}'").fetchone()[0]
     dt_c = (tmax - sst) if (tmax is not None and sst is not None) else None
 
-    # --- insolation (HRRR over-water, 09-14 LT) ---
-    water = [i for i, m in enumerate(grid["land_mask"]) if m == 0]
-    ia, ib = _lt_bounds(date, 9, 14)
-    wlist = ",".join(map(str, water))
-    dswrf, tcdc = con.execute(
-        f"SELECT avg(dswrf), avg(tcdc) FROM read_parquet('{fields}') "
-        f"WHERE valid_time_utc BETWEEN '{ia}' AND '{ib}' AND gi IN ({wlist})"
-    ).fetchone()
+    # --- insolation (HRRR over-water, 09-14 LT) — optional ---
+    dswrf, tcdc = None, None
+    if have_fields:
+        water = [i for i, m in enumerate(grid["land_mask"]) if m == 0]
+        ia, ib = _lt_bounds(date, 9, 14)
+        wlist = ",".join(map(str, water))
+        dswrf, tcdc = con.execute(
+            f"SELECT avg(dswrf), avg(tcdc) FROM read_parquet('{fields}') "
+            f"WHERE valid_time_utc BETWEEN '{ia}' AND '{ib}' AND gi IN ({wlist})"
+        ).fetchone()
 
     # --- tide phase at onset (hrs from nearest Boston HW) ---
     tide_phase = None
@@ -205,11 +210,17 @@ def classify(date, local, grid, con):
     )
 
 
-def daterange(a, b):
+def _in_season(d):
+    """Apr 15 - Oct 15 (spec §6 classifier season)."""
+    return (d.month, d.day) >= (4, 15) and (d.month, d.day) <= (10, 15)
+
+
+def daterange(a, b, season_only=True):
     d = dt.datetime.strptime(a, "%Y%m%d").date()
     e = dt.datetime.strptime(b, "%Y%m%d").date()
     while d <= e:
-        yield d.strftime("%Y%m%d")
+        if not season_only or _in_season(d):
+            yield d.strftime("%Y%m%d")
         d += dt.timedelta(days=1)
 
 
