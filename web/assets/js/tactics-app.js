@@ -136,17 +136,15 @@ async function loadGrid() {
   GRID = await r.json();
 }
 
-async function loadDay(dateStr) {
-  // dateStr YYYY-MM-DD -> fields/year=YYYY/month=MM/DD.parquet
+async function loadFramesFromUrl(url, note) {
   // DuckDB-WASM httpfs needs an absolute URL (a relative path is read as a local glob).
-  const [y, m, d] = dateStr.split('-');
-  const url = new URL(`${BASE}/fields/year=${y}/month=${m}/${d}.parquet`, location.href).href;
+  const abs = new URL(url, location.href).href;
   setStatus('querying fields…');
   const q = async sql => (await dbConn.query(sql)).toArray().map(x => x.toJSON());
   // one row per (valid_time, gi); pivot into per-cycle frames of length nx*ny
   const rows = await q(
     `SELECT CAST(epoch_ms(valid_time_utc) AS DOUBLE) AS t, CAST(gi AS INTEGER) AS gi, u10, v10
-       FROM read_parquet('${url}') ORDER BY valid_time_utc, gi`);
+       FROM read_parquet('${abs}') ORDER BY valid_time_utc, gi`);
   const n = GRID.nx * GRID.ny;
   const byT = new Map();
   for (const row of rows) {
@@ -159,7 +157,12 @@ async function loadDay(dateStr) {
   $('tx-scrub').max = String(FRAMES.length - 1);
   curFrame = Math.min(curFrame, FRAMES.length - 1);
   $('tx-scrub').value = curFrame;
-  setStatus(`${FRAMES.length} hourly frames · ${n} cells`);
+  setStatus(`${note || FRAMES.length + ' hourly frames'} · ${n} cells`);
+}
+
+function loadDay(dateStr) {
+  const [y, m, d] = dateStr.split('-');
+  return loadFramesFromUrl(`${BASE}/fields/year=${y}/month=${m}/${d}.parquet`);
 }
 
 $('tx-date').addEventListener('change', async e => {
@@ -310,16 +313,134 @@ function renderStats() {
   });
 }
 
+// ================= Race briefing / analog finder (§7) =================
+let BRIEF = null;
+function doyOf(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  return Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 0)) / 86400000);
+}
+const DIRNAME = d => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((d % 360) / 45)) % 8];
+
+function findAnalogs(brief, k = 30) {
+  // feature vector: standardized [grad_u, grad_v, dt_c, sst, sin/cos DOY] over
+  // days within ±45 DOY. Drop any feature today is missing. (Cloud/DSWRF are
+  // shown as inputs but excluded from matching until fields are backfilled for
+  // the historical labels that populate tcdc_am — else the pool empties.)
+  const base = [['grad_u', brief.grad_u], ['grad_v', brief.grad_v], ['dt_c', brief.dt_c],
+                ['sst', brief.sst]].filter(([, v]) => v != null);
+  const tdoy = brief.doy;
+  const pool = LABELS.filter(r => {
+    if (r.type === 'U') return false;
+    for (const [f] of base) if (r[f] == null) return false;
+    const dd = Math.abs(doyOf(r.date) - tdoy);
+    return Math.min(dd, 365 - dd) <= 45;
+  });
+  if (pool.length < 5) return { pool, analogs: [] };
+  const vec = r => [...base.map(([f]) => r[f]),
+                    Math.sin(2 * Math.PI * doyOf(r.date) / 365), Math.cos(2 * Math.PI * doyOf(r.date) / 365)];
+  const tvec = [...base.map(([, v]) => v), brief.sin_doy, brief.cos_doy];
+  const mat = pool.map(vec);
+  const mean = [], std = [];
+  for (let j = 0; j < tvec.length; j++) {
+    const col = mat.map(v => v[j]); const m = col.reduce((a, b) => a + b, 0) / col.length;
+    mean[j] = m; std[j] = Math.sqrt(col.reduce((a, b) => a + (b - m) ** 2, 0) / col.length) || 1;
+  }
+  const z = v => v.map((x, j) => (x - mean[j]) / std[j]);
+  const tz = z(tvec);
+  const scored = pool.map((r, i) => {
+    const zv = z(mat[i]); let dsum = 0;
+    for (let j = 0; j < zv.length; j++) dsum += (zv[j] - tz[j]) ** 2;
+    return { r, dist: Math.sqrt(dsum) };
+  }).sort((a, b) => a.dist - b.dist);
+  return { pool, analogs: scored.slice(0, k) };
+}
+
+function quantile(arr, q) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b); const i = (s.length - 1) * q;
+  const lo = Math.floor(i), hi = Math.ceil(i);
+  return s[lo] + (s[hi] - s[lo]) * (i - lo);
+}
+
+async function loadBriefing() {
+  try {
+    const r = await fetch(new URL(`${BASE}/today/briefing.json`, location.href).href, { cache: 'no-store' });
+    BRIEF = r.ok ? await r.json() : null;
+  } catch { BRIEF = null; }
+}
+
+function renderBriefing() {
+  const el = $('tx-briefing');
+  if (!BRIEF) { el.innerHTML = `<p class="tx-note">No live briefing yet — the hourly feed (<code>today/briefing.json</code>) runs in season. The analog finder needs it.</p>`; return; }
+  $('tx-brief-run').textContent = `HRRR run ${BRIEF.run?.slice(0, 16) || ''}Z`;
+  const { analogs } = findAnalogs(BRIEF);
+  const n = analogs.length;
+  const cnt = t => analogs.filter(a => a.r.type === t).length;
+  const pct = c => n ? Math.round(100 * c / n) : 0;
+  const filled = analogs.filter(a => ['F', 'R', 'P'].includes(a.r.type));
+  const onsets = filled.map(a => a.r.onset_lt_44013).filter(v => v != null);
+  // vector-mean fill direction
+  let ux = 0, uy = 0, nd = 0;
+  for (const a of filled) if (a.r.dir_onset != null) { ux += Math.sin(a.r.dir_onset * Math.PI / 180); uy += Math.cos(a.r.dir_onset * Math.PI / 180); nd++; }
+  const fillDir = nd ? (Math.atan2(ux, uy) * 180 / Math.PI + 360) % 360 : null;
+  const g = BRIEF;
+  const inputs = [
+    ['Morning gradient', g.grad_dir != null ? `${DIRNAME(g.grad_dir)} ${Math.round(g.grad_dir)}° @ ${g.grad_spd_kt} kt` : '—'],
+    ['ΔT (land−sea)', g.dt_c != null ? `${g.dt_c} °C` : '—'],
+    ['Cloud / DSWRF (fcst AM)', `${g.tcdc_am ?? '—'}% / ${g.dswrf_am ?? '—'} W/m²`],
+    ['SST', g.sst != null ? `${g.sst} °C` : '—'],
+  ];
+  el.innerHTML = `
+    <div class="tx-brief-grid">
+      <div class="tx-card">
+        <h3>Today — ${g.date}</h3>
+        <table class="tx-kv">${inputs.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
+        <p class="tx-cardnote">Inputs from the latest HRRR run + obs-so-far.</p>
+      </div>
+      <div class="tx-card">
+        <h3>Analog outcome <span class="tx-hint">(${n} nearest days, ±45 DOY)</span></h3>
+        <div class="tx-bigstat">${pct(cnt('F') + cnt('R') + cnt('P'))}%<span>fill onshore</span></div>
+        <table class="tx-kv">
+          <tr><td>Frontal flip (F)</td><td>${pct(cnt('F'))}%</td></tr>
+          <tr><td>Reinforcement (R)</td><td>${pct(cnt('R'))}%</td></tr>
+          <tr><td>Pinned inshore (P)</td><td>${pct(cnt('P'))}%</td></tr>
+          <tr><td>No fill (N/G)</td><td>${pct(cnt('N') + cnt('G'))}%</td></tr>
+          <tr><td>Onset (p25–p50–p75)</td><td>${onsets.length ? [0.25, 0.5, 0.75].map(q => quantile(onsets, q).toFixed(1)).join(' – ') + ' LT' : '—'}</td></tr>
+          <tr><td>Fill direction</td><td>${fillDir != null ? DIRNAME(fillDir) + ' ' + Math.round(fillDir) + '°' : '—'}</td></tr>
+        </table>
+      </div>
+    </div>
+    <div class="tx-card tx-card-wide">
+      <h3>Matched days <span class="tx-hint">(click to replay)</span></h3>
+      <div class="tx-analogs">${analogs.slice(0, 12).map(a =>
+        `<button class="tx-analog" data-date="${a.r.date}" style="border-left:4px solid ${TYPE_COLORS[a.r.type]}">
+           <b>${a.r.date}</b> <span class="tag">${a.r.type}</span>
+           <span class="tx-hint">onset ${a.r.onset_lt_44013 ?? '—'} · ΔT ${a.r.dt_c ?? '—'} · d=${a.dist.toFixed(2)}</span>
+         </button>`).join('')}</div>
+    </div>`;
+  el.querySelectorAll('.tx-analog').forEach(b => b.addEventListener('click', () => {
+    $('tx-date').value = b.dataset.date; $('tx-date').dispatchEvent(new Event('change')); switchView('replay');
+  }));
+}
+
+$('tx-brief-fcst')?.addEventListener('click', async () => {
+  switchView('replay');
+  try { await loadFramesFromUrl(`${BASE}/today/latest.parquet`, "today's forecast F00–F18"); curFrame = 0; $('tx-scrub').value = 0; setTimeout(() => { map.invalidateSize(); render(); }, 30); }
+  catch (e) { setStatus('no forecast feed yet'); }
+});
+$('tx-brief-print')?.addEventListener('click', () => window.print());
+
 // ---- tab switching ----
 async function switchView(view) {
   document.querySelectorAll('.tx-tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
   document.querySelectorAll('.tx-view').forEach(s => s.hidden = (s.id !== 'view-' + view));
   if (view === 'replay') { setTimeout(() => { map.invalidateSize(); render(); }, 30); }
-  if (view === 'calendar' || view === 'stats') {
+  if (view === 'calendar' || view === 'stats' || view === 'briefing') {
     try {
       await loadLabels();
       if (view === 'calendar') { if (!$('tx-year').options.length) { populateYears(); buildTypeLegend(); } renderCalendar(); }
-      else renderStats();
+      else if (view === 'stats') renderStats();
+      else { await loadBriefing(); renderBriefing(); }
     } catch (e) { setStatus('labels unavailable: ' + e.message); }
   }
 }

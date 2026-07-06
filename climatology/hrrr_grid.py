@@ -128,6 +128,41 @@ def read_window(store, group, j0, j1, i0, i1):
     return out
 
 
+def store_fcst(date, cycle):
+    """Forecast (F01..F48) zarr store for a cycle."""
+    return f"sfc/{date}/{date}_{cycle}_fcst.zarr"
+
+
+def list_fcst_cycles(date):
+    r = _s3.list_objects_v2(Bucket=BUCKET, Prefix=f"sfc/{date}/", Delimiter="/")
+    cyc = [p["Prefix"].split("/")[-2] for p in r.get("CommonPrefixes", [])]
+    return sorted({c.split("_")[1] for c in cyc if c.endswith("_fcst.zarr")})
+
+
+def read_fcst_window(store, group, j0, j1, i0, i1, nlead=18):
+    """[nlead, ny_win, nx_win] forecast cube over the bbox window. The _fcst array
+    is [48(F01..F48), ny, nx] chunked [48,150,150] — time not chunked, so one
+    spatial-chunk read yields all lead times."""
+    ap = apath(group)
+    za = zmeta(store)[f"{ap}/.zarray"]
+    nt = za["shape"][0]
+    nlead = min(nlead, nt)
+    out = np.full((nlead, j1 - j0 + 1, i1 - i0 + 1), np.nan, dtype="f4")
+    for cy in range(j0 // CHUNK, j1 // CHUNK + 1):
+        for cx in range(i0 // CHUNK, i1 // CHUNK + 1):
+            try:
+                raw = _s3.get_object(Bucket=BUCKET, Key=f"{store}/{ap}/0.{cy}.{cx}")["Body"].read()
+            except _s3.exceptions.NoSuchKey:
+                continue
+            a = np.frombuffer(_blosc.decode(raw), dtype=za["dtype"]).reshape(za["chunks"])  # [48,150,150]
+            gj0, gi0 = cy * CHUNK, cx * CHUNK
+            sj0, sj1 = max(j0, gj0), min(j1, gj0 + CHUNK - 1)
+            si0, si1 = max(i0, gi0), min(i1, gi0 + CHUNK - 1)
+            out[:, sj0 - j0: sj1 - j0 + 1, si0 - i0: si1 - i0 + 1] = \
+                a[:nlead, sj0 - gj0: sj1 - gj0 + 1, si0 - gi0: si1 - gi0 + 1]
+    return out
+
+
 def latlon_grid(store, j0, j1, i0, i1):
     """2D (lat, lon) arrays for the window, via pyproj inverse of the store's own
     projection x/y coordinate arrays. Shapes (ny_win, nx_win)."""

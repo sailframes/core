@@ -1,0 +1,40 @@
+name: Climatology Hourly Briefing
+
+# Spec §5: in-season, refresh today/latest.parquet (F00-F18 forecast) +
+# today/briefing.json (analog-finder feature vector) from the latest HRRR run.
+# Feeds the race-morning briefing on sailframes.com/tactics.
+
+on:
+  # :50 each hour, Apr-Oct, over the race-relevant window (10:50-22:50 UTC =
+  # 06:50-18:50 EDT). hourly_update.py additionally no-ops outside Apr15-Oct15.
+  schedule:
+    - cron: '50 10-22 * 4-10 *'
+  workflow_dispatch:
+
+concurrency:
+  group: climatology-hourly
+  cancel-in-progress: true       # a newer run supersedes an in-flight one
+
+permissions:
+  contents: read
+
+jobs:
+  briefing:
+    name: Refresh today/latest forecast + briefing
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pipeline deps
+        run: pip install -r climatology/requirements.txt
+      - name: Configure AWS credentials (climatology publisher)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_CLIMATOLOGY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_CLIMATOLOGY }}
+          aws-region: us-east-1
+      - name: Hourly briefing update
+        run: python climatology/hourly_update.py
