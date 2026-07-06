@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.DS_Store
+# regenerable via smoke/make_labels_sample.py — don't commit the binary sample
+smoke/labels.parquet

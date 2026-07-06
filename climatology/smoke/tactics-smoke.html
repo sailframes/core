@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SailFrames · /tactics serving smoke test</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.5 -apple-system, system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.2rem; } h2 { font-size: 1rem; margin-top: 1.6rem; }
+  .ok { color: #0a0; font-weight: 600; } .bad { color: #c00; font-weight: 600; }
+  pre { background: #0001; padding: .7rem .9rem; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
+  table { border-collapse: collapse; } td, th { border: 1px solid #8886; padding: 2px 10px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  code { background: #8882; padding: 0 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div style="background:#b00; color:#fff; padding:.6rem .9rem; border-radius:6px; font-weight:600; margin-bottom:1rem;">
+⚠️ SYNTHETIC SAMPLE DATA — <code style="background:#0003;color:#fff">labels.SAMPLE.parquet</code> is randomly generated for an
+infrastructure smoke test. It is NOT real sea-breeze climatology. Do not cite, index, or reuse.
+</div>
+<h1>SailFrames — <code>/tactics</code> serving smoke test</h1>
+<p>Proves the static-Parquet + CloudFront + DuckDB-WASM architecture
+(<code>TACTICS_CLIMATOLOGY_SPEC.md</code> §4) before Phase 1 builds the real UI:
+<b>(1)</b> HTTP <b>Range</b> works through CloudFront→S3, <b>(2)</b> <b>CORS</b>
+headers are present, <b>(3)</b> <b>DuckDB-WASM</b> can range-query the Parquet.</p>
+
+<p>Parquet URL: <code id="url"></code></p>
+
+<h2>1. Range + CORS (raw fetch)</h2>
+<pre id="range">running…</pre>
+
+<h2>2. DuckDB-WASM range query</h2>
+<pre id="duck">loading DuckDB-WASM…</pre>
+<div id="tbl"></div>
+
+<script type="module">
+// Default: same-origin relative path (page on sailframes.com, parquet on sailframes.com/climatology).
+// Override with ?url=... to test cross-origin CORS explicitly.
+const params = new URLSearchParams(location.search);
+const URL_ = params.get('url') || '/climatology/labels.SAMPLE.parquet';
+document.getElementById('url').textContent = new URL(URL_, location.href).href;
+
+const $ = id => document.getElementById(id);
+const line = (el, cls, txt) => { const s = document.createElement('div'); if (cls) s.className = cls; s.textContent = txt; el.appendChild(s); };
+
+// --- Test 1: explicit Range request, show status + headers ---
+async function rangeTest() {
+  const el = $('range'); el.textContent = '';
+  try {
+    const r = await fetch(URL_, { headers: { Range: 'bytes=0-99' } });
+    const h = n => r.headers.get(n) || '(absent)';
+    line(el, r.status === 206 ? 'ok' : 'bad', `HTTP ${r.status} ${r.statusText}  ${r.status === 206 ? '✓ partial content — Range supported' : '✗ expected 206'}`);
+    line(el, null, `Accept-Ranges:                ${h('accept-ranges')}`);
+    line(el, null, `Content-Range:                ${h('content-range')}`);
+    line(el, null, `Content-Length (of range):    ${h('content-length')}`);
+    const sameOrigin = new URL(URL_, location.href).origin === location.origin;
+    const acao = h('access-control-allow-origin');
+    line(el, null, `Access-Control-Allow-Origin:  ${acao}` +
+      (sameOrigin ? '   ← expected absent (same-origin: browser sends no Origin; CORS not exercised)' : ''));
+    if (!sameOrigin) line(el, acao === '*' || acao === location.origin ? 'ok' : 'bad',
+      `CORS: ${acao === '(absent)' ? '✗ no ACAO on a cross-origin request' : '✓ cross-origin allowed'}`);
+    line(el, null, `x-cache (CloudFront):         ${h('x-cache')}`);
+    line(el, null, `via:                          ${h('via')}`);
+    const buf = await r.arrayBuffer();
+    line(el, buf.byteLength <= 100 ? 'ok' : 'bad', `body bytes returned:          ${buf.byteLength} ${buf.byteLength <= 100 ? '✓ (server honored the byte range)' : '✗ (full file — Range ignored)'}`);
+  } catch (e) {
+    line(el, 'bad', 'fetch failed: ' + e.message + '  (likely CORS if cross-origin, or 4xx)');
+  }
+}
+
+// --- Test 2: DuckDB-WASM loads + range-queries the parquet ---
+async function duckTest() {
+  const el = $('duck');
+  try {
+    const duckdb = await import('https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm');
+    const B = duckdb.getJsDelivrBundles();
+    const bundle = await duckdb.selectBundle(B);
+    const worker_url = URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }));
+    const worker = new Worker(worker_url);
+    const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), worker);
+    await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+    URL.revokeObjectURL(worker_url);
+    const conn = await db.connect();
+    el.textContent = 'DuckDB-WASM instantiated. Querying over HTTP…\n';
+
+    const abs = new URL(URL_, location.href).href;
+    const q = async sql => (await conn.query(sql)).toArray().map(r => r.toJSON());
+
+    const [{ n, d0, d1 }] = await q(`SELECT count(*) n, min(date) d0, max(date) d1 FROM read_parquet('${abs}')`);
+    el.textContent += `\n✓ rows=${n}  date span ${d0} … ${d1}\n`;
+
+    const byType = await q(`SELECT type, count(*) AS n_days, round(avg(spd_peak),1) AS avg_peak_kt, round(avg(dswrf_am),0) AS avg_dswrf
+                            FROM read_parquet('${abs}') GROUP BY type ORDER BY n_days DESC`);
+    // render table
+    const tbl = document.createElement('table');
+    tbl.innerHTML = '<tr><th>type</th><th>days</th><th>avg peak kt</th><th>avg DSWRF</th></tr>' +
+      byType.map(r => `<tr><td>${r.type}</td><td>${r.n_days}</td><td>${r.avg_peak_kt}</td><td>${r.avg_dswrf}</td></tr>`).join('');
+    $('tbl').appendChild(tbl);
+
+    const [{ c }] = await q(`SELECT count(*) c FROM read_parquet('${abs}') WHERE type='F' AND grad_spd < 8`);
+    el.textContent += `✓ analog-style filtered query (frontal-flip, light gradient): ${c} days\n`;
+    line(el, 'ok', '✓ DuckDB-WASM range-queried the Parquet end-to-end.');
+    await conn.close();
+  } catch (e) {
+    el.textContent += '\n';
+    line(el, 'bad', '✗ DuckDB-WASM failed: ' + (e && e.message ? e.message : e));
+  }
+}
+
+await rangeTest();
+await duckTest();
+</script>
+</body>
+</html>
