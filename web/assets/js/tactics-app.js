@@ -1,0 +1,188 @@
+// tactics-app.js — /tactics day-replay wind field.
+// Reads climatology grid.json + fields Parquet straight from CloudFront via
+// DuckDB-WASM (HTTP Range), draws the HRRR 10 m wind field as an animated
+// arrow canvas over a Leaflet basemap. No backend (spec §4/§8).
+//
+// Data base: same-origin ./climatology/ (page + data both on sailframes.com,
+// or a local http.server during dev). Override with ?base=https://...
+const params = new URLSearchParams(location.search);
+const BASE = (params.get('base') || './climatology').replace(/\/$/, '');
+const KT = 1.943844;
+
+const $ = id => document.getElementById(id);
+const statusEl = $('tx-status');
+const setStatus = s => { statusEl.textContent = s; };
+
+// ---- Leaflet basemap (Carto light — matches dashboard default) ----
+// zoomSnap:0 -> fitBounds can use fractional zoom so the near-square venue bbox
+// fills the wide map instead of snapping a full level out (big margins).
+const map = L.map('tx-map', { zoomControl: true, attributionControl: false, zoomSnap: 0 })
+  .setView([42.35, -70.5], 9);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+  { maxZoom: 19, subdomains: 'abcd' }).addTo(map);
+window.__map = map;   // debug/headless hook
+
+// wind-arrow canvas overlay pinned over the map pane
+const canvas = document.createElement('canvas');
+canvas.className = 'tx-arrows';
+$('tx-map').appendChild(canvas);
+const ctx = canvas.getContext('2d');
+
+let GRID = null;       // {nx, ny, lats[], lons[], land_mask[], ...}
+let FRAMES = [];       // FRAMES[h] = {t, u:Float32Array, v:Float32Array} per cycle hour
+let curFrame = 18;     // default to ~14 EDT (18Z) — peak sea-breeze hour
+let playing = false;
+let playTimer = null;
+
+// speed (kt) -> color ramp (calm blue -> breeze green -> fresh orange -> strong red)
+function spdColor(kt) {
+  const stops = [[0, '#4a90d9'], [6, '#3ec46d'], [12, '#e8b13a'], [18, '#e8603a'], [26, '#c0392b']];
+  let c = stops[0][1];
+  for (const [s, col] of stops) { if (kt >= s) c = col; }
+  return c;
+}
+
+function resizeCanvas() {
+  const r = $('tx-map').getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+  canvas.style.width = r.width + 'px'; canvas.style.height = r.height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawArrow(px, py, u, v) {
+  // u,v in m/s (met: u eastward, v northward). Screen y is down -> negate v.
+  const spd = Math.hypot(u, v);
+  const kt = spd * KT;
+  if (spd < 0.1) return;
+  const ang = Math.atan2(-v, u);          // screen-space angle of the "to" vector
+  const len = Math.min(26, 6 + kt * 1.1); // pixel length scaled by speed
+  const ex = px + Math.cos(ang) * len, ey = py + Math.sin(ang) * len;
+  ctx.strokeStyle = ctx.fillStyle = spdColor(kt);
+  ctx.lineWidth = 1.6;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+  // arrowhead
+  const h = 4.5, a2 = ang;
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - h * Math.cos(a2 - 0.4), ey - h * Math.sin(a2 - 0.4));
+  ctx.lineTo(ex - h * Math.cos(a2 + 0.4), ey - h * Math.sin(a2 + 0.4));
+  ctx.closePath(); ctx.fill();
+}
+
+function render() {
+  if (!GRID || !FRAMES.length) return;
+  resizeCanvas();
+  const r = $('tx-map').getBoundingClientRect();
+  ctx.clearRect(0, 0, r.width, r.height);
+  const fr = FRAMES[curFrame];
+  const { nx, ny, lats, lons, land_mask } = GRID;
+  // draw every other cell to avoid clutter at low zoom
+  const step = map.getZoom() >= 10 ? 1 : 2;
+  for (let row = 0; row < ny; row += step) {
+    for (let col = 0; col < nx; col += step) {
+      const k = row * nx + col;
+      const u = fr.u[k], v = fr.v[k];
+      if (!isFinite(u) || !isFinite(v)) continue;
+      const pt = map.latLngToContainerPoint([lats[k], lons[k]]);
+      if (pt.x < -20 || pt.y < -20 || pt.x > r.width + 20 || pt.y > r.height + 20) continue;
+      drawArrow(pt.x, pt.y, u, v);
+    }
+  }
+  const d = new Date(fr.t);
+  const lt = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+  $('tx-clock').textContent = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
+}
+
+map.on('move zoom viewreset resize', render);
+window.addEventListener('resize', render);
+
+// ---- legend ----
+function buildLegend() {
+  const rows = [[0, 'calm'], [6, '6kt'], [12, '12kt'], [18, '18kt'], [26, '26kt+']];
+  $('tx-legend').innerHTML = '<div style="margin-bottom:3px;opacity:.8">10 m wind</div>' +
+    rows.map(([s, lab]) => `<div class="row"><span class="sw" style="background:${spdColor(s)}"></span>${lab}</div>`).join('');
+}
+
+// ---- scrubber / play ----
+$('tx-scrub').addEventListener('input', e => { curFrame = +e.target.value; render(); });
+$('tx-play').addEventListener('click', togglePlay);
+function togglePlay() {
+  playing = !playing;
+  $('tx-play').textContent = playing ? '❚❚ Pause' : '▶ Play';
+  if (playing) {
+    playTimer = setInterval(() => {
+      curFrame = (curFrame + 1) % FRAMES.length;
+      $('tx-scrub').value = curFrame; render();
+    }, 220);
+  } else clearInterval(playTimer);
+}
+
+// ---- DuckDB-WASM ----
+let dbConn = null;
+async function initDuck() {
+  const duckdb = await import('https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm');
+  const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
+  const wurl = URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: 'text/javascript' }));
+  const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), new Worker(wurl));
+  await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
+  URL.revokeObjectURL(wurl);
+  dbConn = await db.connect();
+}
+
+async function loadGrid() {
+  const r = await fetch(`${BASE}/grid.json`);
+  if (!r.ok) throw new Error(`grid.json ${r.status}`);
+  GRID = await r.json();
+}
+
+async function loadDay(dateStr) {
+  // dateStr YYYY-MM-DD -> fields/year=YYYY/month=MM/DD.parquet
+  // DuckDB-WASM httpfs needs an absolute URL (a relative path is read as a local glob).
+  const [y, m, d] = dateStr.split('-');
+  const url = new URL(`${BASE}/fields/year=${y}/month=${m}/${d}.parquet`, location.href).href;
+  setStatus('querying fields…');
+  const q = async sql => (await dbConn.query(sql)).toArray().map(x => x.toJSON());
+  // one row per (valid_time, gi); pivot into per-cycle frames of length nx*ny
+  const rows = await q(
+    `SELECT CAST(epoch_ms(valid_time_utc) AS DOUBLE) AS t, CAST(gi AS INTEGER) AS gi, u10, v10
+       FROM read_parquet('${url}') ORDER BY valid_time_utc, gi`);
+  const n = GRID.nx * GRID.ny;
+  const byT = new Map();
+  for (const row of rows) {
+    let f = byT.get(row.t);
+    if (!f) { f = { t: row.t, u: new Float32Array(n).fill(NaN), v: new Float32Array(n).fill(NaN) }; byT.set(row.t, f); }
+    f.u[row.gi] = row.u10; f.v[row.gi] = row.v10;
+  }
+  FRAMES = [...byT.values()].sort((a, b) => a.t - b.t)
+    .map(f => ({ ...f, t: new Date(f.t).toISOString() }));
+  $('tx-scrub').max = String(FRAMES.length - 1);
+  curFrame = Math.min(curFrame, FRAMES.length - 1);
+  $('tx-scrub').value = curFrame;
+  setStatus(`${FRAMES.length} hourly frames · ${n} cells`);
+}
+
+$('tx-date').addEventListener('change', async e => {
+  if (playing) togglePlay();
+  try { await loadDay(e.target.value); render(); }
+  catch (err) { setStatus('no data for ' + e.target.value); }
+});
+
+(async function main() {
+  buildLegend();
+  try {
+    setStatus('starting DuckDB-WASM…');
+    await Promise.all([initDuck(), loadGrid()]);
+    // ensure Leaflet has the container's final size before fitting (else it
+    // computes the zoom against a stale/smaller size and sits too far out)
+    map.invalidateSize();
+    map.fitBounds([[Math.min(...GRID.lats), Math.min(...GRID.lons)],
+                   [Math.max(...GRID.lats), Math.max(...GRID.lons)]], { padding: [8, 8] });
+    await loadDay($('tx-date').value);
+    render();
+    window.__tacticsReady = true;   // headless-test hook
+  } catch (err) {
+    setStatus('load failed: ' + err.message);
+    window.__tacticsError = String(err);
+  }
+})();
