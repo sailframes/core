@@ -24,11 +24,18 @@ before any UI.
 - `backfill_hrrr.py` → `fields/year=/month=/DD.parquet` — 8 fields × 24 F00
   cycles × 1638 cells (~39k rows, ~450 KB/day). Verified: schema, size, physical
   values (18Z wind 6.9 m/s, DSWRF 799, etc.), 24/24 cycles, no gaps.
-- `backfill_ndbc.py` → `obs/{stn}/{YYYY}.parquet` (44013 stdmet). Verified 2024.
+- `backfill_ndbc.py` → `obs/{stn}/{YYYY}.parquet` (44013 stdmet). Verified 2024/25.
 - `backfill_coops.py` → `coops/{stn}/{hilo,pred}_{YYYY}.parquet` (tide). Verified 2024.
+- `backfill_asos.py` → `asos/{ID}/{YYYY}.parquet` (IEM; KBED Tmax, KBOS/KBVY flip).
+  Verified: BED 2025 = 103k obs, daily Tmax 29-33 °C.
+- `label_days.py` → `labels.parquet` — the §6 classifier (F/R/P/G/N/U + onset,
+  ΔT, gradient, insolation, tide-phase). **First-cut thresholds**: mechanism +
+  features validated on real aligned days (ΔT, DSWRF/cloud coherent); the type
+  thresholds (onshore sector width, R-window) need the 60-day manual validation
+  set §6 mandates before they're final — do not trust the type split yet.
 
-Not yet built (remaining Phase 1+): `backfill_asos.py` (KBED Tmax for ΔT),
-`label_days.py` (classifier §6), the `/tactics` UI, and the GH Actions workflows.
+Not yet built (remaining Phase 1+): the `/tactics` UI (calendar heatmap, day
+replay, stats) and the GH Actions daily/hourly workflows.
 
 Backfill output goes to `_local/` (gitignored); the real archive uploads to
 `s3://sailframes-data-prod/climatology/` (Phase 0 serving tier proven).
