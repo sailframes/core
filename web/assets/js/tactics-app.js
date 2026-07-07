@@ -119,7 +119,8 @@ function togglePlay() {
 }
 
 // ---- DuckDB-WASM ----
-let dbConn = null;
+let dbConn = null, duckDb = null;
+const _regFiles = new Set();
 async function initDuck() {
   const duckdb = await import('https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.29.0/+esm');
   const bundle = await duckdb.selectBundle(duckdb.getJsDelivrBundles());
@@ -127,7 +128,23 @@ async function initDuck() {
   const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING), new Worker(wurl));
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
   URL.revokeObjectURL(wurl);
+  duckDb = db;
   dbConn = await db.connect();
+}
+
+// Fetch a Parquet in ONE request and register it as an in-memory file, instead of
+// letting DuckDB httpfs do ~10 sequential HTTP Range round-trips per file. Cached
+// per URL, so re-opening the same day/labels is instant.
+async function ensureParquet(url) {
+  const abs = new URL(url, location.href).href;
+  const name = 'p_' + abs.replace(/[^a-z0-9]/gi, '_');
+  if (!_regFiles.has(name)) {
+    const resp = await fetch(abs);
+    if (!resp.ok) throw new Error(`${abs} ${resp.status}`);
+    await duckDb.registerFileBuffer(name, new Uint8Array(await resp.arrayBuffer()));
+    _regFiles.add(name);
+  }
+  return name;
 }
 
 async function loadGrid() {
@@ -137,14 +154,13 @@ async function loadGrid() {
 }
 
 async function loadFramesFromUrl(url, note) {
-  // DuckDB-WASM httpfs needs an absolute URL (a relative path is read as a local glob).
-  const abs = new URL(url, location.href).href;
-  setStatus('querying fields…');
+  setStatus('loading wind field…');
+  const name = await ensureParquet(url);   // one download, then read from memory
   const q = async sql => (await dbConn.query(sql)).toArray().map(x => x.toJSON());
   // one row per (valid_time, gi); pivot into per-cycle frames of length nx*ny
   const rows = await q(
     `SELECT CAST(epoch_ms(valid_time_utc) AS DOUBLE) AS t, CAST(gi AS INTEGER) AS gi, u10, v10
-       FROM read_parquet('${abs}') ORDER BY valid_time_utc, gi`);
+       FROM read_parquet('${name}') ORDER BY valid_time_utc, gi`);
   const n = GRID.nx * GRID.ny;
   const byT = new Map();
   for (const row of rows) {
@@ -178,9 +194,9 @@ let labelsLoaded = false;
 
 async function loadLabels() {
   if (labelsLoaded) return;
-  const url = new URL(`${BASE}/labels.parquet`, location.href).href;
+  const name = await ensureParquet(`${BASE}/labels.parquet`);
   const q = async sql => (await dbConn.query(sql)).toArray().map(x => x.toJSON());
-  LABELS = await q(`SELECT * FROM read_parquet('${url}') ORDER BY date`);
+  LABELS = await q(`SELECT * FROM read_parquet('${name}') ORDER BY date`);
   labelsLoaded = true;
 }
 
@@ -414,19 +430,19 @@ function renderBriefing() {
     <div class="tx-brief-grid">
       <div class="tx-card">
         <h3>Today — ${g.date}</h3>
-        <table class="tx-kv">${inputs.map(([k, v, tip]) => `<tr><td>${k}${tip ? ` <span class="tx-help" title="${tip}">?</span>` : ''}</td><td>${v}</td></tr>`).join('')}</table>
+        <table class="tx-kv">${inputs.map(([k, v, tip]) => `<tr><td>${k}${tip ? ` <span class="tx-help" data-tip="${tip}">?</span>` : ''}</td><td>${v}</td></tr>`).join('')}</table>
         <p class="tx-cardnote">Inputs from the latest HRRR run + obs-so-far. Hover “?” for definitions.</p>
       </div>
       <div class="tx-card">
         <h3>Analog outcome <span class="tx-hint">(${n} nearest days, ±45 DOY)</span></h3>
         <div class="tx-bigstat">${pct(cnt('F') + cnt('R') + cnt('P'))}%<span>fill onshore</span></div>
         <table class="tx-kv">
-          <tr><td>Frontal flip (F) <span class="tx-help" title="Morning offshore breeze that rotates hard (≥90°) into an onshore sea breeze in the afternoon — the Marblehead classic.">?</span></td><td>${pct(cnt('F'))}%</td></tr>
-          <tr><td>Reinforcement (R) <span class="tx-help" title="Morning S–SW that just builds and settles onshore in the afternoon — no big rotation.">?</span></td><td>${pct(cnt('R'))}%</td></tr>
-          <tr><td>Pinned inshore (P) <span class="tx-help" title="Sea breeze fills only close to shore (KBOS/KBVY flip) while mid-bay 44013 never does. Tactically gold.">?</span></td><td>${pct(cnt('P'))}%</td></tr>
-          <tr><td>No fill (N/G) <span class="tx-help" title="N = no organized fill. G = gradient-dominated (mean ≥15 kt, breeze never takes over).">?</span></td><td>${pct(cnt('N') + cnt('G'))}%</td></tr>
-          <tr><td>Onset (p25–p50–p75) <span class="tx-help" title="Local clock time the onshore breeze filled at buoy 44013 across the fill-days, as 25th/50th/75th percentiles.">?</span></td><td>${onsets.length ? [0.25, 0.5, 0.75].map(q => fmtHM(quantile(onsets, q))).join(' – ') + ' LT' : '—'}</td></tr>
-          <tr><td>Fill direction <span class="tx-help" title="Vector-mean wind direction (°T, compass 'from') at onset across the fill-days.">?</span></td><td>${fillDir != null ? DIRNAME(fillDir) + ' ' + Math.round(fillDir) + '°' : '—'}</td></tr>
+          <tr><td>Frontal flip (F) <span class="tx-help" data-tip="Morning offshore breeze that rotates hard (≥90°) into an onshore sea breeze in the afternoon — the Marblehead classic.">?</span></td><td>${pct(cnt('F'))}%</td></tr>
+          <tr><td>Reinforcement (R) <span class="tx-help" data-tip="Morning S–SW that just builds and settles onshore in the afternoon — no big rotation.">?</span></td><td>${pct(cnt('R'))}%</td></tr>
+          <tr><td>Pinned inshore (P) <span class="tx-help" data-tip="Sea breeze fills only close to shore (KBOS/KBVY flip) while mid-bay 44013 never does. Tactically gold.">?</span></td><td>${pct(cnt('P'))}%</td></tr>
+          <tr><td>No fill (N/G) <span class="tx-help" data-tip="N = no organized fill. G = gradient-dominated (mean ≥15 kt, breeze never takes over).">?</span></td><td>${pct(cnt('N') + cnt('G'))}%</td></tr>
+          <tr><td>Onset (p25–p50–p75) <span class="tx-help" data-tip="Local clock time the onshore breeze filled at buoy 44013 across the fill-days, as 25th/50th/75th percentiles.">?</span></td><td>${onsets.length ? [0.25, 0.5, 0.75].map(q => fmtHM(quantile(onsets, q))).join(' – ') + ' LT' : '—'}</td></tr>
+          <tr><td>Fill direction <span class="tx-help" data-tip="Vector-mean wind direction (°T, compass 'from') at onset across the fill-days.">?</span></td><td>${fillDir != null ? DIRNAME(fillDir) + ' ' + Math.round(fillDir) + '°' : '—'}</td></tr>
         </table>
       </div>
     </div>
@@ -494,16 +510,18 @@ window.addEventListener('resize', () => { if (!$('view-stats').hidden) renderMon
 (async function main() {
   buildLegend();
   try {
-    setStatus('starting DuckDB-WASM…');
+    setStatus('loading engine…');
     await Promise.all([initDuck(), loadGrid()]);
     // ensure Leaflet has the container's final size before fitting (else it
     // computes the zoom against a stale/smaller size and sits too far out)
     map.invalidateSize();
     map.fitBounds([[Math.min(...GRID.lats), Math.min(...GRID.lons)],
                    [Math.max(...GRID.lats), Math.max(...GRID.lons)]], { padding: [8, 8] });
-    await loadDay($('tx-date').value);
-    render();
-    window.__tacticsReady = true;   // headless-test hook
+    // Engine + map are ready now — page is usable. Load the default day's wind
+    // field in the background so the map paints immediately instead of blocking.
+    window.__tacticsReady = true;
+    loadDay($('tx-date').value).then(render)
+      .catch(() => setStatus(`No archived wind field for ${$('tx-date').value} yet.`));
   } catch (err) {
     setStatus('load failed: ' + err.message);
     window.__tacticsError = String(err);
