@@ -70,6 +70,53 @@ function drawArrow(px, py, u, v) {
   ctx.closePath(); ctx.fill();
 }
 
+// ---- observation overlay (model validation) ----
+let OBS_STATIONS = null;   // [{id,name,lat,lon,type}]
+let OBS = null;            // {id: [{t(ms), wspd, wdir}]}
+let obsOn = true;
+
+function drawObsBarb(px, py, wspd, wdir, isBuoy) {
+  const kt = wspd * KT;
+  const u = -wspd * Math.sin(wdir * Math.PI / 180), v = -wspd * Math.cos(wdir * Math.PI / 180);
+  const col = spdColor(kt);
+  const ang = Math.atan2(-v, u);
+  const len = wspd < 0.1 ? 0 : Math.min(34, 11 + kt * 1.2);
+  const ex = px + Math.cos(ang) * len, ey = py + Math.sin(ang) * len;
+  if (len) {
+    ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 5;                 // white halo -> stands out over model arrows
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.strokeStyle = ctx.fillStyle = col; ctx.lineWidth = 2.6;
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+    const h = 6;
+    ctx.beginPath(); ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - h * Math.cos(ang - .4), ey - h * Math.sin(ang - .4));
+    ctx.lineTo(ex - h * Math.cos(ang + .4), ey - h * Math.sin(ang + .4));
+    ctx.closePath(); ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.fillStyle = col; ctx.fill();
+  }
+  // station marker: white-ringed dot (square for buoys, circle for airports)
+  ctx.beginPath();
+  if (isBuoy) ctx.rect(px - 4, py - 4, 8, 8); else ctx.arc(px, py, 4.2, 0, 2 * Math.PI);
+  ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 2.2; ctx.stroke();
+}
+
+window.__obsState = () => ({                       // headless-test hook
+  stations: OBS_STATIONS ? OBS_STATIONS.length : null,
+  obs: OBS ? Object.fromEntries(Object.entries(OBS).map(([k, v]) => [k, v.length])) : null,
+});
+function drawObsLayer(fr) {
+  if (!OBS || !OBS_STATIONS) return;
+  const frameMs = new Date(fr.t).getTime();
+  for (const st of OBS_STATIONS) {
+    const series = OBS[st.id]; if (!series || !series.length) continue;
+    let best = null;
+    for (const o of series) { const dd = Math.abs(o.t - frameMs); if (dd <= 40 * 60000 && (!best || dd < Math.abs(best.t - frameMs))) best = o; }
+    if (!best) continue;
+    const pt = map.latLngToContainerPoint([st.lat, st.lon]);
+    drawObsBarb(pt.x, pt.y, best.wspd, best.wdir, st.type === 'buoy');
+  }
+}
+
 function render() {
   if (!GRID || !FRAMES.length) return;
   resizeCanvas();
@@ -89,6 +136,7 @@ function render() {
       drawArrow(pt.x, pt.y, u, v);
     }
   }
+  if (obsOn) drawObsLayer(fr);
   const d = new Date(fr.t);
   const lt = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
   $('tx-clock').textContent = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
@@ -100,8 +148,10 @@ window.addEventListener('resize', render);
 // ---- legend ----
 function buildLegend() {
   const rows = [[0, 'calm'], [6, '6kt'], [12, '12kt'], [18, '18kt'], [26, '26kt+']];
-  $('tx-legend').innerHTML = '<div style="margin-bottom:3px;opacity:.8">10 m wind</div>' +
-    rows.map(([s, lab]) => `<div class="row"><span class="sw" style="background:${spdColor(s)}"></span>${lab}</div>`).join('');
+  $('tx-legend').innerHTML = '<div style="margin-bottom:3px;opacity:.8">10 m wind (HRRR)</div>' +
+    rows.map(([s, lab]) => `<div class="row"><span class="sw" style="background:${spdColor(s)}"></span>${lab}</div>`).join('') +
+    '<div class="row" style="margin-top:5px;opacity:.85">◎ obs — □ buoy · ○ airport</div>' +
+    '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>';
 }
 
 // ---- scrubber / play ----
@@ -153,6 +203,36 @@ async function loadGrid() {
   GRID = await r.json();
 }
 
+async function loadObsStations() {
+  if (OBS_STATIONS) return;
+  try {
+    const r = await fetch(new URL(`${BASE}/obs_stations.json`, location.href).href);
+    OBS_STATIONS = r.ok ? await r.json() : [];
+  } catch { OBS_STATIONS = []; }
+}
+
+// Load each station's hourly wind for `dateStr` (from its annual obs Parquet,
+// fetched once + cached). Filtered to the local day in JS to dodge tz-literal issues.
+async function loadObsForDay(dateStr) {
+  if (!obsOn) { OBS = null; return; }
+  await loadObsStations();
+  if (!OBS_STATIONS.length) { OBS = null; return; }
+  const yr = dateStr.slice(0, 4);
+  const dayStart = Date.parse(dateStr + 'T00:00:00Z'), dayEnd = dayStart + 86400000;
+  const q = async sql => (await dbConn.query(sql)).toArray().map(x => x.toJSON());
+  OBS = OBS || {};                 // non-null so barbs draw as each station arrives
+  // sequential (one shared DuckDB connection); buoys first in the manifest, so
+  // on-water truth appears first while airports stream in.
+  for (const st of OBS_STATIONS) {
+    try {
+      const name = await ensureParquet(`${BASE}/obs/${st.id}/${yr}.parquet`);
+      const rows = await q(`SELECT CAST(epoch_ms(time_utc) AS DOUBLE) AS t, wspd, wdir FROM read_parquet('${name}')`);
+      OBS[st.id] = rows.filter(r => r.t >= dayStart && r.t < dayEnd && r.wspd != null && r.wdir != null);
+    } catch { OBS[st.id] = []; }
+    if (FRAMES.length) render();   // progressive repaint
+  }
+}
+
 async function loadFramesFromUrl(url, note) {
   setStatus('loading wind field…');
   const name = await ensureParquet(url);   // one download, then read from memory
@@ -176,10 +256,18 @@ async function loadFramesFromUrl(url, note) {
   setStatus(`${note || FRAMES.length + ' hourly frames'} · ${n} cells`);
 }
 
-function loadDay(dateStr) {
+async function loadDay(dateStr) {
   const [y, m, d] = dateStr.split('-');
-  return loadFramesFromUrl(`${BASE}/fields/year=${y}/month=${m}/${d}.parquet`);
+  await loadFramesFromUrl(`${BASE}/fields/year=${y}/month=${m}/${d}.parquet`);   // frames first
+  await loadObsForDay(dateStr).catch(() => { });                                 // then obs (same connection)
 }
+
+// Obs toggle: reload obs for the current day when enabled, then repaint.
+$('tx-obs')?.addEventListener('change', async e => {
+  obsOn = e.target.checked;
+  if (obsOn) { try { await loadObsForDay($('tx-date').value); } catch { } } else OBS = null;
+  render();
+});
 
 $('tx-date').addEventListener('change', async e => {
   if (playing) togglePlay();
@@ -484,8 +572,11 @@ function renderBriefing() {
 
 $('tx-brief-fcst')?.addEventListener('click', async () => {
   switchView('replay');
-  try { await loadFramesFromUrl(`${BASE}/today/latest.parquet`, "today's forecast F00–F18"); curFrame = 0; $('tx-scrub').value = 0; setTimeout(() => { map.invalidateSize(); render(); }, 30); }
-  catch (e) { setStatus('no forecast feed yet'); }
+  try {
+    await loadFramesFromUrl(`${BASE}/today/latest.parquet`, "today's forecast F00–F18");
+    await loadObsForDay((BRIEF && BRIEF.date) || new Date().toISOString().slice(0, 10)).catch(() => {});
+    curFrame = 0; $('tx-scrub').value = 0; setTimeout(() => { map.invalidateSize(); render(); }, 30);
+  } catch (e) { setStatus('no forecast feed yet'); }
 });
 $('tx-brief-print')?.addEventListener('click', () => window.print());
 

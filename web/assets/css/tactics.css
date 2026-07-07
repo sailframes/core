@@ -36,6 +36,8 @@ body { padding-bottom: 48px; }
 .tx-btn:disabled { opacity: .5; cursor: wait; }
 .tx-scrub { flex: 1 1 260px; accent-color: var(--accent, #3aa0ff); }
 .tx-clock { font-family: ui-monospace, Menlo, monospace; font-size: .95rem; min-width: 168px; }
+.tx-obs-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: .85rem; color: var(--text-secondary, #8b98a5); cursor: pointer; }
+.tx-obs-toggle input { accent-color: var(--accent, #3aa0ff); }
 .tx-status { color: var(--text-secondary, #8b98a5); font-size: .8rem; font-family: ui-monospace, Menlo, monospace; }
 
 .tx-stage { position: relative; }

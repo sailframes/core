@@ -80,6 +80,30 @@ def main():
         os.makedirs(os.path.dirname(out), exist_ok=True)
         pq.write_table(tbl, out, compression="zstd")
         print(f"{a.station} {yr}: {tbl.num_rows} obs, {os.path.getsize(out)//1024} KB -> {out}")
+        # also emit a normalized obs/ file (wind in m/s, common schema) for the
+        # /tactics map overlay — same layout as buoy obs (backfill_ndbc/neracoos).
+        import numpy as np
+        kt2ms = 0.514444
+        sknt = tbl.column("sknt").to_numpy(zero_copy_only=False)
+        obs = pa.table({
+            "time_utc": tbl.column("time_utc"),
+            "wspd": pa.array(sknt * kt2ms, type=pa.float32()),
+            "wdir": pa.array(tbl.column("drct").to_numpy(zero_copy_only=False), type=pa.float32()),
+            "gust": pa.array(np.full(tbl.num_rows, None), type=pa.float32()),
+            "t_air": pa.array(tbl.column("tmpc").to_numpy(zero_copy_only=False), type=pa.float32()),
+            "t_water": pa.array(np.full(tbl.num_rows, None), type=pa.float32()),
+            "slp": pa.array(tbl.column("mslp").to_numpy(zero_copy_only=False), type=pa.float32()),
+        })
+        # downsample to hourly (one report per hour, the latest) — ASOS has ~100k
+        # sub-hourly reports/yr; the map overlay only needs hourly. Keeps files small.
+        epoch = np.array([int(x.timestamp()) for x in obs.column("time_utc").to_pylist()])
+        last_per_hour = {}
+        for i, h in enumerate(epoch // 3600):
+            last_per_hour[int(h)] = i
+        obs = obs.take(sorted(last_per_hour.values()))
+        oout = os.path.join(a.out_dir, "obs", a.station, f"{yr}.parquet")
+        os.makedirs(os.path.dirname(oout), exist_ok=True)
+        pq.write_table(obs, oout, compression="zstd")
 
 
 if __name__ == "__main__":
