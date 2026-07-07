@@ -11,7 +11,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="./assets/css/tactics.css?v=6">
+    <link rel="stylesheet" href="./assets/css/tactics.css?v=7">
     <script src="./config.js"></script>
     <script src="./assets/js/analytics.js"></script>
 </head>
@@ -41,6 +41,7 @@
                 <button id="tx-play" class="tx-btn">▶ Play</button>
                 <input type="range" id="tx-scrub" min="0" max="23" value="18" step="1" class="tx-scrub">
                 <span class="tx-clock" id="tx-clock">—</span>
+                <label class="tx-obs-toggle" title="Overlay independent buoy + airport wind observations to check the model"><input type="checkbox" id="tx-obs" checked> Obs ◎</label>
             </div>
             <div class="tx-stage">
                 <div id="tx-map" class="tx-map"></div>
@@ -106,6 +107,6 @@
         </section>
     </main>
 
-    <script type="module" src="./assets/js/tactics-app.js?v=4"></script>
+    <script type="module" src="./assets/js/tactics-app.js?v=6"></script>
 </body>
 </html>
