@@ -18,6 +18,7 @@ AWS creds + region come from the environment (configure-aws-credentials).
 Run from the repo root:  python climatology/daily_update.py
 """
 import datetime as dt
+import json
 import os
 import subprocess
 import sys
@@ -50,6 +51,30 @@ def in_season(d):
     return (4, 15) <= (d.month, d.day) <= (10, 15)
 
 
+def rebuild_field_index():
+    """List climatology/fields/ and publish fields_index.json (which days are
+    replayable) so the /tactics UI can mark analog days accurately."""
+    import re
+    dates, tok = [], None
+    while True:
+        kw = dict(Bucket=BUCKET, Prefix=f"{PFX}/fields/")
+        if tok:
+            kw["ContinuationToken"] = tok
+        r = s3.list_objects_v2(**kw)
+        for o in r.get("Contents", []):
+            m = re.search(r"year=(\d{4})/month=(\d{2})/(\d{2})\.parquet$", o["Key"])
+            if m:
+                dates.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
+        if r.get("IsTruncated"):
+            tok = r["NextContinuationToken"]
+        else:
+            break
+    body = json.dumps(sorted(set(dates)))
+    s3.put_object(Bucket=BUCKET, Key=f"{PFX}/fields_index.json", Body=body.encode(),
+                  ContentType="application/json", CacheControl="max-age=300")
+    log(f"fields_index.json: {len(set(dates))} replayable days")
+
+
 def put(local, key, ctype, cache):
     s3.upload_file(local, BUCKET, f"{PFX}/{key}",
                    ExtraArgs={"ContentType": ctype, "CacheControl": cache})
@@ -71,6 +96,8 @@ def main():
         if os.path.exists(fpath):
             put(fpath, fkey, "application/octet-stream", "max-age=86400")
             invalidate.append(f"/{PFX}/{fkey}")
+            rebuild_field_index()   # refresh replayable-days list for the UI
+            invalidate.append(f"/{PFX}/fields_index.json")
     except Exception as e:
         log(f"WARN fields backfill failed ({e}); continuing to labels")
 

@@ -115,6 +115,24 @@
 .tx-analog:hover { border-color: var(--accent, #3aa0ff); }
 .tx-analog .tag { background: #0003; padding: 0 5px; border-radius: 3px; font-family: ui-monospace, Menlo, monospace; }
 .tx-analog .tx-hint { display: block; margin-top: 2px; }
+.tx-analog.noplay { opacity: .5; cursor: help; }
+.tx-analog.noplay:hover { border-color: var(--border-color, #2a2a2a); opacity: .7; }
+.tx-play-dot { color: var(--accent, #3aa0ff); font-size: .7rem; }
+
+/* help badge + glossary */
+.tx-help {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%; font-size: .62rem; cursor: help;
+  background: #ffffff1a; color: var(--text-secondary, #8b98a5); vertical-align: middle;
+}
+.tx-help:hover { background: var(--accent, #3aa0ff); color: #fff; }
+.tx-legend-block { margin-top: 16px; }
+.tx-legend-block > summary { cursor: pointer; color: var(--text-primary, #e8edf2); padding: 2px 0; }
+.tx-legend-block > summary a { color: var(--accent, #3aa0ff); }
+.tx-gloss { margin-top: 12px; }
+.tx-gloss td { vertical-align: top; padding: 6px 10px 6px 0; }
+.tx-gloss td:first-child { white-space: nowrap; color: var(--text-primary, #e8edf2); }
+.tx-gloss td:last-child { text-align: left; font-family: inherit; color: var(--text-secondary, #8b98a5); line-height: 1.5; }
 
 @media print {
   .tx-nav, .tx-tabs, .tx-toolbar, .tx-note { display: none !important; }
