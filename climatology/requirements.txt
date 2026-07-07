@@ -7,5 +7,6 @@ numpy>=2.0
 numcodecs>=0.16      # blosc decode for hrrrzarr chunks
 pyarrow>=17          # Parquet (zstd) read/write
 duckdb>=1.1          # local queries / verification (browser uses duckdb-wasm)
+pytz>=2024.1         # required by duckdb for tz-aware timestamps (label_days.py)
 pyproj>=3.6          # HRRR Lambert Conformal <-> lat/lon
 requests>=2.31       # NDBC / CO-OPS / IEM HTTP fetches
