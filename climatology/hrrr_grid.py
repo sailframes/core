@@ -5,6 +5,7 @@ there: projection SW-corner exact, LAND coastline correct, values physical).
 
 Reads zarr chunks directly with boto3 + numcodecs (no s3fs/xarray/zarr).
 """
+import functools
 import json
 import math
 
@@ -37,7 +38,9 @@ REQUIRED = {
 LAND_GROUP = "surface/LAND"
 BONUS = {"hpbl": "surface/HPBL"}
 
-_s3 = boto3.client("s3", region_name=REGION, config=Config(signature_version=UNSIGNED))
+_s3 = boto3.client("s3", region_name=REGION,
+                   config=Config(signature_version=UNSIGNED, max_pool_connections=64,
+                                 retries={"max_attempts": 3, "mode": "adaptive"}))
 _blosc = Blosc()
 
 
@@ -63,7 +66,11 @@ def apath(group):
     return f"{level}/{var}/{level}/{var}"
 
 
+@functools.lru_cache(maxsize=512)
 def zmeta(store):
+    """Consolidated zarr metadata for a store. Cached per store — otherwise every
+    chunk read re-fetched AND re-parsed this (large) JSON, serializing on the GIL
+    and doubling S3 GETs. lru_cache is thread-safe in CPython."""
     return json.loads(_s3.get_object(Bucket=BUCKET, Key=f"{store}/.zmetadata")["Body"].read())["metadata"]
 
 

@@ -27,6 +27,7 @@ import pyarrow.parquet as pq
 import hrrr_grid as hg
 
 FIELDS = ["u10", "v10", "gust", "t2", "td2", "mslp", "tcdc", "dswrf"]
+WORKERS = 12   # parallel S3 reads per day (override with --workers)
 SCHEMA = pa.schema(
     [("valid_time_utc", pa.timestamp("s", tz="UTC")), ("gi", pa.uint16())]
     + [(f, pa.float32()) for f in FIELDS]
@@ -47,17 +48,30 @@ def extract_day(date, window):
     present = {f"{h:02d}z" for h in range(24)} & set(cycles)
     missing = sorted({f"{h:02d}z" for h in range(24)} - present)
 
+    # Parallelize the per-(cycle,field) window reads — each is independent network
+    # I/O (2 chunk GETs). 384 sequential reads/day dominated wall-clock; a thread
+    # pool cuts it ~10x (boto3 client is thread-safe; the GIL releases on socket I/O).
+    from concurrent.futures import ThreadPoolExecutor
+    order = sorted(present)
+    tasks = [(cyc, f) for cyc in order for f in FIELDS]
+
+    def _read(job):
+        cyc, f = job
+        return job, hg.read_window(hg.store_anl(date, cyc), hg.REQUIRED[f], j0, j1, i0, i1).ravel()
+
+    got = {}
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for job, arr in ex.map(_read, tasks):
+            got[job] = arr
+
     times, gicol = [], []
     cols = {f: [] for f in FIELDS}
-    for cyc in sorted(present):
-        store = hg.store_anl(date, cyc)
+    for cyc in order:
         vt = _valid_time(date, cyc)
-        # read all 8 fields for this cycle over the window
-        arrs = {f: hg.read_window(store, hg.REQUIRED[f], j0, j1, i0, i1).ravel() for f in FIELDS}
         times.append(np.full(ncell, np.datetime64(vt.replace(tzinfo=None), "s")))
         gicol.append(gi)
         for f in FIELDS:
-            cols[f].append(arrs[f])
+            cols[f].append(got[(cyc, f)])
     if not times:
         return None, missing
     tbl = pa.table(
@@ -79,13 +93,16 @@ def daterange(start, end):
 
 
 def main():
+    global WORKERS
     ap = argparse.ArgumentParser()
     ap.add_argument("--date")
     ap.add_argument("--start")
     ap.add_argument("--end")
     ap.add_argument("--out-dir", default="climatology/_local")
     ap.add_argument("--gaps-out", default=None)
+    ap.add_argument("--workers", type=int, default=WORKERS)
     a = ap.parse_args()
+    WORKERS = a.workers
     dates = [a.date] if a.date else list(daterange(a.start, a.end))
 
     # window is constant across dates — resolve once from the first available store
