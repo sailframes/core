@@ -210,7 +210,7 @@ function renderCalendar() {
       const rec = byDate.get(ds);
       if (rec) {
         cells += `<div class="tx-day" style="background:${TYPE_COLORS[rec.type] || '#2a3038'}" `
-          + `title="${ds} · ${rec.type} · onset ${rec.onset_lt_44013 ?? '—'} · ΔT ${rec.dt_c ?? '—'}" `
+          + `title="${ds} · ${rec.type} · onset ${fmtHM(rec.onset_lt_44013)}${rec.onset_lt_44013 != null ? ' LT' : ''} · ΔT ${fmt1(rec.dt_c)}°C" `
           + `data-date="${ds}">${d}</div>`;
       } else {
         cells += `<div class="tx-day empty" style="background:#171b22" title="${ds} · no data">${d}</div>`;
@@ -322,6 +322,12 @@ function doyOf(dateStr) {
 }
 const DIRNAME = d => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((d % 360) / 45)) % 8];
 const fmt1 = v => (v == null || isNaN(v)) ? '—' : (+v).toFixed(1);   // one decimal, always
+const fmtHM = v => {                                                 // decimal hours -> H:MM local
+  if (v == null || isNaN(v)) return '—';
+  let h = Math.floor(v), m = Math.round((v - h) * 60);
+  if (m === 60) { h += 1; m = 0; }
+  return `${h}:${String(m).padStart(2, '0')}`;
+};
 
 async function loadFieldIndex() {
   if (FIELD_DATES) return;
@@ -419,7 +425,7 @@ function renderBriefing() {
           <tr><td>Reinforcement (R) <span class="tx-help" title="Morning S–SW that just builds and settles onshore in the afternoon — no big rotation.">?</span></td><td>${pct(cnt('R'))}%</td></tr>
           <tr><td>Pinned inshore (P) <span class="tx-help" title="Sea breeze fills only close to shore (KBOS/KBVY flip) while mid-bay 44013 never does. Tactically gold.">?</span></td><td>${pct(cnt('P'))}%</td></tr>
           <tr><td>No fill (N/G) <span class="tx-help" title="N = no organized fill. G = gradient-dominated (mean ≥15 kt, breeze never takes over).">?</span></td><td>${pct(cnt('N') + cnt('G'))}%</td></tr>
-          <tr><td>Onset (p25–p50–p75) <span class="tx-help" title="Local-time hour the onshore breeze filled at buoy 44013 across the fill-days, as 25th/50th/75th percentiles.">?</span></td><td>${onsets.length ? [0.25, 0.5, 0.75].map(q => fmt1(quantile(onsets, q))).join(' – ') + ' LT' : '—'}</td></tr>
+          <tr><td>Onset (p25–p50–p75) <span class="tx-help" title="Local clock time the onshore breeze filled at buoy 44013 across the fill-days, as 25th/50th/75th percentiles.">?</span></td><td>${onsets.length ? [0.25, 0.5, 0.75].map(q => fmtHM(quantile(onsets, q))).join(' – ') + ' LT' : '—'}</td></tr>
           <tr><td>Fill direction <span class="tx-help" title="Vector-mean wind direction (°T, compass 'from') at onset across the fill-days.">?</span></td><td>${fillDir != null ? DIRNAME(fillDir) + ' ' + Math.round(fillDir) + '°' : '—'}</td></tr>
         </table>
       </div>
@@ -432,7 +438,7 @@ function renderBriefing() {
            title="${replay ? 'Click to replay the wind field for this day' : 'No archived wind field for this day — its type came from buoy+ASOS data'}"
            style="border-left:4px solid ${TYPE_COLORS[a.r.type]}">
            <b>${a.r.date}</b> <span class="tag">${a.r.type}</span>${replay ? ' <span class="tx-play-dot">▶</span>' : ''}
-           <span class="tx-hint">onset ${fmt1(a.r.onset_lt_44013)}${a.r.onset_lt_44013 != null ? ' LT' : ''} · ΔT ${fmt1(a.r.dt_c)}°C · dist ${a.dist.toFixed(2)}</span>
+           <span class="tx-hint">onset ${fmtHM(a.r.onset_lt_44013)}${a.r.onset_lt_44013 != null ? ' LT' : ''} · ΔT ${fmt1(a.r.dt_c)}°C · dist ${a.dist.toFixed(2)}</span>
          </button>`; }).join('')}</div>
     </div>
     <details class="tx-card tx-card-wide tx-legend-block">
