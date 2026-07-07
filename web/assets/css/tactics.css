@@ -1,4 +1,9 @@
 /* /tactics — sea-breeze climatology. Uses main.css CSS vars (dark theme). */
+/* main.css locks body to overflow:hidden for the map dashboard; /tactics has
+   tall Calendar/Stats/Briefing tabs, so restore normal page scrolling. */
+html, body { overflow: auto !important; height: auto !important; }
+body { padding-bottom: 48px; }
+
 .tx-nav {
   position: fixed; top: 0; left: 0; right: 0; height: 52px; z-index: 1000;
   display: flex; align-items: center; gap: 14px; padding: 0 18px;
