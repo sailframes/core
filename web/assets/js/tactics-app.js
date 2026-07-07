@@ -168,7 +168,7 @@ function loadDay(dateStr) {
 $('tx-date').addEventListener('change', async e => {
   if (playing) togglePlay();
   try { await loadDay(e.target.value); render(); }
-  catch (err) { setStatus('no data for ' + e.target.value); }
+  catch (err) { setStatus(`No archived wind field for ${e.target.value} — the field archive covers only recent days (it grows one day at a time).`); }
 });
 
 // ================= Calendar + Stats =================
@@ -315,11 +315,21 @@ function renderStats() {
 
 // ================= Race briefing / analog finder (§7) =================
 let BRIEF = null;
+let FIELD_DATES = null;   // Set of YYYY-MM-DD that have an archived wind field (replayable)
 function doyOf(dateStr) {
   const d = new Date(dateStr + 'T00:00:00Z');
   return Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 0)) / 86400000);
 }
 const DIRNAME = d => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((d % 360) / 45)) % 8];
+const fmt1 = v => (v == null || isNaN(v)) ? '—' : (+v).toFixed(1);   // one decimal, always
+
+async function loadFieldIndex() {
+  if (FIELD_DATES) return;
+  try {
+    const r = await fetch(new URL(`${BASE}/fields_index.json`, location.href).href, { cache: 'no-store' });
+    FIELD_DATES = new Set(r.ok ? await r.json() : []);
+  } catch { FIELD_DATES = new Set(); }
+}
 
 function findAnalogs(brief, k = 30) {
   // feature vector: standardized [grad_u, grad_v, dt_c, sst, sin/cos DOY] over
@@ -385,41 +395,68 @@ function renderBriefing() {
   const fillDir = nd ? (Math.atan2(ux, uy) * 180 / Math.PI + 360) % 360 : null;
   const g = BRIEF;
   const inputs = [
-    ['Morning gradient', g.grad_dir != null ? `${DIRNAME(g.grad_dir)} ${Math.round(g.grad_dir)}° @ ${g.grad_spd_kt} kt` : '—'],
-    ['ΔT (land−sea)', g.dt_c != null ? `${g.dt_c} °C` : '—'],
-    ['Cloud / DSWRF (fcst AM)', `${g.tcdc_am ?? '—'}% / ${g.dswrf_am ?? '—'} W/m²`],
-    ['SST', g.sst != null ? `${g.sst} °C` : '—'],
+    ['Morning gradient', g.grad_dir != null ? `${DIRNAME(g.grad_dir)} ${Math.round(g.grad_dir)}° @ ${fmt1(g.grad_spd_kt)} kt` : '—',
+      "Vector-mean 06–10 LT wind at buoy 44013 — the background flow before any sea breeze. Direction is °T (compass 'from')."],
+    ['ΔT (land−sea)', g.dt_c != null ? `${fmt1(g.dt_c)} °C` : '—',
+      'Forecast daytime land temp (near Bedford KBED) minus sea-surface temp. The sea-breeze engine — bigger ΔT → stronger breeze.'],
+    ['Cloud / DSWRF (fcst AM)', `${g.tcdc_am ?? '—'}% / ${g.dswrf_am ?? '—'} W/m²`,
+      'Forecast morning cloud cover and downward shortwave radiation (sunlight heating the land). Context only — not used in matching yet.'],
+    ['SST', g.sst != null ? `${fmt1(g.sst)} °C` : '—', 'Sea-surface temperature at buoy 44013.'],
   ];
+  const has = FIELD_DATES || new Set();
   el.innerHTML = `
     <div class="tx-brief-grid">
       <div class="tx-card">
         <h3>Today — ${g.date}</h3>
-        <table class="tx-kv">${inputs.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
-        <p class="tx-cardnote">Inputs from the latest HRRR run + obs-so-far.</p>
+        <table class="tx-kv">${inputs.map(([k, v, tip]) => `<tr><td>${k}${tip ? ` <span class="tx-help" title="${tip}">?</span>` : ''}</td><td>${v}</td></tr>`).join('')}</table>
+        <p class="tx-cardnote">Inputs from the latest HRRR run + obs-so-far. Hover “?” for definitions.</p>
       </div>
       <div class="tx-card">
         <h3>Analog outcome <span class="tx-hint">(${n} nearest days, ±45 DOY)</span></h3>
         <div class="tx-bigstat">${pct(cnt('F') + cnt('R') + cnt('P'))}%<span>fill onshore</span></div>
         <table class="tx-kv">
-          <tr><td>Frontal flip (F)</td><td>${pct(cnt('F'))}%</td></tr>
-          <tr><td>Reinforcement (R)</td><td>${pct(cnt('R'))}%</td></tr>
-          <tr><td>Pinned inshore (P)</td><td>${pct(cnt('P'))}%</td></tr>
-          <tr><td>No fill (N/G)</td><td>${pct(cnt('N') + cnt('G'))}%</td></tr>
-          <tr><td>Onset (p25–p50–p75)</td><td>${onsets.length ? [0.25, 0.5, 0.75].map(q => quantile(onsets, q).toFixed(1)).join(' – ') + ' LT' : '—'}</td></tr>
-          <tr><td>Fill direction</td><td>${fillDir != null ? DIRNAME(fillDir) + ' ' + Math.round(fillDir) + '°' : '—'}</td></tr>
+          <tr><td>Frontal flip (F) <span class="tx-help" title="Morning offshore breeze that rotates hard (≥90°) into an onshore sea breeze in the afternoon — the Marblehead classic.">?</span></td><td>${pct(cnt('F'))}%</td></tr>
+          <tr><td>Reinforcement (R) <span class="tx-help" title="Morning S–SW that just builds and settles onshore in the afternoon — no big rotation.">?</span></td><td>${pct(cnt('R'))}%</td></tr>
+          <tr><td>Pinned inshore (P) <span class="tx-help" title="Sea breeze fills only close to shore (KBOS/KBVY flip) while mid-bay 44013 never does. Tactically gold.">?</span></td><td>${pct(cnt('P'))}%</td></tr>
+          <tr><td>No fill (N/G) <span class="tx-help" title="N = no organized fill. G = gradient-dominated (mean ≥15 kt, breeze never takes over).">?</span></td><td>${pct(cnt('N') + cnt('G'))}%</td></tr>
+          <tr><td>Onset (p25–p50–p75) <span class="tx-help" title="Local-time hour the onshore breeze filled at buoy 44013 across the fill-days, as 25th/50th/75th percentiles.">?</span></td><td>${onsets.length ? [0.25, 0.5, 0.75].map(q => fmt1(quantile(onsets, q))).join(' – ') + ' LT' : '—'}</td></tr>
+          <tr><td>Fill direction <span class="tx-help" title="Vector-mean wind direction (°T, compass 'from') at onset across the fill-days.">?</span></td><td>${fillDir != null ? DIRNAME(fillDir) + ' ' + Math.round(fillDir) + '°' : '—'}</td></tr>
         </table>
       </div>
     </div>
     <div class="tx-card tx-card-wide">
-      <h3>Matched days <span class="tx-hint">(click to replay)</span></h3>
-      <div class="tx-analogs">${analogs.slice(0, 12).map(a =>
-        `<button class="tx-analog" data-date="${a.r.date}" style="border-left:4px solid ${TYPE_COLORS[a.r.type]}">
-           <b>${a.r.date}</b> <span class="tag">${a.r.type}</span>
-           <span class="tx-hint">onset ${a.r.onset_lt_44013 ?? '—'} · ΔT ${a.r.dt_c ?? '—'} · d=${a.dist.toFixed(2)}</span>
-         </button>`).join('')}</div>
-    </div>`;
-  el.querySelectorAll('.tx-analog').forEach(b => b.addEventListener('click', () => {
-    $('tx-date').value = b.dataset.date; $('tx-date').dispatchEvent(new Event('change')); switchView('replay');
+      <h3>Matched days <span class="tx-hint">(nearest analogs — click a highlighted day to replay its wind field)</span></h3>
+      <div class="tx-analogs">${analogs.slice(0, 12).map(a => {
+        const replay = has.has(a.r.date);
+        return `<button class="tx-analog${replay ? '' : ' noplay'}" data-date="${a.r.date}" data-type="${a.r.type}" data-replay="${replay}"
+           title="${replay ? 'Click to replay the wind field for this day' : 'No archived wind field for this day — its type came from buoy+ASOS data'}"
+           style="border-left:4px solid ${TYPE_COLORS[a.r.type]}">
+           <b>${a.r.date}</b> <span class="tag">${a.r.type}</span>${replay ? ' <span class="tx-play-dot">▶</span>' : ''}
+           <span class="tx-hint">onset ${fmt1(a.r.onset_lt_44013)}${a.r.onset_lt_44013 != null ? ' LT' : ''} · ΔT ${fmt1(a.r.dt_c)}°C · dist ${a.dist.toFixed(2)}</span>
+         </button>`; }).join('')}</div>
+    </div>
+    <details class="tx-card tx-card-wide tx-legend-block">
+      <summary><b>What these numbers mean</b> — glossary &amp; method (full write-up on the <a href="./tactics-methodology.html">Methodology page</a>)</summary>
+      <table class="tx-kv tx-gloss">
+        <tr><td><b>Fill onshore %</b></td><td>Share of the ${n} analog days that developed an onshore sea breeze (type F, R or P). Higher = more reliable breeze today.</td></tr>
+        <tr><td><b>F / R / P / N / G</b></td><td>Day types from the classifier: <b>F</b> frontal flip, <b>R</b> reinforcement, <b>P</b> pinned inshore, <b>N</b> none, <b>G</b> gradient-dominated.</td></tr>
+        <tr><td><b>Onset (LT)</b></td><td>Local-time hour the breeze filled at mid-bay buoy 44013 (e.g. 12.8 = 12:48). “—” = that day never filled.</td></tr>
+        <tr><td><b>Fill direction</b></td><td>Compass direction (°T, “from”) the breeze came from at onset, vector-averaged over fill-days.</td></tr>
+        <tr><td><b>Morning gradient</b></td><td>Today’s vector-mean 06–10 LT wind at 44013 — the background flow before any sea breeze.</td></tr>
+        <tr><td><b>ΔT (land−sea)</b></td><td>Forecast daytime land temperature (near Bedford, KBED) minus sea-surface temp. The sea-breeze engine — bigger ΔT drives a stronger breeze.</td></tr>
+        <tr><td><b>Cloud / DSWRF</b></td><td>Forecast morning cloud cover (%) and downward shortwave radiation (W/m²) — how much sun heats the land. Shown for context; not used in matching yet.</td></tr>
+        <tr><td><b>SST</b></td><td>Sea-surface temperature at 44013.</td></tr>
+        <tr><td><b>dist</b></td><td>How similar an analog day is to today (standardized Euclidean distance on gradient, ΔT, SST, day-of-year). Smaller = closer match; 0 would be identical.</td></tr>
+        <tr><td><b>Replayable ▶</b></td><td>Only days in the wind-field archive can be replayed. The archive is built forward one day at a time, so most historical analogs have no field yet (their type still comes from buoy+ASOS data).</td></tr>
+      </table>
+    </details>`;
+  el.querySelectorAll('.tx-analog').forEach(b => b.addEventListener('click', async () => {
+    const date = b.dataset.date;
+    if (b.dataset.replay === 'true') {
+      switchView('replay'); $('tx-date').value = date; $('tx-date').dispatchEvent(new Event('change'));
+    } else {
+      setStatus(`No archived wind field for ${date} (type ${b.dataset.type}, from buoy+ASOS). Replay covers only recent days.`);
+    }
   }));
 }
 
@@ -440,7 +477,7 @@ async function switchView(view) {
       await loadLabels();
       if (view === 'calendar') { if (!$('tx-year').options.length) { populateYears(); buildTypeLegend(); } renderCalendar(); }
       else if (view === 'stats') renderStats();
-      else { await loadBriefing(); renderBriefing(); }
+      else { await Promise.all([loadBriefing(), loadFieldIndex()]); renderBriefing(); }
     } catch (e) { setStatus('labels unavailable: ' + e.message); }
   }
 }
