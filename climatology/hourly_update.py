@@ -146,12 +146,28 @@ def main():
     log(f"latest run {ymd} {cyc}")
 
     window = hg.bbox_window(hg.store_anl(ymd, cyc))
-    table, base, nlead = build_forecast_table(ymd, cyc, window)
+    table, base, nlead = build_forecast_table(ymd, cyc, window)   # hourly, all 8 fields
+    # add 15-min sub-hourly wind from HRRR subh (GRIB2) — non-fatal, wind-only
+    merged = table
+    try:
+        from backfill_subh import read_subh
+        subh = read_subh(ymd, cyc.replace("z", ""), window, nlead)
+        if subh is not None and subh.num_rows:
+            n = subh.num_rows
+            cols = {"valid_time_utc": subh.column("valid_time_utc"), "gi": subh.column("gi"),
+                    "u10": subh.column("u10"), "v10": subh.column("v10")}
+            for f in ("gust", "t2", "td2", "mslp", "tcdc", "dswrf"):
+                cols[f] = pa.array(np.full(n, None), type=pa.float32())
+            merged = pa.concat_tables([table, pa.table(cols, schema=SCHEMA)]) \
+                .sort_by([("valid_time_utc", "ascending"), ("gi", "ascending")])
+            log(f"added {n} sub-hourly (15-min) wind rows")
+    except Exception as e:
+        log(f"WARN subh 15-min merge failed ({e}); hourly-only feed")
     out = os.path.join(WORK, "latest.parquet")
-    pq.write_table(table, out, compression="zstd")
+    pq.write_table(merged, out, compression="zstd")
     s3.upload_file(out, BUCKET, f"{PFX}/today/latest.parquet",
                    ExtraArgs={"ContentType": "application/octet-stream", "CacheControl": "max-age=120"})
-    log(f"today/latest.parquet: F00-F{nlead} ({table.num_rows} rows) from {base:%Y-%m-%dT%H}Z")
+    log(f"today/latest.parquet: F00-F{nlead} ({merged.num_rows} rows) from {base:%Y-%m-%dT%H}Z")
 
     # briefing feature vector for the analog finder
     s3.download_file(BUCKET, f"{PFX}/grid.json", os.path.join(WORK, "grid.json"))
