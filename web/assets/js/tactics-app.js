@@ -121,24 +121,30 @@ function drawObsLayer(fr) {
   }
 }
 
-// RTMA barb: charcoal, square-tailed — a gridded "analysis truth" distinct from
-// the colored HRRR model arrows and the white-ringed point-obs barbs.
+// RTMA barb: bold magenta with a white halo — a gridded "analysis truth" that
+// stands out from the speed-colored HRRR arrows and the white-ringed point-obs.
+const RTMA_COL = '#d81b8c';
 function drawRtmaBarb(px, py, u, v) {
   const kt = Math.hypot(u, v) * KT;
   if (kt < 0.4) return;
   const ang = Math.atan2(-v, u);
-  const len = Math.min(24, 6 + kt * 1.0);
+  const len = Math.min(26, 8 + kt * 1.1);
   const ex = px + Math.cos(ang) * len, ey = py + Math.sin(ang) * len;
-  ctx.strokeStyle = 'rgba(20,24,30,.9)'; ctx.lineWidth = 2.2;
+  // white halo first so it reads over both HRRR arrows and any basemap
+  ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 5;
   ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
-  const h = 5;
+  ctx.strokeStyle = RTMA_COL; ctx.lineWidth = 2.8;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+  const h = 6;
   ctx.beginPath(); ctx.moveTo(ex, ey);
   ctx.lineTo(ex - h * Math.cos(ang - .4), ey - h * Math.sin(ang - .4));
   ctx.lineTo(ex - h * Math.cos(ang + .4), ey - h * Math.sin(ang + .4));
-  ctx.closePath(); ctx.fillStyle = 'rgba(20,24,30,.9)'; ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(px - 1.6, py - 1.6, 3.2, 3.2);
-  ctx.strokeStyle = 'rgba(20,24,30,.9)'; ctx.lineWidth = 1; ctx.strokeRect(px - 1.6, py - 1.6, 3.2, 3.2);
+  ctx.closePath();
+  ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.fillStyle = RTMA_COL; ctx.fill();
+  // square tail marker (grid node), white-ringed
+  ctx.fillStyle = '#fff'; ctx.fillRect(px - 2.2, py - 2.2, 4.4, 4.4);
+  ctx.strokeStyle = RTMA_COL; ctx.lineWidth = 1.4; ctx.strokeRect(px - 2.2, py - 2.2, 4.4, 4.4);
 }
 
 function drawRtmaLayer(fr) {
@@ -261,6 +267,8 @@ function render() {
   const { nx, ny, lats, lons, land_mask } = GRID;
   // draw every other cell to avoid clutter at low zoom
   const step = map.getZoom() >= 10 ? 1 : 2;
+  const rtmaLive = rtmaOn && RTMA && RTMA.length;
+  ctx.globalAlpha = rtmaLive ? 0.4 : 1;   // fade HRRR so the RTMA truth stands out
   for (let row = 0; row < ny; row += step) {
     for (let col = 0; col < nx; col += step) {
       const k = row * nx + col;
@@ -271,17 +279,15 @@ function render() {
       drawArrow(pt.x, pt.y, u, v);
     }
   }
-  const rtmaT = (rtmaOn && RTMA && RTMA.length) ? drawRtmaLayer(fr) : null;
+  ctx.globalAlpha = 1;
+  const rtmaT = rtmaLive ? drawRtmaLayer(fr) : null;
   if (obsOn) drawObsLayer(fr);
   renderValidation(fr);
   const d = new Date(fr.t);
   const lt = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
-  let clock = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
-  if (rtmaOn && RTMA && RTMA.length) {
-    clock += rtmaT ? `  · RTMA ${new Date(rtmaT).toISOString().slice(11, 16)}Z`
-                   : '  · RTMA n/a (analysis only up to now)';
-  }
-  $('tx-clock').textContent = clock;
+  $('tx-clock').textContent = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
+  const rs = $('tx-rtma-status');   // RTMA time lives in the legend, not the toolbar (avoids clock-width toolbar shift)
+  if (rs) rs.textContent = rtmaLive ? (rtmaT ? ` · ${new Date(rtmaT).toISOString().slice(11, 16)}Z` : ' · n/a here (analysis ≤ now)') : '';
 }
 
 map.on('move zoom viewreset resize', render);
@@ -294,7 +300,7 @@ function buildLegend() {
     rows.map(([s, lab]) => `<div class="row"><span class="sw" style="background:${spdColor(s)}"></span>${lab}</div>`).join('') +
     '<div class="row" style="margin-top:5px;opacity:.85">◎ obs — □ buoy · ○ airport</div>' +
     '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>' +
-    (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span style="color:#141820">➤</span> RTMA 2.5&nbsp;km analysis${RTMA_META && RTMA_META.n_cycles ? ` · ${RTMA_META.n_cycles} cycles` : ''}</div>` : '');
+    (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.95"><span style="color:${RTMA_COL};font-weight:700">➤</span> RTMA 2.5&nbsp;km analysis<span id="tx-rtma-status" style="opacity:.8"></span></div>` : '');
 }
 
 // ---- scrubber / play ----
