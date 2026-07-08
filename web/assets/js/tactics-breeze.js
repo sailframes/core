@@ -344,6 +344,93 @@
       `a lateral set that skews the beat and the layline. Toggle <b>Current 🌊</b> on the replay map for the venue-wide field.`;
   }
 
+  // ---- Synoptic wind determination (Bernot): 850 hPa = the general flow free of
+  // site effects; surface pre-breeze ≈ ⅔ of it; the 8–9 h-solar wind is a lower-
+  // quality fallback. Computed client-side from morning_synoptic + race_field_hourly.
+  const VENUE_LON = -70.75;                                   // racing-centre meridian
+  const angDiff = (a, b) => ((a - b) % 360 + 540) % 360 - 180;
+  function solarOffsetH(dateStr) {                            // hours to ADD to EDT to get solar
+    const d = new Date((dateStr || '2026-07-04') + 'T00:00:00Z');
+    const N = Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 0)) / 86400000);
+    const B = 2 * Math.PI * (N - 81) / 364;
+    const eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);
+    return 4 + VENUE_LON / 15 + eot / 60;                     // ≈ −0.78 h (EDT − 47 min)
+  }
+  function computeSyn(d) {
+    const s = d.morning_synoptic || {};
+    const synKt = s.speed_kt, synDir = s.from_deg;
+    const rf = d.race_field_hourly || [];
+    const off = solarOffsetH(d.date);
+    const vm = pred => {                                      // vector-mean dir + scalar-mean kt
+      const rows = rf.filter(r => pred(r[0]) && r[1] != null);
+      if (!rows.length) return { dir: null, kt: null, n: 0 };
+      let su = 0, sv = 0, sk = 0;
+      rows.forEach(r => { su += Math.sin(r[1] * Math.PI / 180); sv += Math.cos(r[1] * Math.PI / 180); sk += r[2]; });
+      return { dir: Math.round(((Math.atan2(su, sv) * 180 / Math.PI) + 360) % 360), kt: +(sk / rows.length).toFixed(1), n: rows.length };
+    };
+    const morn = vm(h => h >= 6 && h <= 9);                   // pre-breeze surface (over water)
+    const solar = vm(h => { const sh = h + off; return sh >= 8 && sh < 9.5; });   // Bernot 8–9 h solar
+    const expected = synKt != null ? +(synKt * 2 / 3).toFixed(1) : null;
+    const ratio = (morn.kt != null && synKt) ? +(morn.kt / synKt).toFixed(2) : null;
+    let coupling = '—';
+    if (ratio != null) coupling = ratio >= 0.85
+      ? 'surface ≈ gradient — well-mixed / little frictional loss over water'
+      : ratio >= 0.55
+        ? 'surface coupled to the flow aloft (≈ Bernot ⅔)'
+        : 'surface decoupled — the 850 flow is not reaching the sea surface; the light opposing surface lets a breeze establish, but that stronger wind aloft can mix down and override later';
+    const dAgree = (solar.dir != null && synDir != null) ? Math.round(Math.abs(angDiff(solar.dir, synDir))) : null;
+    const cf = d.coast_faces_deg;
+    const mornOnshore = (morn.dir != null && cf != null) ? Math.abs(angDiff(morn.dir, cf)) <= 85 : false;
+    return { synKt, synDir, morn, solar, expected, ratio, coupling, dAgree, mornOnshore };
+  }
+  function synopticHTML(d) {
+    const y = computeSyn(d);
+    const row = (a, b) => `<div class="bz-syn-row"><div class="bz-syn-a">${a}</div><div class="bz-syn-b">${b}</div></div>`;
+    const caveat = y.mornOnshore
+      ? `<div class="bz-note bz-syn-caveat">⚠ The morning surface flow is already inside the onshore arc — partly thermally contaminated, so the “pre-breeze” ⅔ comparison is less meaningful.</div>` : '';
+    return `
+    <div class="bz-section-t">Synoptic wind — the general flow, free of local effects
+      <span class="tx-hint">(Bernot: 850 hPa → ⅔ at the surface → 8–9 h-solar fallback)</span></div>
+    <div class="bz-two bz-syn">
+      <div><canvas id="bz-synvec" width="300" height="240"></canvas></div>
+      <div class="bz-syn-tbl">
+        ${row('850 hPa — synoptic aloft (~1500 m)', `<b>${dirName(y.synDir)} ${fmt(y.synDir, '°')}</b> @ <b>${fmt(y.synKt, ' kt', 0)}</b><br><span class="bz-note">The general wind minus site effects (Bernot proxy). Its direction sets the quadrant; its speed vs the ~18 kt ceiling gates establishment.</span>`)}
+        ${row('⅔ rule → expected surface', `≈ <b>${fmt(y.expected, ' kt', 1)}</b> &nbsp;(⅔ × ${fmt(y.synKt, ' kt', 0)})<br>observed pre-breeze surface — field ~06–09 LT, over water: <b>${dirName(y.morn.dir)} ${fmt(y.morn.dir, '°')} @ ${fmt(y.morn.kt, ' kt', 1)}</b><br>ratio <b>${y.ratio == null ? '—' : y.ratio.toFixed(2)}</b> — <span class="bz-note">${y.coupling}</span>`)}
+        ${row('8–9 h-solar fallback (≈09–10 LT)', `<b>${dirName(y.solar.dir)} ${fmt(y.solar.dir, '°')} @ ${fmt(y.solar.kt, ' kt', 1)}</b><br>direction vs 850 aloft: <b>Δ ${y.dAgree == null ? '—' : y.dAgree + '°'}</b><br><span class="bz-note">Bernot’s lower-quality synoptic read when no chart / 850 is at hand (“pas toujours de bonne qualité”).</span>`)}
+        ${caveat}
+      </div>
+    </div>`;
+  }
+  function drawSynVectors(cv, d) {
+    if (!cv) return;
+    const y = computeSyn(d);
+    const g = cv.getContext('2d'), W = cv.width, H = cv.height; g.clearRect(0, 0, W, H);
+    const O = { x: W / 2, y: H / 2 + 6 }, R = Math.min(W, H) / 2 - 30;
+    const maxkt = Math.max(8, y.synKt || 0, y.morn.kt || 0, y.solar.kt || 0);
+    const P = (brg, kt) => ({ x: O.x + (kt / maxkt * R) * Math.sin(brg * Math.PI / 180), y: O.y - (kt / maxkt * R) * Math.cos(brg * Math.PI / 180) });
+    g.strokeStyle = '#2a3038';
+    for (const rr of [0.5, 1]) { g.beginPath(); g.arc(O.x, O.y, R * rr, 0, 6.28); g.stroke(); }
+    g.fillStyle = '#8b98a5'; g.font = '10px system-ui';
+    for (const [b, lab] of [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W']]) { const e = P(b, maxkt); g.fillText(lab, e.x - 3, e.y + (b === 0 ? -2 : b === 180 ? 11 : 4)); }
+    g.fillText(maxkt.toFixed(0) + ' kt', O.x + 3, O.y - R + 2);
+    const ray = (brg, kt, col, dash) => {
+      if (brg == null || kt == null) return;
+      const p = P(brg, kt);
+      g.strokeStyle = col; g.lineWidth = 2.4; g.setLineDash(dash || []);
+      g.beginPath(); g.moveTo(O.x, O.y); g.lineTo(p.x, p.y); g.stroke(); g.setLineDash([]);
+      const a = Math.atan2(p.y - O.y, p.x - O.x);
+      g.beginPath(); g.moveTo(p.x, p.y); g.lineTo(p.x - 9 * Math.cos(a - .4), p.y - 9 * Math.sin(a - .4)); g.lineTo(p.x - 9 * Math.cos(a + .4), p.y - 9 * Math.sin(a + .4)); g.closePath(); g.fillStyle = col; g.fill();
+    };
+    ray(y.synDir, y.synKt, '#3a86c8');                       // 850 aloft — solid blue
+    ray(y.synDir, y.expected, '#3a86c8', [4, 3]);            // ⅔ expected — dashed, same bearing
+    ray(y.morn.dir, y.morn.kt, '#1f9d55');                   // observed morning surface — green
+    ray(y.solar.dir, y.solar.kt, '#e8b13a');                 // 8–9 h solar — orange
+    g.font = '9px system-ui'; let ly = 6;
+    const leg = (col, t, dash) => { g.strokeStyle = col; g.lineWidth = 2.4; g.setLineDash(dash || []); g.beginPath(); g.moveTo(4, ly + 3); g.lineTo(18, ly + 3); g.stroke(); g.setLineDash([]); g.fillStyle = '#8b98a5'; g.fillText(t, 22, ly + 6); ly += 12; };
+    leg('#3a86c8', '850 hPa aloft'); leg('#3a86c8', '⅔ expected surface', [4, 3]); leg('#1f9d55', 'surface 06–09 LT'); leg('#e8b13a', '8–9 h solar');
+    g.fillStyle = '#8b98a5'; g.fillText('wind FROM · radius = kt', 4, H - 4);
+  }
+
   // ---------------------------------------------------------------- main
   async function render() {
     const date = ($('tx-date') && $('tx-date').value) || '2026-07-04';
@@ -363,6 +450,7 @@
       <canvas id="bz-current" width="660" height="150"></canvas>
       <p class="tx-cardnote" id="bz-current-note"></p>` : '';
     body.innerHTML = `${headerHTML(d)}
+      ${synopticHTML(d)}
       <div class="bz-section-t">Racing-area wind — HRRR field <span class="tx-hint">(central Mass Bay; the sea-breeze evidence the replay shows)</span></div>
       <div class="bz-two"><div><div class="bz-lbl">Direction by hour — backs to onshore then veers right</div><canvas id="bz-race-dir" width="330" height="175"></canvas></div>
         <div><div class="bz-lbl">Speed by hour — mean &amp; max cell (convergence band)</div><canvas id="bz-race-spd" width="330" height="175"></canvas></div></div>
@@ -378,6 +466,7 @@
         <div><div class="bz-lbl">Wind speed by hour</div><canvas id="bz-obs-speed" width="330" height="170"></canvas></div></div>
       <p class="tx-note">Method: Jean-Yves Bernot, <i>Météo locale et stratégie</i> (theory of quadrants; Wisdorff force grid). Validated against the day's HRRR field over the racing area + real Logan (KBOS), Beverly (KBVY), NDBC 44013 &amp; NERACOOS A01 observations. See <a href="./tactics-methodology.html">How it works</a>.</p>`;
     // draw
+    drawSynVectors($('bz-synvec'), d);
     drawRaceField(d);
     drawCrossSection($('bz-xsec'), d);
     if ($('bz-polygon')) drawBreezePolygon($('bz-polygon'), d);

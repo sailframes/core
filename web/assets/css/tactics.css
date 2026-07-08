@@ -200,6 +200,13 @@ body { padding-bottom: 48px; }
 .bz-lbl { font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; color:var(--text-secondary,#8b98a5); margin-bottom:5px; }
 .bz-p { font-size:.9rem; color:var(--text-primary,#dfe6ee); line-height:1.45; margin-bottom:8px; }
 .bz-note { font-size:.82rem; color:var(--text-secondary,#9aa7b4); }
+.bz-syn { align-items:start; }
+.bz-syn canvas { background:#0f1319; border:1px solid #2a3038; border-radius:8px; }
+.bz-syn-tbl { display:flex; flex-direction:column; gap:8px; }
+.bz-syn-row { background:#1c2128; border:1px solid #2a3038; border-radius:8px; padding:8px 10px; }
+.bz-syn-a { font-size:.68rem; color:var(--text-secondary,#8b98a5); text-transform:uppercase; letter-spacing:.03em; margin-bottom:3px; }
+.bz-syn-b { font-size:.9rem; color:var(--text-primary,#dfe6ee); line-height:1.4; }
+.bz-syn-caveat { border-left:3px solid #e8b13a; padding-left:8px; }
 .bz-valtext { font-size:.88rem; color:var(--text-primary,#dfe6ee); line-height:1.45; margin-bottom:8px; }
 .bz-wis { width:100%; border-collapse:collapse; font-size:.8rem; }
 .bz-wis th { text-align:left; color:var(--text-secondary,#8b98a5); font-weight:600; border-bottom:1px solid #2a3038; padding:3px 4px; }
