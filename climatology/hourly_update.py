@@ -56,6 +56,21 @@ def cycle_dt(date, cyc):
     return dt.datetime(int(date[:4]), int(date[4:6]), int(date[6:8]), int(cyc[:2]), tzinfo=UTC)
 
 
+def latest_rtma(max_back=6):
+    """Newest available RTMA analysis cycle (walk back from now, ~1 h latency)."""
+    from backfill_rtma import BUCKET as RB, KEYFMT as RK, _s3 as rs3
+    now = dt.datetime.now(UTC)
+    for back in range(max_back):
+        t = now - dt.timedelta(hours=back)
+        d, hh = t.strftime("%Y%m%d"), t.strftime("%H")
+        try:
+            rs3.head_object(Bucket=RB, Key=RK.format(date=d, hh=hh) + ".idx")
+            return d, hh
+        except Exception:
+            continue
+    return None, None
+
+
 def build_forecast_table(date, cyc, window):
     """F00 (analysis) + F01..F18 (forecast) -> fields Table."""
     j0, j1, i0, i1 = window
@@ -192,7 +207,31 @@ def main():
                    ExtraArgs={"ContentType": "application/json", "CacheControl": "max-age=120"})
     log(f"today/briefing.json: {brief}")
 
+    # live RTMA truth overlay — newest available obs-anchored 2.5 km analysis over
+    # the bbox (model-confirmation layer for the today's-forecast map). Non-fatal.
+    rtma_ok = False
+    try:
+        from backfill_rtma import read_cycle
+        rd, rh = latest_rtma()
+        if rd:
+            rt = read_cycle(rd, rh)
+            if rt is not None and rt.num_rows:
+                rmeta = {"cycle": f"{rd}T{rh}Z", "n": rt.num_rows,
+                         "mean_kt": round(float(np.mean(rt.column("wspd_kt").to_numpy())), 1)}
+                rpath = os.path.join(WORK, "rtma.parquet")
+                pq.write_table(rt, rpath, compression="zstd")
+                s3.upload_file(rpath, BUCKET, f"{PFX}/today/rtma.parquet",
+                               ExtraArgs={"ContentType": "application/octet-stream", "CacheControl": "max-age=120"})
+                s3.put_object(Bucket=BUCKET, Key=f"{PFX}/today/rtma.json",
+                              Body=json.dumps(rmeta).encode(), ContentType="application/json", CacheControl="max-age=120")
+                rtma_ok = True
+                log(f"today/rtma.parquet: {rmeta}")
+    except Exception as e:
+        log(f"WARN RTMA overlay failed ({e}); forecast feed unaffected")
+
     paths = [f"/{PFX}/today/latest.parquet", f"/{PFX}/today/briefing.json"]
+    if rtma_ok:
+        paths += [f"/{PFX}/today/rtma.parquet", f"/{PFX}/today/rtma.json"]
     r = cf.create_invalidation(DistributionId=DIST_ID,
                                InvalidationBatch={"Paths": {"Quantity": len(paths), "Items": paths},
                                                   "CallerReference": f"climo-hourly-{base:%Y%m%d%H}"})

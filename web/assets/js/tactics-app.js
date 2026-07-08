@@ -74,6 +74,10 @@ function drawArrow(px, py, u, v) {
 let OBS_STATIONS = null;   // [{id,name,lat,lon,type}]
 let OBS = null;            // {id: [{t(ms), wspd, wdir}]}
 let obsOn = true;
+// ---- RTMA truth overlay (2.5 km obs-anchored analysis; today's forecast only) ----
+let RTMA = null;           // [{lat,lon,u10,v10}] single analysis snapshot
+let RTMA_META = null;      // {cycle, n, mean_kt}
+let rtmaOn = false;
 
 function drawObsBarb(px, py, wspd, wdir, isBuoy) {
   const kt = wspd * KT;
@@ -115,6 +119,50 @@ function drawObsLayer(fr) {
     const pt = map.latLngToContainerPoint([st.lat, st.lon]);
     drawObsBarb(pt.x, pt.y, best.wspd, best.wdir, st.type === 'buoy');
   }
+}
+
+// RTMA barb: charcoal, square-tailed — a gridded "analysis truth" distinct from
+// the colored HRRR model arrows and the white-ringed point-obs barbs.
+function drawRtmaBarb(px, py, u, v) {
+  const kt = Math.hypot(u, v) * KT;
+  if (kt < 0.4) return;
+  const ang = Math.atan2(-v, u);
+  const len = Math.min(24, 6 + kt * 1.0);
+  const ex = px + Math.cos(ang) * len, ey = py + Math.sin(ang) * len;
+  ctx.strokeStyle = 'rgba(20,24,30,.9)'; ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+  const h = 5;
+  ctx.beginPath(); ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - h * Math.cos(ang - .4), ey - h * Math.sin(ang - .4));
+  ctx.lineTo(ex - h * Math.cos(ang + .4), ey - h * Math.sin(ang + .4));
+  ctx.closePath(); ctx.fillStyle = 'rgba(20,24,30,.9)'; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(px - 1.6, py - 1.6, 3.2, 3.2);
+  ctx.strokeStyle = 'rgba(20,24,30,.9)'; ctx.lineWidth = 1; ctx.strokeRect(px - 1.6, py - 1.6, 3.2, 3.2);
+}
+
+function drawRtmaLayer() {
+  if (!RTMA) return;
+  const r = $('tx-map').getBoundingClientRect();
+  const step = map.getZoom() >= 10 ? 2 : 3;   // 2.5 km grid is dense — subsample
+  for (let i = 0; i < RTMA.length; i += step) {
+    const p = RTMA[i];
+    const pt = map.latLngToContainerPoint([p.lat, p.lon]);
+    if (pt.x < -20 || pt.y < -20 || pt.x > r.width + 20 || pt.y > r.height + 20) continue;
+    drawRtmaBarb(pt.x, pt.y, p.u10, p.v10);
+  }
+}
+
+async function loadRtma() {
+  if (RTMA) return;
+  try {
+    const m = await fetch(`${BASE}/today/rtma.json`, { cache: 'no-store' });
+    RTMA_META = m.ok ? await m.json() : null;
+  } catch { RTMA_META = null; }
+  const name = await ensureParquet(`${BASE}/today/rtma.parquet`);
+  const rows = (await dbConn.query(
+    `SELECT lat, lon, u10, v10 FROM read_parquet('${name}')`)).toArray().map(x => x.toJSON());
+  RTMA = rows;
 }
 
 // ---- model-vs-obs validation (the "confidence" metric) ----
@@ -209,6 +257,7 @@ function render() {
       drawArrow(pt.x, pt.y, u, v);
     }
   }
+  if (rtmaOn && RTMA) drawRtmaLayer();
   if (obsOn) drawObsLayer(fr);
   renderValidation(fr);
   const d = new Date(fr.t);
@@ -225,7 +274,8 @@ function buildLegend() {
   $('tx-legend').innerHTML = '<div style="margin-bottom:3px;opacity:.8">10 m wind (HRRR)</div>' +
     rows.map(([s, lab]) => `<div class="row"><span class="sw" style="background:${spdColor(s)}"></span>${lab}</div>`).join('') +
     '<div class="row" style="margin-top:5px;opacity:.85">◎ obs — □ buoy · ○ airport</div>' +
-    '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>';
+    '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>' +
+    (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span style="color:#141820">➤</span> RTMA 2.5&nbsp;km analysis${RTMA_META ? ` · ${RTMA_META.cycle}` : ''}</div>` : '');
 }
 
 // ---- scrubber / play ----
@@ -333,6 +383,8 @@ async function loadFramesFromUrl(url, note) {
 
 async function loadDay(dateStr) {
   const [y, m, d] = dateStr.split('-');
+  $('tx-rtma-toggle')?.setAttribute('hidden', '');   // RTMA truth is a live snapshot, not archived per day
+  RTMA = null;
   await loadFramesFromUrl(`${BASE}/fields/year=${y}/month=${m}/${d}.parquet`);   // frames first
   await loadObsForDay(dateStr).catch(() => { });                                 // then obs (same connection)
 }
@@ -342,6 +394,13 @@ $('tx-obs')?.addEventListener('change', async e => {
   obsOn = e.target.checked;
   if (obsOn) { try { await loadObsForDay($('tx-date').value); } catch { } } else OBS = null;
   render();
+});
+
+// RTMA toggle: load the live analysis snapshot on demand, then repaint.
+$('tx-rtma')?.addEventListener('change', async e => {
+  rtmaOn = e.target.checked;
+  if (rtmaOn) { try { await loadRtma(); } catch { rtmaOn = false; e.target.checked = false; } }
+  buildLegend(); render();
 });
 
 $('tx-date').addEventListener('change', async e => {
@@ -668,9 +727,11 @@ function renderBriefing() {
 
 $('tx-brief-fcst')?.addEventListener('click', async () => {
   switchView('replay');
+  $('tx-rtma-toggle')?.removeAttribute('hidden');   // RTMA truth is live only for today
   try {
-    await loadFramesFromUrl(`${BASE}/today/latest.parquet`, "today's forecast F00–F18");
+    await loadFramesFromUrl(`${BASE}/today/latest.parquet`, "today's forecast F00–F18 · 15-min steps");
     await loadObsForDay((BRIEF && BRIEF.date) || new Date().toISOString().slice(0, 10)).catch(() => {});
+    if (rtmaOn) await loadRtma().catch(() => {});
     curFrame = 0; $('tx-scrub').value = 0; setTimeout(() => { map.invalidateSize(); render(); }, 30);
   } catch (e) { setStatus('no forecast feed yet'); }
 });
