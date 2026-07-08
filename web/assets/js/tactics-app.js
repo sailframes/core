@@ -81,28 +81,62 @@ function drawSeaBreezeZone(fr, r) {
   ctx.fill();
   return m;
 }
-function drawSeaBreezeFront(m, r) {
-  // front = seaward edge of the onshore zone: an onshore OPEN-WATER cell whose
-  // neighbour toward the sea (larger coast distance) is water but NOT onshore.
-  const { lats, lons, nx, ny, land_mask, coast_dist_nm } = GRID; if (!coast_dist_nm) return;
-  const [cw, ch] = cellPx();
-  ctx.strokeStyle = '#d81b1b'; ctx.lineWidth = 2.6; ctx.setLineDash([]); ctx.beginPath();
+// sea-breeze FRONT = the wind-CONVERGENCE line (∇·V strongly negative), where the
+// onshore breeze meets the offshore/synoptic air. We compute the divergence field,
+// smooth it, and contour convergence at a fixed threshold with marching squares.
+const SB_CONV_TH = 2.0e-4;   // /s — calibrated (front ≈ top 10% convergence)
+function convergenceField(fr) {
+  const { nx, ny, land_mask, cell_km } = GRID;
+  const dm = (cell_km || 3) * 1000, N = nx * ny;
+  const div = new Float32Array(N).fill(NaN);
+  for (let row = 1; row < ny - 1; row++) for (let col = 1; col < nx - 1; col++) {
+    const k = row * nx + col; if (land_mask[k]) continue;
+    const uE = fr.u[k + 1], uW = fr.u[k - 1], vN = fr.v[k + nx], vS = fr.v[k - nx];   // row+1 = north
+    if (!isFinite(uE) || !isFinite(uW) || !isFinite(vN) || !isFinite(vS)) continue;
+    div[k] = (uE - uW) / (2 * dm) + (vN - vS) / (2 * dm);
+  }
+  // box-smooth (3×3, valid neighbours) then convergence = -div
+  const conv = new Float32Array(N).fill(NaN);
+  for (let row = 1; row < ny - 1; row++) for (let col = 1; col < nx - 1; col++) {
+    const k = row * nx + col; if (!isFinite(div[k])) continue;
+    let s = 0, n = 0;
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) { const kk = k + dr * nx + dc; if (isFinite(div[kk])) { s += div[kk]; n++; } }
+    conv[k] = -s / n;
+  }
+  return conv;
+}
+function drawSeaBreezeFront(fr, r) {
+  const { lats, lons, nx, ny } = GRID;
+  const conv = convergenceField(fr); if (!conv) return;
+  const TH = SB_CONV_TH;
+  const val = k => conv[k];
+  const scr = (r1, c1, r2, c2) => {   // threshold crossing on the edge (grid pts) -> screen
+    const va = val(r1 * nx + c1), vb = val(r2 * nx + c2), t = (TH - va) / (vb - va);
+    const a = map.latLngToContainerPoint([lats[r1 * nx + c1], lons[r1 * nx + c1]]);
+    const b = map.latLngToContainerPoint([lats[r2 * nx + c2], lons[r2 * nx + c2]]);
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  };
+  ctx.strokeStyle = '#d81b1b'; ctx.lineWidth = 3; ctx.setLineDash([]); ctx.beginPath();
   let any = false;
-  const nb = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-  for (let row = 0; row < ny; row++) for (let col = 0; col < nx; col++) {
-    const k = row * nx + col; if (m[k] !== 2) continue;                 // onshore OPEN WATER only
-    for (const [dc, dr] of nb) {
-      const c2 = col + dc, r2 = row + dr; if (c2 < 0 || c2 >= nx || r2 < 0 || r2 >= ny) continue;
-      const k2 = r2 * nx + c2;
-      if (land_mask[k2] || m[k2]) continue;                            // neighbour open water, not onshore
-      if (coast_dist_nm[k2] <= coast_dist_nm[k] + 0.2) continue;        // …and toward the sea
-      const p1 = map.latLngToContainerPoint([lats[k], lons[k]]);
-      const p2 = map.latLngToContainerPoint([lats[k2], lons[k2]]);
-      const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
-      if (mx < -20 || my < -20 || mx > r.width + 20 || my > r.height + 20) continue;
-      const ex = -(p2.y - p1.y), ey = (p2.x - p1.x); const el = Math.hypot(ex, ey) || 1;
-      const hx = ex / el * (Math.abs(dc) ? ch : cw) / 2, hy = ey / el * (Math.abs(dc) ? ch : cw) / 2;
-      ctx.moveTo(mx - hx, my - hy); ctx.lineTo(mx + hx, my + hy); any = true;
+  const seg = (p, q) => { ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); any = true; };
+  for (let row = 0; row < ny - 1; row++) for (let col = 0; col < nx - 1; col++) {
+    const v0 = val(row * nx + col), v1 = val(row * nx + col + 1), v2 = val((row + 1) * nx + col + 1), v3 = val((row + 1) * nx + col);
+    if (!(isFinite(v0) && isFinite(v1) && isFinite(v2) && isFinite(v3))) continue;
+    let idx = 0; if (v0 > TH) idx |= 1; if (v1 > TH) idx |= 2; if (v2 > TH) idx |= 4; if (v3 > TH) idx |= 8;
+    if (idx === 0 || idx === 15) continue;
+    const eB = () => scr(row, col, row, col + 1);        // bottom edge (v0-v1)
+    const eR = () => scr(row, col + 1, row + 1, col + 1); // right (v1-v2)
+    const eT = () => scr(row + 1, col + 1, row + 1, col); // top (v2-v3)
+    const eL = () => scr(row + 1, col, row, col);         // left (v3-v0)
+    switch (idx) {
+      case 1: case 14: seg(eL(), eB()); break;
+      case 2: case 13: seg(eB(), eR()); break;
+      case 3: case 12: seg(eL(), eR()); break;
+      case 4: case 11: seg(eR(), eT()); break;
+      case 6: case 9: seg(eB(), eT()); break;
+      case 7: case 8: seg(eL(), eT()); break;
+      case 5: seg(eL(), eB()); seg(eR(), eT()); break;
+      case 10: seg(eB(), eR()); seg(eL(), eT()); break;
     }
   }
   if (any) ctx.stroke();
@@ -446,7 +480,7 @@ function render() {
     }
   }
   ctx.globalAlpha = 1;
-  if (sbOn && sbMask) drawSeaBreezeFront(sbMask, r);   // front over the arrows
+  if (sbOn) drawSeaBreezeFront(fr, r);   // convergence-line front, over the arrows
   const rt = rtmaLive ? drawRtmaLayer(fr) : null;
   if (obsOn) drawObsLayer(fr);
   renderValidation(fr);

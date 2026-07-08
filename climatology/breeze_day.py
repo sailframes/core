@@ -78,15 +78,24 @@ def hourly_pick(series):
 
 
 # --------------------------- HRRR field helpers -----------------------------
-def read_field_hourly(ymd, group, cycles):
-    """{cyc: 1d array over window} for a group across given cycles (analysis F00)."""
-    j0, j1, i0, i1 = hg.bbox_window(hg.store_anl(ymd, cycles[0]))
-    out = {}
-    for c in cycles:
+def read_field_hourly(ymd, group, cycles, window=None):
+    """{cyc: 1d array over window} for a group across given cycles (analysis F00),
+    read in parallel. Pass `window` to skip the per-call bbox lookup."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not cycles:
+        return {}, window
+    j0, j1, i0, i1 = window or hg.bbox_window(hg.store_anl(ymd, cycles[0]))
+
+    def _one(c):
         try:
-            out[c] = hg.read_window(hg.store_anl(ymd, c), group, j0, j1, i0, i1).ravel()
+            return c, hg.read_window(hg.store_anl(ymd, c), group, j0, j1, i0, i1).ravel()
         except Exception:
-            pass
+            return c, None
+    out = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for c, arr in ex.map(_one, cycles):
+            if arr is not None:
+                out[c] = arr
     return out, (j0, j1, i0, i1)
 
 
@@ -194,23 +203,26 @@ def main():
     field_established = field_onset is not None and rf_morn_off
     field_peak_kt = max((race_field[h]["max_kt"] for h in race_field if 11 <= h <= 17), default=0.0)
 
-    # ---- HRRR extra fields (hourly) -----------------------------------------
+    # ---- HRRR extra fields — read ONLY the cycles each criterion needs -------
     cyc = cycles_for(ymd)
-    cape_h, win = read_field_hourly(ymd, "surface/CAPE", cyc)
-    vis_h, _ = read_field_hourly(ymd, "surface/VIS", cyc)
-    u925_h, _ = read_field_hourly(ymd, "925mb/UGRD", cyc)
-    v925_h, _ = read_field_hourly(ymd, "925mb/VGRD", cyc)
-    t925_h, _ = read_field_hourly(ymd, "925mb/TMP", cyc)
-    t850_h, _ = read_field_hourly(ymd, "850mb/TMP", cyc)
-    u850_h, _ = read_field_hourly(ymd, "850mb/UGRD", cyc)
-    v850_h, _ = read_field_hourly(ymd, "850mb/VGRD", cyc)
-    j0, j1, i0, i1 = win
-    hgt = hg.read_window(hg.store_anl(ymd, cyc[len(cyc) // 2]), "surface/HGT", j0, j1, i0, i1).ravel()
-    landflat = land.ravel().astype(bool)
-    waterflat = ~landflat
 
     def cyc_lt_hour(c):
         return _lt(dt.datetime(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]), int(c[:2]), tzinfo=UTC)).hour
+
+    win = hg.bbox_window(hg.store_anl(ymd, cyc[0]))
+    j0, j1, i0, i1 = win
+    midday_cyc = [c for c in cyc if 12 <= cyc_lt_hour(c) <= 16]
+    morn_cyc = [c for c in cyc if 8 <= cyc_lt_hour(c) <= 11]
+    day_cyc = [c for c in cyc if 6 <= cyc_lt_hour(c) <= 20]      # VIS horizon-clearing timeline
+    cape_h, _ = read_field_hourly(ymd, "surface/CAPE", midday_cyc, win)
+    vis_h, _ = read_field_hourly(ymd, "surface/VIS", day_cyc, win)
+    u925_h, _ = read_field_hourly(ymd, "925mb/UGRD", morn_cyc, win)
+    v925_h, _ = read_field_hourly(ymd, "925mb/VGRD", morn_cyc, win)
+    u850_h, _ = read_field_hourly(ymd, "850mb/UGRD", morn_cyc, win)
+    v850_h, _ = read_field_hourly(ymd, "850mb/VGRD", morn_cyc, win)
+    hgt = hg.read_window(hg.store_anl(ymd, cyc[len(cyc) // 2]), "surface/HGT", j0, j1, i0, i1).ravel()
+    landflat = land.ravel().astype(bool)
+    waterflat = ~landflat
 
     def land_mean(d, c):
         return float(np.nanmean(d[c][landflat])) if c in d else None
@@ -219,9 +231,7 @@ def main():
         return float(np.nanmean(d[c][waterflat])) if c in d else None
 
     # midday (12-16 LT) land CAPE -> instability; morning 925 wind -> return current
-    midday_cyc = [c for c in cyc if 12 <= cyc_lt_hour(c) <= 16]
     cape_mid = np.nanmean([land_mean(cape_h, c) for c in midday_cyc if land_mean(cape_h, c) is not None]) if midday_cyc else None
-    morn_cyc = [c for c in cyc if 8 <= cyc_lt_hour(c) <= 11]
     # 925mb morning wind (return-current level ~750 m) vector mean over the window
     w925 = []
     for c in morn_cyc:
