@@ -94,16 +94,19 @@ def cycles_for(ymd):
     return sorted(hg.list_anl_cycles(ymd))
 
 
-def _summary(q, dt_c, syn_kt, inshore, offshore, peak):
+def _summary(q, dt_c, syn_kt, genuine, ambiguous, peak):
     quad = q["quadrant"] if q else "?"
     dtf = "" if dt_c is None else "ΔT %.0f°C" % dt_c
     synf = "" if syn_kt is None else "850 hPa synoptic %.0f kt" % syn_kt
-    if inshore:
-        return "A %s day: the sea breeze filled at the coast (peak onshore %.0f kt), matching the quadrant expectation." % (quad, peak)
+    if genuine:
+        extra = " A Q2 'combat douteux' that the breeze won." if quad == "Q2" else ""
+        return "A %s day: a thermal sea breeze filled at the coast (peak onshore %.0f kt).%s" % (quad, peak, extra)
+    if ambiguous:
+        return ("A %s day: the afternoon wind was onshore, but it was already onshore in the morning — this is the sea-origin synoptic, not a distinct thermal breeze (Bernot's Q3/Q4 'breeze indistinct' case)." % quad)
     if quad in ("Q1", "Q3") and syn_kt is not None and syn_kt >= 16:
         return ("A %s day that looked favourable (%s) yet did NOT deliver: the %s sat near the ~18 kt ceiling and held all afternoon, so the sea breeze never established (peak onshore only %.0f kt). Quadrant favourability is overridden when the synoptic is near the ceiling." % (quad, dtf, synf, peak))
-    if quad in ("Q2", "Q4"):
-        return ("A %s day: %s The sea breeze did not establish (peak onshore %.0f kt) — consistent with the quadrant." % (quad, (q["behaviour"] if q else ""), peak))
+    if quad == "Q4":
+        return ("A %s day (worst case): the sea breeze did not lift (peak onshore %.0f kt) — as expected." % (quad, peak))
     return ("A %s day: despite %s, the sea breeze did not establish — the synoptic held (peak onshore %.0f kt)." % (quad, dtf, peak))
 
 
@@ -223,8 +226,27 @@ def main():
 
     onset_inshore = {s: onset_at(s) for s in INSHORE}
     onset_offshore = {s: onset_at(s) for s in OFFSHORE}
-    any_inshore_fill = any(o["onset_lt"] is not None for o in onset_inshore.values())
-    any_offshore_fill = any(o["onset_lt"] is not None for o in onset_offshore.values())
+
+    def morning_onshore_frac(stn):
+        ms = [d for (h, d, s, _) in obs[stn] if 6 <= h < 10 and d is not None]
+        if not ms:
+            return None
+        return sum(1 for d in ms if abs(B.ang_diff(d, cf)) <= half) / len(ms)
+
+    def is_genuine(stn, onset):
+        """A real (thermal) sea breeze = an afternoon onshore onset that was NOT
+        already onshore in the morning. If the morning was onshore, the afternoon
+        onshore wind is the synoptic (Bernot's Q3/Q4 'breeze indistinct')."""
+        if onset["onset_lt"] is None:
+            return False
+        mo = morning_onshore_frac(stn)
+        return mo is None or mo < 0.5
+
+    genuine_inshore = any(is_genuine(s, onset_inshore[s]) for s in INSHORE)
+    ambiguous_inshore = any(onset_inshore[s]["onset_lt"] is not None and not is_genuine(s, onset_inshore[s]) for s in INSHORE)
+    genuine_offshore = any(is_genuine(s, onset_offshore[s]) for s in OFFSHORE)
+    any_inshore_fill = genuine_inshore
+    any_offshore_fill = genuine_offshore
 
     # afternoon peak onshore-component speed (the "breeze" strength, not synoptic)
     def peak_onshore_kt(stn):
@@ -255,10 +277,12 @@ def main():
                         (gspd or 0))),
         },
         "validation": {
-            "verdict": "yes" if any_inshore_fill else "no",
-            "detail": ("Coastal stations DID swing onshore & sustain ≥6 kt"
-                       if any_inshore_fill else
-                       "Coastal stations (Logan/Beverly) never sustained an onshore breeze — stayed offshore/synoptic all afternoon."),
+            "verdict": "yes" if genuine_inshore else ("info" if ambiguous_inshore else "no"),
+            "detail": ("Coastal stations swung from offshore to a sustained onshore breeze — a thermal sea breeze."
+                       if genuine_inshore else
+                       ("Afternoon wind was onshore, but it was already onshore in the morning — this is the synoptic, not a distinct thermal breeze."
+                        if ambiguous_inshore else
+                        "Coastal stations (Logan/Beverly) never established a thermal onshore breeze — stayed offshore/synoptic all afternoon.")),
         },
     })
 
@@ -266,22 +290,27 @@ def main():
     q = B.quadrant(SYN_DIR, cf)
     div = B.divergence_sign(SYN_DIR, cf)
     # observed behaviour classification for validation
-    if any_inshore_fill:
-        obs_behav = "breeze filled at the coast"
-    elif any_offshore_fill:
-        obs_behav = "only offshore attempts — no coastal fill"
+    if genuine_inshore:
+        obs_behav = "a thermal sea breeze filled at the coast"
+    elif ambiguous_inshore:
+        obs_behav = "afternoon wind was onshore but it is the synoptic (already onshore in the morning) — no distinct thermal breeze"
+    elif genuine_offshore:
+        obs_behav = "only weak offshore attempts — no coastal fill"
     else:
-        obs_behav = "no onshore fill anywhere — synoptic held"
+        obs_behav = "no thermal onshore fill anywhere — the synoptic held"
     q_expect = {"Q1": "early coastal fill", "Q2": "offshore-first attempts, may fail (combat douteux)",
                 "Q3": "there-and-back, seems to reinforce synoptic", "Q4": "no lift"}.get(q["quadrant"] if q else None, "?")
-    q_ok = None
+    q_ok, q_verdict = None, "n/a"
     if q:
-        if q["quadrant"] == "Q1":
-            q_ok = any_inshore_fill
-        elif q["quadrant"] in ("Q2", "Q4"):
-            q_ok = (not any_inshore_fill)     # confused/no-lift consistent with no clean coastal fill
-        else:
-            q_ok = True
+        Q = q["quadrant"]
+        if Q == "Q1":
+            q_ok = genuine_inshore; q_verdict = "yes" if q_ok else "no"
+        elif Q == "Q2":
+            q_ok = True; q_verdict = "info"          # combat douteux — either outcome is consistent
+        elif Q == "Q3":
+            q_ok = True; q_verdict = "info"
+        else:  # Q4 — expect no thermal lift
+            q_ok = (not genuine_inshore); q_verdict = "yes" if q_ok else "no"
     steps.append({
         "n": 2, "title": "Quadrant (synoptic vs coastline)",
         "rule": "Quadrant is defined relative to the COAST, not compass. Q1 best · Q2 combat douteux · Q3 round-trip · Q4 worst.",
@@ -296,7 +325,7 @@ def main():
             "expected": q_expect,
         },
         "validation": {
-            "verdict": "yes" if q_ok else ("no" if q_ok is False else "n/a"),
+            "verdict": q_verdict,
             "detail": "Observed: %s." % obs_behav,
         },
     })
@@ -434,8 +463,8 @@ def main():
         "steps": steps,
         "obs_hourly": {s: [[round(h, 2), d, None if sp is None else round(sp, 1)] for (h, d, sp, _) in obs_h[s]] for s in STATIONS},
         "stations_meta": STATIONS,
-        "established": bool(any_inshore_fill),
-        "summary_verdict": _summary(q, dt_c, SYN_KT, any_inshore_fill, any_offshore_fill, peak_breeze),
+        "established": bool(genuine_inshore),
+        "summary_verdict": _summary(q, dt_c, SYN_KT, genuine_inshore, ambiguous_inshore, peak_breeze),
     }
 
     def clean(o):
