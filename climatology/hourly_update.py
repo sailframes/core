@@ -56,19 +56,25 @@ def cycle_dt(date, cyc):
     return dt.datetime(int(date[:4]), int(date[4:6]), int(date[6:8]), int(cyc[:2]), tzinfo=UTC)
 
 
-def latest_rtma(max_back=6):
-    """Newest available RTMA analysis cycle (walk back from now, ~1 h latency)."""
+def recent_rtma_cycles(max_cycles=6, max_back=12):
+    """Last `max_cycles` available RTMA analysis cycles (hourly, ~1 h latency),
+    newest first. RTMA is an analysis valid AT each cycle time, so a rolling
+    window lets the overlay move with the replay scrubber instead of freezing on
+    one snapshot. Returns [(YYYYMMDD, HH), ...]."""
     from backfill_rtma import BUCKET as RB, KEYFMT as RK, _s3 as rs3
     now = dt.datetime.now(UTC)
+    out = []
     for back in range(max_back):
         t = now - dt.timedelta(hours=back)
         d, hh = t.strftime("%Y%m%d"), t.strftime("%H")
         try:
             rs3.head_object(Bucket=RB, Key=RK.format(date=d, hh=hh) + ".idx")
-            return d, hh
+            out.append((d, hh))
+            if len(out) >= max_cycles:
+                break
         except Exception:
             continue
-    return None, None
+    return out
 
 
 def build_forecast_table(date, cyc, window):
@@ -207,25 +213,37 @@ def main():
                    ExtraArgs={"ContentType": "application/json", "CacheControl": "max-age=120"})
     log(f"today/briefing.json: {brief}")
 
-    # live RTMA truth overlay — newest available obs-anchored 2.5 km analysis over
-    # the bbox (model-confirmation layer for the today's-forecast map). Non-fatal.
+    # live RTMA truth overlay — a rolling window of the last few obs-anchored 2.5 km
+    # analyses over the bbox, each tagged with its valid time so the overlay MOVES
+    # with the scrubber (RTMA is an analysis valid at one instant, not a forecast).
+    # Model-confirmation layer for the today's-forecast map. Non-fatal.
     rtma_ok = False
     try:
         from backfill_rtma import read_cycle
-        rd, rh = latest_rtma()
-        if rd:
+        cycles = recent_rtma_cycles()
+        parts = []
+        for rd, rh in cycles:
             rt = read_cycle(rd, rh)
-            if rt is not None and rt.num_rows:
-                rmeta = {"cycle": f"{rd}T{rh}Z", "n": rt.num_rows,
-                         "mean_kt": round(float(np.mean(rt.column("wspd_kt").to_numpy())), 1)}
-                rpath = os.path.join(WORK, "rtma.parquet")
-                pq.write_table(rt, rpath, compression="zstd")
-                s3.upload_file(rpath, BUCKET, f"{PFX}/today/rtma.parquet",
-                               ExtraArgs={"ContentType": "application/octet-stream", "CacheControl": "max-age=120"})
-                s3.put_object(Bucket=BUCKET, Key=f"{PFX}/today/rtma.json",
-                              Body=json.dumps(rmeta).encode(), ContentType="application/json", CacheControl="max-age=120")
-                rtma_ok = True
-                log(f"today/rtma.parquet: {rmeta}")
+            if rt is None or not rt.num_rows:
+                continue
+            vt = dt.datetime(int(rd[:4]), int(rd[4:6]), int(rd[6:8]), int(rh), tzinfo=UTC)
+            rt = rt.append_column("valid_time_utc", pa.array(
+                np.full(rt.num_rows, np.datetime64(vt.replace(tzinfo=None), "s")),
+                type=pa.timestamp("s", tz="UTC")))
+            parts.append(rt)
+        if parts:
+            allrt = pa.concat_tables(parts)
+            cyc_iso = [f"{d}T{h}Z" for d, h in cycles][:len(parts)]
+            rmeta = {"cycles": cyc_iso, "n_cycles": len(parts), "n": allrt.num_rows,
+                     "mean_kt": round(float(np.mean(allrt.column("wspd_kt").to_numpy())), 1)}
+            rpath = os.path.join(WORK, "rtma.parquet")
+            pq.write_table(allrt, rpath, compression="zstd")
+            s3.upload_file(rpath, BUCKET, f"{PFX}/today/rtma.parquet",
+                           ExtraArgs={"ContentType": "application/octet-stream", "CacheControl": "max-age=120"})
+            s3.put_object(Bucket=BUCKET, Key=f"{PFX}/today/rtma.json",
+                          Body=json.dumps(rmeta).encode(), ContentType="application/json", CacheControl="max-age=120")
+            rtma_ok = True
+            log(f"today/rtma.parquet: {rmeta}")
     except Exception as e:
         log(f"WARN RTMA overlay failed ({e}); forecast feed unaffected")
 

@@ -141,16 +141,23 @@ function drawRtmaBarb(px, py, u, v) {
   ctx.strokeStyle = 'rgba(20,24,30,.9)'; ctx.lineWidth = 1; ctx.strokeRect(px - 1.6, py - 1.6, 3.2, 3.2);
 }
 
-function drawRtmaLayer() {
-  if (!RTMA) return;
+function drawRtmaLayer(fr) {
+  if (!RTMA || !RTMA.length || !fr) return null;
+  // RTMA is an analysis valid at each cycle time — show the cycle nearest this
+  // frame (within 45 min), so the overlay moves with the scrubber.
+  const frameMs = new Date(fr.t).getTime();
+  let cyc = null;
+  for (const c of RTMA) { const dd = Math.abs(c.t - frameMs); if (dd <= 45 * 60000 && (!cyc || dd < Math.abs(cyc.t - frameMs))) cyc = c; }
+  if (!cyc) return null;
   const r = $('tx-map').getBoundingClientRect();
   const step = map.getZoom() >= 10 ? 2 : 3;   // 2.5 km grid is dense — subsample
-  for (let i = 0; i < RTMA.length; i += step) {
-    const p = RTMA[i];
+  for (let i = 0; i < cyc.pts.length; i += step) {
+    const p = cyc.pts[i];
     const pt = map.latLngToContainerPoint([p.lat, p.lon]);
     if (pt.x < -20 || pt.y < -20 || pt.x > r.width + 20 || pt.y > r.height + 20) continue;
     drawRtmaBarb(pt.x, pt.y, p.u10, p.v10);
   }
+  return cyc.t;   // matched cycle time (for the clock/legend)
 }
 
 async function loadRtma() {
@@ -161,8 +168,15 @@ async function loadRtma() {
   } catch { RTMA_META = null; }
   const name = await ensureParquet(`${BASE}/today/rtma.parquet`);
   const rows = (await dbConn.query(
-    `SELECT lat, lon, u10, v10 FROM read_parquet('${name}')`)).toArray().map(x => x.toJSON());
-  RTMA = rows;
+    `SELECT lat, lon, u10, v10, CAST(epoch_ms(valid_time_utc) AS DOUBLE) AS t
+       FROM read_parquet('${name}')`)).toArray().map(x => x.toJSON());
+  const byT = new Map();
+  for (const row of rows) {
+    let c = byT.get(row.t);
+    if (!c) { c = { t: row.t, pts: [] }; byT.set(row.t, c); }
+    c.pts.push({ lat: row.lat, lon: row.lon, u10: row.u10, v10: row.v10 });
+  }
+  RTMA = [...byT.values()].sort((a, b) => a.t - b.t);   // cycles, oldest first
 }
 
 // ---- model-vs-obs validation (the "confidence" metric) ----
@@ -257,12 +271,17 @@ function render() {
       drawArrow(pt.x, pt.y, u, v);
     }
   }
-  if (rtmaOn && RTMA) drawRtmaLayer();
+  const rtmaT = (rtmaOn && RTMA && RTMA.length) ? drawRtmaLayer(fr) : null;
   if (obsOn) drawObsLayer(fr);
   renderValidation(fr);
   const d = new Date(fr.t);
   const lt = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
-  $('tx-clock').textContent = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
+  let clock = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
+  if (rtmaOn && RTMA && RTMA.length) {
+    clock += rtmaT ? `  · RTMA ${new Date(rtmaT).toISOString().slice(11, 16)}Z`
+                   : '  · RTMA n/a (analysis only up to now)';
+  }
+  $('tx-clock').textContent = clock;
 }
 
 map.on('move zoom viewreset resize', render);
@@ -275,7 +294,7 @@ function buildLegend() {
     rows.map(([s, lab]) => `<div class="row"><span class="sw" style="background:${spdColor(s)}"></span>${lab}</div>`).join('') +
     '<div class="row" style="margin-top:5px;opacity:.85">◎ obs — □ buoy · ○ airport</div>' +
     '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>' +
-    (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span style="color:#141820">➤</span> RTMA 2.5&nbsp;km analysis${RTMA_META ? ` · ${RTMA_META.cycle}` : ''}</div>` : '');
+    (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span style="color:#141820">➤</span> RTMA 2.5&nbsp;km analysis${RTMA_META && RTMA_META.n_cycles ? ` · ${RTMA_META.n_cycles} cycles` : ''}</div>` : '');
 }
 
 // ---- scrubber / play ----
