@@ -299,6 +299,51 @@
     return o;
   }
 
+  // ---- Tidal current (NOAA predictions) — strength through the day at the racing area
+  function drawCurrentReport(cur) {
+    const cv = $('bz-current');
+    if (!cv || !cur || !cur.stations || !cur.stations.length) return;
+    const CX = 42.41, CY = -70.75;                 // racing-area centre (central Mass Bay)
+    let st = null, best = 1e9;
+    for (const s of cur.stations) {
+      if (!s.series || !s.series.length) continue;
+      const dd = (s.lat - CX) ** 2 + (s.lon - CY) ** 2;
+      if (dd < best) { best = dd; st = s; }
+    }
+    if (!st) return;
+    const data = st.series.map(([h, v]) => ({ x: h, y: v }));
+    newChart(cv.getContext('2d'), {
+      type: 'line',
+      data: { datasets: [{
+        label: 'drift (kt): + flood / − ebb', data,
+        borderColor: '#0aa0a0', borderWidth: 2, tension: 0.35, pointRadius: 0,
+        fill: { target: 'origin', above: 'rgba(10,160,160,.14)', below: 'rgba(214,69,69,.12)' } }] },
+      options: {
+        animation: false,
+        plugins: { legend: { labels: { boxWidth: 10, font: { size: 10 } } } },
+        scales: {
+          x: { type: 'linear', min: 0, max: 24, title: { display: true, text: 'local hour' }, ticks: { stepSize: 3 } },
+          y: { title: { display: true, text: 'drift (kt)' },
+               grid: { color: c => (c.tick && c.tick.value === 0) ? 'rgba(0,0,0,.45)' : 'rgba(0,0,0,.06)' } } }
+      }
+    });
+    const peak = Math.max(...st.series.map(s => Math.abs(s[1])));
+    const peakH = st.series.reduce((a, s) => Math.abs(s[1]) > Math.abs(a[1]) ? s : a)[0];
+    const aft = st.series.filter(s => s[0] >= 13 && s[0] <= 18);
+    const aftPeak = aft.length ? Math.max(...aft.map(s => Math.abs(s[1]))) : 0;
+    const aftMean = aft.length ? aft.reduce((a, s) => a + s[1], 0) / aft.length : 0;
+    const state = aftMean > 0.15 ? `flooding (setting ~${Math.round(st.flood)}°)`
+                : aftMean < -0.15 ? `ebbing (setting ~${Math.round(st.ebb)}°)`
+                : 'near slack';
+    const hm = h => `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}`;
+    const note = $('bz-current-note');
+    if (note) note.innerHTML =
+      `Nearest racing-area station <b>${st.name}</b>: flood sets toward <b>${Math.round(st.flood)}°</b>, ` +
+      `ebb toward <b>${Math.round(st.ebb)}°</b>. Peak drift <b>${peak.toFixed(1)} kt</b> at ${hm(peakH)}. ` +
+      `Through the race window (13–18 LT) it runs mostly <b>${state}</b>, up to <b>${aftPeak.toFixed(1)} kt</b> — ` +
+      `a lateral set that skews the beat and the layline. Toggle <b>Current 🌊</b> on the replay map for the venue-wide field.`;
+  }
+
   // ---------------------------------------------------------------- main
   async function render() {
     const date = ($('tx-date') && $('tx-date').value) || '2026-07-04';
@@ -309,8 +354,14 @@
     let d, grid;
     try { [d, grid] = await Promise.all([j(`${BASE}/breeze/${date}.json`), j(`${BASE}/grid.json`)]); }
     catch (e) { body.innerHTML = `<p class="tx-note">No sea-breeze analysis for ${date} yet. (Analysis runs from 2026-07-04 forward.)</p>`; return; }
+    let cur = null;
+    try { cur = await j(`${BASE}/currents/${date}.json`); } catch { cur = null; }   // non-fatal
     CHARTS.forEach(c => c.destroy()); CHARTS = [];
     const steps = (d.steps || []).map(stepHTML).join('');
+    const curSection = (cur && cur.stations && cur.stations.length) ? `
+      <div class="bz-section-t">Tidal current <span class="tx-hint">(racing-area, NOAA predictions)</span></div>
+      <canvas id="bz-current" width="660" height="150"></canvas>
+      <p class="tx-cardnote" id="bz-current-note"></p>` : '';
     body.innerHTML = `${headerHTML(d)}
       <div class="bz-section-t">Racing-area wind — HRRR field <span class="tx-hint">(central Mass Bay; the sea-breeze evidence the replay shows)</span></div>
       <div class="bz-two"><div><div class="bz-lbl">Direction by hour — backs to onshore then veers right</div><canvas id="bz-race-dir" width="330" height="175"></canvas></div>
@@ -319,6 +370,7 @@
         <canvas class="bz-xsec" id="bz-xsec" width="440" height="240"></canvas></div>
         <div><div class="bz-section-t">Breeze polygon <span class="tx-hint">(Wisdorff — solar-hour wind, G = daily mean)</span></div>
         <canvas id="bz-polygon" width="240" height="240"></canvas></div></div>
+      ${curSection}
       <div class="bz-section-t">Decision walkthrough — prediction vs. what actually happened</div>
       ${steps}
       <div class="bz-section-t">Point observations (stations) <span class="tx-hint">— secondary; the enclosed corner can hold the synoptic</span></div>
@@ -333,6 +385,7 @@
     await ensureReliefBz();
     document.querySelectorAll('.bz-qmap').forEach(c => drawQuadrantMap(c, d, grid));
     drawObs(d);
+    if (cur) drawCurrentReport(cur);
     loaded = d;
   }
 
