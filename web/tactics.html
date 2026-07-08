@@ -11,7 +11,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="./assets/css/tactics.css?v=7">
+    <link rel="stylesheet" href="./assets/css/tactics.css?v=8">
     <script src="./config.js"></script>
     <script src="./assets/js/analytics.js"></script>
 </head>
@@ -47,10 +47,14 @@
                 <div id="tx-map" class="tx-map"></div>
                 <div class="tx-legend" id="tx-legend"></div>
             </div>
+            <div id="tx-validation" class="tx-validation" hidden></div>
             <p class="tx-note">
                 HRRR 10&nbsp;m wind field (F00 analysis, hourly), read straight from static
                 Parquet on CloudFront via DuckDB-WASM — no backend. Scrub or play to watch
-                the sea breeze fill.
+                the sea breeze fill. The <b>Obs</b> overlay + the model-vs-obs table below
+                let you check the model against real buoy/airport wind (HRRR F00 is a
+                data-assimilated analysis, not raw observations, so it can be off — especially
+                over water).
             </p>
         </section>
 
@@ -107,6 +111,6 @@
         </section>
     </main>
 
-    <script type="module" src="./assets/js/tactics-app.js?v=6"></script>
+    <script type="module" src="./assets/js/tactics-app.js?v=7"></script>
 </body>
 </html>
