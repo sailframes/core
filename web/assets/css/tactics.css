@@ -38,6 +38,16 @@ body { padding-bottom: 48px; }
 .tx-clock { font-family: ui-monospace, Menlo, monospace; font-size: .95rem; min-width: 168px; }
 .tx-obs-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: .85rem; color: var(--text-secondary, #8b98a5); cursor: pointer; }
 .tx-obs-toggle input { accent-color: var(--accent, #3aa0ff); }
+
+/* model-vs-obs validation panel */
+.tx-validation { margin-top: 12px; background: var(--bg-secondary, #14181f); border: 1px solid var(--border-color, #2a2a2a); border-radius: 10px; padding: 10px 14px; }
+.tx-val-title { color: var(--text-primary, #e8edf2); font-weight: 600; font-size: .92rem; margin-bottom: 6px; }
+.tx-val-tbl { border-collapse: collapse; font-size: .84rem; font-family: ui-monospace, Menlo, monospace; }
+.tx-val-tbl th { text-align: left; color: var(--text-secondary, #8b98a5); font-weight: 500; padding: 3px 16px 5px 0; border-bottom: 1px solid var(--border-color, #23272e); }
+.tx-val-tbl td { padding: 4px 16px 4px 0; color: var(--text-primary, #e8edf2); }
+.tx-val-bad { color: #e8603a; font-weight: 600; }
+.tx-val-day { margin-top: 8px; color: var(--text-secondary, #8b98a5); font-size: .84rem; }
+.tx-val-day b { color: var(--text-primary, #e8edf2); }
 .tx-status { color: var(--text-secondary, #8b98a5); font-size: .8rem; font-family: ui-monospace, Menlo, monospace; }
 
 .tx-stage { position: relative; }

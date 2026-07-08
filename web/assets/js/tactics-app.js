@@ -117,6 +117,79 @@ function drawObsLayer(fr) {
   }
 }
 
+// ---- model-vs-obs validation (the "confidence" metric) ----
+let _stGi = null;      // station id -> nearest grid-cell index
+let DAY_VAL = null;    // {mspd, mdir, n} — day-mean absolute errors
+function stationGi() {
+  if (_stGi || !GRID || !OBS_STATIONS) return _stGi;
+  _stGi = {};
+  const { lats, lons } = GRID;
+  for (const st of OBS_STATIONS) {
+    let best = -1, bd = Infinity;
+    const cw = Math.cos(st.lat * Math.PI / 180);
+    for (let k = 0; k < lats.length; k++) {
+      const dla = lats[k] - st.lat, dlo = (lons[k] - st.lon) * cw;
+      const d = dla * dla + dlo * dlo;
+      if (d < bd) { bd = d; best = k; }
+    }
+    _stGi[st.id] = best;
+  }
+  return _stGi;
+}
+function nearestObs(series, frameMs) {
+  let best = null;
+  for (const o of series) { const dd = Math.abs(o.t - frameMs); if (dd <= 40 * 60000 && (!best || dd < Math.abs(best.t - frameMs))) best = o; }
+  return best;
+}
+const angDiff = (a, b) => { let d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
+function modelAt(fr, k) {
+  const mu = fr.u[k], mv = fr.v[k];
+  if (!isFinite(mu) || !isFinite(mv)) return null;
+  return { spd: Math.hypot(mu, mv) * KT, dir: (Math.atan2(-mu, -mv) * 180 / Math.PI + 360) % 360 };
+}
+function computeDayValidation() {
+  DAY_VAL = null;
+  if (!obsOn || !OBS || !GRID || !FRAMES.length) return;
+  const gi = stationGi(); if (!gi) return;
+  let sspd = 0, sdir = 0, n = 0;
+  for (const fr of FRAMES) {
+    const ms = new Date(fr.t).getTime();
+    for (const st of OBS_STATIONS) {
+      const s = OBS[st.id]; if (!s || !s.length) continue;
+      const o = nearestObs(s, ms); if (!o) continue;
+      const m = modelAt(fr, gi[st.id]); if (!m) continue;
+      sspd += Math.abs(m.spd - o.wspd * KT); sdir += angDiff(m.dir, o.wdir); n++;
+    }
+  }
+  DAY_VAL = n ? { mspd: sspd / n, mdir: sdir / n, n } : null;
+}
+function renderValidation(fr) {
+  const el = $('tx-validation'); if (!el) return;
+  const gi = (obsOn && OBS && GRID) ? stationGi() : null;
+  if (!gi) { el.hidden = true; return; }
+  const ms = new Date(fr.t).getTime();
+  const rows = [];
+  for (const st of OBS_STATIONS) {
+    const s = OBS[st.id]; if (!s || !s.length) continue;
+    const o = nearestObs(s, ms); if (!o) continue;
+    const m = modelAt(fr, gi[st.id]); if (!m) continue;
+    rows.push({ id: st.id, buoy: st.type === 'buoy', m, o: { spd: o.wspd * KT, dir: o.wdir } });
+  }
+  if (!rows.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<div class="tx-val-title">Model vs obs <span class="tx-hint">at this hour · Δ = HRRR − observed · red = off</span></div>` +
+    `<table class="tx-val-tbl"><tr><th>station</th><th>HRRR</th><th>observed</th><th>Δ speed</th><th>Δ dir</th></tr>` +
+    rows.map(r => {
+      const ds = r.m.spd - r.o.spd, dd = angDiff(r.m.dir, r.o.dir);
+      return `<tr><td>${r.id} ${r.buoy ? '□' : '○'}</td>` +
+        `<td>${r.m.spd.toFixed(0)} kt @ ${Math.round(r.m.dir)}°</td>` +
+        `<td>${r.o.spd.toFixed(0)} kt @ ${Math.round(r.o.dir)}°</td>` +
+        `<td class="${Math.abs(ds) > 4 ? 'tx-val-bad' : ''}">${ds >= 0 ? '+' : ''}${ds.toFixed(0)} kt</td>` +
+        `<td class="${dd > 30 ? 'tx-val-bad' : ''}">${Math.round(dd)}°</td></tr>`;
+    }).join('') + `</table>` +
+    (DAY_VAL ? `<div class="tx-val-day">This day: mean |Δ speed| <b>${DAY_VAL.mspd.toFixed(1)} kt</b> · mean |Δ dir| <b>${Math.round(DAY_VAL.mdir)}°</b> <span class="tx-hint">(${DAY_VAL.n} station·hours)</span></div>` : '');
+}
+
 function render() {
   if (!GRID || !FRAMES.length) return;
   resizeCanvas();
@@ -137,6 +210,7 @@ function render() {
     }
   }
   if (obsOn) drawObsLayer(fr);
+  renderValidation(fr);
   const d = new Date(fr.t);
   const lt = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
   $('tx-clock').textContent = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
@@ -227,10 +301,11 @@ async function loadObsForDay(dateStr) {
     try {
       const name = await ensureParquet(`${BASE}/obs/${st.id}/${yr}.parquet`);
       const rows = await q(`SELECT CAST(epoch_ms(time_utc) AS DOUBLE) AS t, wspd, wdir FROM read_parquet('${name}')`);
-      OBS[st.id] = rows.filter(r => r.t >= dayStart && r.t < dayEnd && r.wspd != null && r.wdir != null);
+      OBS[st.id] = rows.filter(r => r.t >= dayStart && r.t < dayEnd && Number.isFinite(r.wspd) && Number.isFinite(r.wdir));
     } catch { OBS[st.id] = []; }
     if (FRAMES.length) render();   // progressive repaint
   }
+  computeDayValidation();
 }
 
 async function loadFramesFromUrl(url, note) {
