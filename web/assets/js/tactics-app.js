@@ -75,8 +75,9 @@ let OBS_STATIONS = null;   // [{id,name,lat,lon,type}]
 let OBS = null;            // {id: [{t(ms), wspd, wdir}]}
 let obsOn = true;
 // ---- RTMA truth overlay (2.5 km obs-anchored analysis; today's forecast only) ----
-let RTMA = null;           // [{lat,lon,u10,v10}] single analysis snapshot
-let RTMA_META = null;      // {cycle, n, mean_kt}
+let RTMA = null;           // [{t, pts:[{lat,lon,u10,v10}]}] cycles, oldest first
+let RTMA_META = null;      // {cycles[], n_cycles, ...}
+let RTMA_HGI = null;       // Int32Array: RTMA point index -> nearest HRRR grid cell
 let rtmaOn = false;
 
 function drawObsBarb(px, py, wspd, wdir, isBuoy) {
@@ -121,19 +122,31 @@ function drawObsLayer(fr) {
   }
 }
 
-// RTMA barb: bold magenta with a white halo — a gridded "analysis truth" that
-// stands out from the speed-colored HRRR arrows and the white-ringed point-obs.
-const RTMA_COL = '#d81b8c';
-function drawRtmaBarb(px, py, u, v) {
+// RTMA barbs are colored by DISAGREEMENT with HRRR — RTMA (obs-anchored analysis)
+// uses HRRR as its background, so the two agree closely by construction; the value
+// of the overlay is showing WHERE they diverge (= where the model is least trusted).
+// Muted slate = agree (≤~1 kt vector diff), yellow ~3 kt, red ≥6 kt.
+function _lerpHex(a, b, t) {
+  const pa = [parseInt(a.slice(1, 3), 16), parseInt(a.slice(3, 5), 16), parseInt(a.slice(5, 7), 16)];
+  const pb = [parseInt(b.slice(1, 3), 16), parseInt(b.slice(3, 5), 16), parseInt(b.slice(5, 7), 16)];
+  return `rgb(${pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(',')})`;
+}
+const DIV_STOPS = ['#7f8fa6', '#f2d24b', '#ef7d33', '#d81b1b'];   // 0 → 3 → 4.5 → 6+ kt
+function divColor(dkt) {
+  const t = Math.max(0, Math.min(1, dkt / 6)) * (DIV_STOPS.length - 1);
+  const i = Math.min(DIV_STOPS.length - 2, Math.floor(t));
+  return _lerpHex(DIV_STOPS[i], DIV_STOPS[i + 1], t - i);
+}
+
+function drawRtmaBarb(px, py, u, v, col) {
   const kt = Math.hypot(u, v) * KT;
   if (kt < 0.4) return;
   const ang = Math.atan2(-v, u);
   const len = Math.min(26, 8 + kt * 1.1);
   const ex = px + Math.cos(ang) * len, ey = py + Math.sin(ang) * len;
-  // white halo first so it reads over both HRRR arrows and any basemap
-  ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 5;
+  ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 5;   // white halo for legibility
   ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
-  ctx.strokeStyle = RTMA_COL; ctx.lineWidth = 2.8;
+  ctx.strokeStyle = col; ctx.lineWidth = 2.8;
   ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
   const h = 6;
   ctx.beginPath(); ctx.moveTo(ex, ey);
@@ -141,29 +154,34 @@ function drawRtmaBarb(px, py, u, v) {
   ctx.lineTo(ex - h * Math.cos(ang + .4), ey - h * Math.sin(ang + .4));
   ctx.closePath();
   ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineWidth = 3; ctx.stroke();
-  ctx.fillStyle = RTMA_COL; ctx.fill();
-  // square tail marker (grid node), white-ringed
+  ctx.fillStyle = col; ctx.fill();
   ctx.fillStyle = '#fff'; ctx.fillRect(px - 2.2, py - 2.2, 4.4, 4.4);
-  ctx.strokeStyle = RTMA_COL; ctx.lineWidth = 1.4; ctx.strokeRect(px - 2.2, py - 2.2, 4.4, 4.4);
+  ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.strokeRect(px - 2.2, py - 2.2, 4.4, 4.4);
 }
 
 function drawRtmaLayer(fr) {
-  if (!RTMA || !RTMA.length || !fr) return null;
-  // RTMA is an analysis valid at each cycle time — show the cycle nearest this
-  // frame (within 45 min), so the overlay moves with the scrubber.
+  if (!RTMA || !RTMA.length || !fr || !RTMA_HGI) return null;
+  // show the RTMA cycle nearest this frame (within 45 min) so it moves with time
   const frameMs = new Date(fr.t).getTime();
   let cyc = null;
   for (const c of RTMA) { const dd = Math.abs(c.t - frameMs); if (dd <= 45 * 60000 && (!cyc || dd < Math.abs(cyc.t - frameMs))) cyc = c; }
   if (!cyc) return null;
   const r = $('tx-map').getBoundingClientRect();
-  const step = map.getZoom() >= 10 ? 2 : 3;   // 2.5 km grid is dense — subsample
-  for (let i = 0; i < cyc.pts.length; i += step) {
+  const step = map.getZoom() >= 10 ? 2 : 3;   // 2.5 km grid is dense — subsample the drawing
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < cyc.pts.length; i++) {
     const p = cyc.pts[i];
+    const gi = RTMA_HGI[i];
+    const hu = fr.u[gi], hv = fr.v[gi];
+    if (!isFinite(hu) || !isFinite(hv)) continue;
+    const dkt = Math.hypot(p.u10 - hu, p.v10 - hv) * KT;   // vector difference vs HRRR at this frame
+    sum += dkt; cnt++;
+    if (i % step) continue;
     const pt = map.latLngToContainerPoint([p.lat, p.lon]);
     if (pt.x < -20 || pt.y < -20 || pt.x > r.width + 20 || pt.y > r.height + 20) continue;
-    drawRtmaBarb(pt.x, pt.y, p.u10, p.v10);
+    drawRtmaBarb(pt.x, pt.y, p.u10, p.v10, divColor(dkt));
   }
-  return cyc.t;   // matched cycle time (for the clock/legend)
+  return { t: cyc.t, avg: cnt ? sum / cnt : 0, n: cnt };
 }
 
 async function loadRtma() {
@@ -183,6 +201,17 @@ async function loadRtma() {
     c.pts.push({ lat: row.lat, lon: row.lon, u10: row.u10, v10: row.v10 });
   }
   RTMA = [...byT.values()].sort((a, b) => a.t - b.t);   // cycles, oldest first
+  // precompute nearest HRRR cell for each RTMA point (grids are both fixed) so the
+  // per-frame divergence color is a cheap lookup, not a search
+  if (RTMA.length && GRID) {
+    const pts = RTMA[0].pts, { lats, lons } = GRID, n = lats.length;
+    RTMA_HGI = new Int32Array(pts.length);
+    for (let i = 0; i < pts.length; i++) {
+      const la = pts[i].lat, lo = pts[i].lon; let bj = 0, bd = Infinity;
+      for (let k = 0; k < n; k++) { const dla = lats[k] - la, dlo = lons[k] - lo, d = dla * dla + dlo * dlo; if (d < bd) { bd = d; bj = k; } }
+      RTMA_HGI[i] = bj;
+    }
+  }
 }
 
 // ---- model-vs-obs validation (the "confidence" metric) ----
@@ -280,14 +309,14 @@ function render() {
     }
   }
   ctx.globalAlpha = 1;
-  const rtmaT = rtmaLive ? drawRtmaLayer(fr) : null;
+  const rt = rtmaLive ? drawRtmaLayer(fr) : null;
   if (obsOn) drawObsLayer(fr);
   renderValidation(fr);
   const d = new Date(fr.t);
   const lt = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
   $('tx-clock').textContent = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
-  const rs = $('tx-rtma-status');   // RTMA time lives in the legend, not the toolbar (avoids clock-width toolbar shift)
-  if (rs) rs.textContent = rtmaLive ? (rtmaT ? ` · ${new Date(rtmaT).toISOString().slice(11, 16)}Z` : ' · n/a here (analysis ≤ now)') : '';
+  const rs = $('tx-rtma-status');   // RTMA readout lives in the legend, not the toolbar (avoids clock-width toolbar shift)
+  if (rs) rs.textContent = rtmaLive ? (rt ? ` ${new Date(rt.t).toISOString().slice(11, 16)}Z · avg Δ ${rt.avg.toFixed(1)} kt` : ' · n/a here (analysis ≤ now)') : '';
 }
 
 map.on('move zoom viewreset resize', render);
@@ -300,7 +329,8 @@ function buildLegend() {
     rows.map(([s, lab]) => `<div class="row"><span class="sw" style="background:${spdColor(s)}"></span>${lab}</div>`).join('') +
     '<div class="row" style="margin-top:5px;opacity:.85">◎ obs — □ buoy · ○ airport</div>' +
     '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>' +
-    (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.95"><span style="color:${RTMA_COL};font-weight:700">➤</span> RTMA 2.5&nbsp;km analysis<span id="tx-rtma-status" style="opacity:.8"></span></div>` : '');
+    (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.95">RTMA truth Δ vs HRRR<span id="tx-rtma-status" style="opacity:.85"></span></div>` +
+      `<div class="row" style="opacity:.85;font-size:.9em"><span class="sw" style="background:${divColor(0)}"></span>agree<span class="sw" style="margin-left:6px;background:${divColor(3)}"></span>3<span class="sw" style="margin-left:6px;background:${divColor(6)}"></span>6kt+</div>` : '');
 }
 
 // ---- scrubber / play ----
