@@ -490,6 +490,27 @@ function renderStats() {
     type: 'bar', data: { labels: th.labels.map(x => x + 'h'), datasets: [{ data: th.bins, backgroundColor: '#3ec46d' }] },
     options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b98a5' } }, y: { ticks: { color: '#8b98a5' } } } }
   });
+  loadSkill().then(renderSkill);
+}
+
+// ---- model-skill card (precomputed venue validation) ----
+let SKILL = null;
+async function loadSkill() {
+  if (SKILL) return;
+  try { const r = await fetch(new URL(`${BASE}/validation.json`, location.href).href); SKILL = r.ok ? await r.json() : null; } catch { SKILL = null; }
+}
+function renderSkill() {
+  const el = $('tx-skill'); if (!el) return;
+  if (!SKILL || !SKILL.stations) { el.innerHTML = '<p class="tx-cardnote">Skill stats unavailable.</p>'; return; }
+  const o = SKILL.overall || {};
+  const sgn = v => (v >= 0 ? '+' : '') + v.toFixed(1);
+  el.innerHTML = `<table class="tx-val-tbl"><tr><th>station</th><th>speed bias</th><th>speed RMSE</th><th>dir error</th><th>obs·hrs</th></tr>` +
+    SKILL.stations.map(s => `<tr><td>${s.id} ${s.type === 'buoy' ? '□' : '○'} <span class="tx-hint">${s.name}</span></td>` +
+      `<td class="${Math.abs(s.bias_kt) > 2 ? 'tx-val-bad' : ''}">${sgn(s.bias_kt)} kt</td>` +
+      `<td>${s.rmse_kt.toFixed(1)} kt</td><td class="${s.dir_err > 30 ? 'tx-val-bad' : ''}">${Math.round(s.dir_err)}°</td>` +
+      `<td>${s.n.toLocaleString()}</td></tr>`).join('') +
+    (o.n ? `<tr style="font-weight:600;border-top:1px solid #2a2a2a"><td>all stations</td><td>${sgn(o.bias_kt)} kt</td><td>${o.rmse_kt.toFixed(1)} kt</td><td>${Math.round(o.dir_err)}°</td><td>${o.n.toLocaleString()}</td></tr>` : '') +
+    `</table><p class="tx-cardnote">HRRR sampled at each station's nearest 3-km cell vs observed wind, matched within ±30 min, over ${SKILL.generated_days} archive days. Bias = HRRR − observed. Over water (buoys) HRRR is within ~1 kt bias / ~2.5 kt RMSE; it under-reads Logan by ~2 kt.</p>`;
 }
 
 // ================= Race briefing / analog finder (§7) =================
