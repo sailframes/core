@@ -64,6 +64,12 @@ def extract_day(date, window):
         for job, arr in ex.map(_read, tasks):
             got[job] = arr
 
+    # HRRR GRIB winds are grid-relative — rotate u10/v10 to earth-relative (true N)
+    ang = hg.convergence_window(hg.store_anl(date, order[0]), j0, j1, i0, i1)
+    for cyc in order:
+        ue, ve = hg.to_earth(got[(cyc, "u10")], got[(cyc, "v10")], ang)
+        got[(cyc, "u10")], got[(cyc, "v10")] = ue.astype("f4"), ve.astype("f4")
+
     times, gicol = [], []
     cols = {f: [] for f in FIELDS}
     for cyc in order:
@@ -80,6 +86,7 @@ def extract_day(date, window):
          **{f: pa.array(np.concatenate(cols[f]), type=pa.float32()) for f in FIELDS}},
         schema=SCHEMA,
     )
+    tbl = tbl.replace_schema_metadata({b"wind_frame": b"earth"})   # u10/v10 rotated to true N
     # sorted (valid_time, gi) already by construction (cycles ascending, gi ascending)
     return tbl, missing
 

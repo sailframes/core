@@ -58,13 +58,19 @@ def main():
         print(a.date, "no subh available (retention?) — left hourly"); return
     allsub = pa.concat_tables(parts)
     n = allsub.num_rows
+    # subh GRIB winds are grid-relative — rotate to earth-relative (true N) per cell,
+    # matching the hourly parquet (backfill_hrrr stores earth-relative)
+    ang = hg.convergence_window(hg.store_anl(ymd, cycles[0]), *window)
+    gi_arr = allsub.column("gi").to_numpy()
+    ue, ve = hg.to_earth(allsub.column("u10").to_numpy(), allsub.column("v10").to_numpy(), ang[gi_arr])
     cols = {"valid_time_utc": allsub.column("valid_time_utc"), "gi": allsub.column("gi"),
-            "u10": allsub.column("u10"), "v10": allsub.column("v10")}
+            "u10": pa.array(ue.astype("f4")), "v10": pa.array(ve.astype("f4"))}
     for f in FIELDS:
         if f not in ("u10", "v10"):
             cols[f] = pa.array(np.full(n, None), type=pa.float32())
     subtab = pa.table(cols, schema=SCHEMA).cast(hourly.schema)   # match ms/s timestamp unit
     merged = pa.concat_tables([hourly, subtab]).sort_by([("valid_time_utc", "ascending"), ("gi", "ascending")])
+    merged = merged.replace_schema_metadata({b"wind_frame": b"earth"})
     buf = io.BytesIO(); pq.write_table(merged, buf, compression="zstd"); buf.seek(0)
     _s3.put_object(Bucket=BUCKET, Key=key, Body=buf.getvalue(),
                    ContentType="application/octet-stream", CacheControl="max-age=86400")

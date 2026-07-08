@@ -66,10 +66,17 @@ def read_cycle(date, hh):
                 gid = ec.codes_grib_new_from_file(f)
                 if gid is None:
                     break
+                def _g(k, d=None):
+                    try:
+                        return ec.codes_get(gid, k)
+                    except Exception:
+                        return d
                 msg[ec.codes_get(gid, "shortName")] = {
                     "v": ec.codes_get_values(gid),
                     "lat": ec.codes_get_array(gid, "latitudes"),
-                    "lon": ec.codes_get_array(gid, "longitudes")}
+                    "lon": ec.codes_get_array(gid, "longitudes"),
+                    "uvGrid": _g("uvRelativeToGrid", 0),
+                    "LoV": _g("LoVInDegrees"), "Latin1": _g("Latin1InDegrees")}
                 ec.codes_release(gid)
     finally:
         os.unlink(path)
@@ -81,6 +88,13 @@ def read_cycle(date, hh):
            (lon >= hg.BBOX["lon_min"]) & (lon <= hg.BBOX["lon_max"]))
     idx_in = np.where(inb)[0]
     uu = u["v"][idx_in]; vv = v["v"][idx_in]
+    # RTMA (Lambert) GRIB winds are grid-relative — rotate to earth-relative (true N)
+    # by RTMA's own grid convergence sin(Latin1)·(lon−LoV); different from HRRR's.
+    if u.get("uvGrid") and u.get("LoV") is not None and u.get("Latin1") is not None:
+        lov = u["LoV"] - 360 if u["LoV"] > 180 else u["LoV"]
+        ang = np.sin(np.radians(u["Latin1"])) * np.radians(lon[idx_in] - lov)
+        ca, sa = np.cos(ang), np.sin(ang)
+        uu, vv = ca * uu + sa * vv, -sa * uu + ca * vv
     spd = np.hypot(uu, vv) * KT
     wdir = (np.degrees(np.arctan2(-uu, -vv)) + 360) % 360
     return pa.table({

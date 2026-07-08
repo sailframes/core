@@ -88,12 +88,17 @@ def build_forecast_table(date, cyc, window):
 
     anl = hg.store_anl(date, cyc)
     a0 = {f: hg.read_window(anl, hg.REQUIRED[f], j0, j1, i0, i1).ravel() for f in FIELDS}
+    # HRRR GRIB winds are grid-relative — rotate u10/v10 to earth-relative (true N)
+    ang = hg.convergence_window(anl, j0, j1, i0, i1)
+    a0["u10"], a0["v10"] = hg.to_earth(a0["u10"], a0["v10"], ang)
     times.append(np.full(ncell, np.datetime64(base.replace(tzinfo=None), "s"))); gicol.append(gi)
     for f in FIELDS:
         cols[f].append(a0[f])
 
     fc = hg.store_fcst(date, cyc)
     cube = {f: hg.read_fcst_window(fc, hg.REQUIRED[f], j0, j1, i0, i1, nlead=18) for f in FIELDS}
+    ang2d = ang.reshape(j1 - j0 + 1, i1 - i0 + 1)                          # broadcast over leads
+    cube["u10"], cube["v10"] = hg.to_earth(cube["u10"], cube["v10"], ang2d)
     nlead = cube[FIELDS[0]].shape[0]
     for k in range(nlead):
         vt = base + dt.timedelta(hours=k + 1)

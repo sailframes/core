@@ -63,6 +63,8 @@ def main():
 
     # window is constant across all dates (same projection grid) — compute once
     j0, j1, i0, i1 = hg.bbox_window(hg.store_anl(tasks[0][0], tasks[0][3]))
+    # grid→earth wind rotation (true N) at the racing cells — static, compute once
+    ang_r = hg.convergence_window(hg.store_anl(tasks[0][0], tasks[0][3]), j0, j1, i0, i1)[rgi]
 
     def read_one(t):
         ymd, d, h, cyc = t
@@ -70,6 +72,7 @@ def main():
             store = hg.store_anl(ymd, cyc)
             u = hg.read_window(store, hg.REQUIRED["u10"], j0, j1, i0, i1).ravel()[rgi]
             v = hg.read_window(store, hg.REQUIRED["v10"], j0, j1, i0, i1).ravel()[rgi]
+            u, v = hg.to_earth(u, v, ang_r)
             um = float(np.nanmean(u)); vm = float(np.nanmean(v))
             if um != um:
                 return None

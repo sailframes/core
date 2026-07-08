@@ -220,6 +220,13 @@ def main():
     v925_h, _ = read_field_hourly(ymd, "925mb/VGRD", morn_cyc, win)
     u850_h, _ = read_field_hourly(ymd, "850mb/UGRD", morn_cyc, win)
     v850_h, _ = read_field_hourly(ymd, "850mb/VGRD", morn_cyc, win)
+    # HRRR GRIB winds are grid-relative — rotate 850/925 to earth-relative (true N).
+    # (10 m wind comes from the fields parquet, which is stored earth-relative.)
+    _ang = hg.convergence_window(hg.store_anl(ymd, cyc[0]), *win)
+    for _uh, _vh in ((u925_h, v925_h), (u850_h, v850_h)):
+        for _c in list(_uh):
+            if _c in _vh:
+                _uh[_c], _vh[_c] = hg.to_earth(_uh[_c], _vh[_c], _ang)
     hgt = hg.read_window(hg.store_anl(ymd, cyc[len(cyc) // 2]), "surface/HGT", j0, j1, i0, i1).ravel()
     landflat = land.ravel().astype(bool)
     waterflat = ~landflat

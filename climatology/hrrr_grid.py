@@ -135,6 +135,35 @@ def read_window(store, group, j0, j1, i0, i1):
     return out
 
 
+# --- wind rotation: HRRR GRIB winds are GRID-relative; rotate to earth-relative
+# (true north). The LCC grid convergence at a cell is n·(lon−LON0); over Mass Bay
+# that is ~+16.6°, so unrotated directions are ~16° CCW of truth. Confirmed against
+# 44013/A01 buoys (model−obs bias −14°/−21° → +2.6°/−4.1° after rotation).
+_N_LCC = math.sin(LAT0 * _D2R)
+
+
+def convergence_from_lon(lon):
+    """Grid-convergence angle (rad) from longitude(s). Matches convergence_window."""
+    return _N_LCC * (np.asarray(lon, dtype="f8") - LON0) * _D2R
+
+
+def convergence_window(store, j0, j1, i0, i1):
+    """Per-cell convergence angle (rad), raveled row-major to match
+    read_window(...).ravel(). Static across dates — callers may cache."""
+    xs = read_1d(store, f"{REQUIRED['u10']}/projection_x_coordinate")[i0:i1 + 1]
+    ys = read_1d(store, f"{REQUIRED['u10']}/projection_y_coordinate")[j0:j1 + 1]
+    F = math.cos(LAT0 * _D2R) * (math.tan(math.pi / 4 + LAT0 * _D2R / 2) ** _N_LCC) / _N_LCC
+    rho0 = R_EARTH * F / (math.tan(math.pi / 4 + LAT0 * _D2R / 2) ** _N_LCC)
+    X, Y = np.meshgrid(xs, ys)                       # (ny, nx)
+    return np.arctan2(X, rho0 - Y).ravel()           # = n·(lon−LON0)·π/180
+
+
+def to_earth(u, v, ang):
+    """Rotate grid-relative U/V to earth-relative given convergence angle(s) (rad)."""
+    ca, sa = np.cos(ang), np.sin(ang)
+    return ca * u + sa * v, -sa * u + ca * v
+
+
 def store_fcst(date, cycle):
     """Forecast (F01..F48) zarr store for a cycle."""
     return f"sfc/{date}/{date}_{cycle}_fcst.zarr"
