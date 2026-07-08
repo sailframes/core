@@ -150,30 +150,30 @@ window.SFWeather = (function () {
     ctx.lineTo(ex - h * Math.cos(ang + 0.4), ey - h * Math.sin(ang + 0.4));
     ctx.closePath(); ctx.fill();
   }
-  // Dense wind field: sample u/v bilinearly onto a screen lattice so the 3 km grid
-  // stays legible at the race's tight zoom (raw grid = ~1 arrow in view). Graceful
-  // NaN handling: average whatever finite corners exist (fills the coastal fringe).
-  function sampleUV(lat, lon) {
-    const { nx, ny, bbox } = GRID;
-    const cf = (lon - bbox.lon_min) / (bbox.lon_max - bbox.lon_min) * (nx - 1);
-    const rf = (lat - bbox.lat_min) / (bbox.lat_max - bbox.lat_min) * (ny - 1);   // row0 = south
-    if (cf < 0 || cf > nx - 1 || rf < 0 || rf > ny - 1) return null;
-    const c0 = Math.floor(cf), r0 = Math.floor(rf), c1 = Math.min(nx - 1, c0 + 1), r1 = Math.min(ny - 1, r0 + 1);
-    const fx = cf - c0, fy = rf - r0;
-    let su = 0, sv = 0, sw = 0;
-    for (const [rr, cc, w] of [[r0, c0, (1 - fx) * (1 - fy)], [r0, c1, fx * (1 - fy)], [r1, c0, (1 - fx) * fy], [r1, c1, fx * fy]]) {
-      const k = rr * nx + cc, u = fr_u(k), v = fr_v(k);
-      if (isFinite(u) && isFinite(v) && w > 0) { su += u * w; sv += v * w; sw += w; }
-    }
-    return sw > 0.05 ? { u: su / sw, v: sv / sw } : null;
-  }
-  let _fr = null; const fr_u = k => _fr.u[k], fr_v = k => _fr.v[k];
-  function drawWindInterp(fr, r) {
-    _fr = fr; const step = 46;
+  // Dense wind field: draw an arrow on a screen lattice, each sampled from its TRUE
+  // nearest grid cell (via the actual per-cell lats/lons — NOT a bbox-linear map,
+  // which is wrong because the LCC grid is rotated ~16° and the cell envelope ≠ bbox).
+  // The lattice→cell map only changes with the map view, so cache it across scrubs.
+  let _latKey = null, _lattice = null;
+  function latticeCells(r) {
+    const key = map.getZoom() + ':' + map.getCenter().lat.toFixed(4) + ',' + map.getCenter().lng.toFixed(4) + ':' + r.width + 'x' + r.height;
+    if (key === _latKey) return _lattice;
+    const { lats, lons } = GRID, n = lats.length, step = 46, out = [];
     for (let y = step / 2; y < r.height; y += step) for (let x = step / 2; x < r.width; x += step) {
-      const ll = map.containerPointToLatLng([x, y]);
-      const s = sampleUV(ll.lat, ll.lng); if (!s) continue;
-      drawArrow(x, y, s.u, s.v);
+      const ll = map.containerPointToLatLng([x, y]), cw = Math.cos(ll.lat * Math.PI / 180);
+      let bk = -1, bd = Infinity;
+      for (let k = 0; k < n; k++) {
+        const dla = lats[k] - ll.lat, dlo = (lons[k] - ll.lng) * cw, d = dla * dla + dlo * dlo;
+        if (d < bd) { bd = d; bk = k; }
+      }
+      if (bk >= 0 && bd < 0.0016) out.push({ x, y, k: bk });   // within ~0.04° of a cell
+    }
+    _latKey = key; _lattice = out; return out;
+  }
+  function drawWindInterp(fr, r) {
+    for (const c of latticeCells(r)) {
+      const u = fr.u[c.k], v = fr.v[c.k]; if (!isFinite(u) || !isFinite(v)) continue;
+      drawArrow(c.x, c.y, u, v);
     }
   }
   const windFromDeg = (u, v) => (Math.atan2(u, v) * 180 / Math.PI + 180) % 360;
@@ -385,7 +385,14 @@ window.SFWeather = (function () {
     if (window.__sfwHook) window.__sfwHook(api);
   }
   function setTime(ms) { curMs = ms; redraw(); }
-  const api = { init, setTime, setLayer, _state: () => ({ on, frames: FRAMES.length, date: DATE }) };
+  function windAt(lat, lon) {   // debug: wind FROM° / kt at nearest cell for the current time
+    if (!GRID || !FRAMES.length || curMs == null) return null;
+    const { lats, lons } = GRID, cw = Math.cos(lat * Math.PI / 180); let bk = -1, bd = Infinity;
+    for (let k = 0; k < lats.length; k++) { const dla = lats[k] - lat, dlo = (lons[k] - lon) * cw, d = dla * dla + dlo * dlo; if (d < bd) { bd = d; bk = k; } }
+    const fr = frameAt(curMs), u = fr.u[bk], v = fr.v[bk]; if (!isFinite(u) || !isFinite(v)) return null;
+    return { from: (Math.atan2(-u, -v) * 180 / Math.PI + 360) % 360, kt: Math.hypot(u, v) * KT, cell: bk };
+  }
+  const api = { init, setTime, setLayer, windAt, _state: () => ({ on, frames: FRAMES.length, date: DATE }) };
   window.__sfweather = api;   // headless-test hook
   return api;
 })();
