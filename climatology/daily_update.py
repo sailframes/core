@@ -143,6 +143,13 @@ def main():
         except Exception as e:
             log(f"WARN breeze analysis failed ({e})")
 
+    # 1c) NOAA tidal-current predictions for yesterday -> currents/<date>.json
+    try:
+        run([PY, "climatology/backfill_currents.py", "--date", y.isoformat()])
+        invalidate.append(f"/{PFX}/currents/{y.isoformat()}.json")
+    except Exception as e:
+        log(f"WARN currents fetch failed ({e})")
+
     # 2) labels — in-season only; relabel current year and splice into history
     if in_season(y):
         s3.download_file(BUCKET, f"{PFX}/grid.json", os.path.join(WORK, "grid.json"))

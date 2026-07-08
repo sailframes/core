@@ -189,6 +189,52 @@ async function setRelief(on) {
   setTimeout(render, 20);
 }
 
+// ---- NOAA tidal-current layer (time-synced to the scrubber) -------------------
+let curOn = false, CURRENTS = null;
+async function loadCurrents(date) {
+  CURRENTS = null;
+  try {
+    const r = await fetch(`${BASE}/currents/${date}.json`, { cache: 'no-store' });
+    CURRENTS = r.ok ? await r.json() : false;
+  } catch { CURRENTS = false; }
+}
+function interpVel(series, h) {   // linear interp of signed velocity (smooth through slack)
+  if (!series || !series.length) return null;
+  if (h <= series[0][0]) return series[0][1];
+  const n = series.length; if (h >= series[n - 1][0]) return series[n - 1][1];
+  for (let i = 0; i < n - 1; i++) { const a = series[i], b = series[i + 1]; if (h >= a[0] && h <= b[0]) return a[1] + (b[1] - a[1]) * (h - a[0]) / (b[0] - a[0]); }
+  return series[0][1];
+}
+const CUR_COL = '#0aa0a0';
+function drawCurrentArrow(px, py, setDeg, kt) {
+  if (kt < 0.08) { ctx.fillStyle = 'rgba(10,160,160,.55)'; ctx.beginPath(); ctx.arc(px, py, 2.2, 0, 6.28); ctx.fill(); return; }
+  const a = setDeg * Math.PI / 180, dx = Math.sin(a), dy = -Math.cos(a);   // TOWARD set (flow dir)
+  const len = Math.min(40, 8 + kt * 13), ex = px + dx * len, ey = py + dy * len;
+  ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+  ctx.strokeStyle = CUR_COL; ctx.lineWidth = 2.7; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(ex, ey); ctx.stroke();
+  const ang = Math.atan2(ey - py, ex - px);                                // double chevron = "current"
+  for (const off of [0, 5]) {
+    const bx = ex - off * Math.cos(ang), by = ey - off * Math.sin(ang);
+    ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(bx - 7 * Math.cos(ang - .5), by - 7 * Math.sin(ang - .5)); ctx.lineTo(bx, by); ctx.lineTo(bx - 7 * Math.cos(ang + .5), by - 7 * Math.sin(ang + .5)); ctx.stroke();
+    ctx.strokeStyle = CUR_COL; ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.moveTo(bx - 7 * Math.cos(ang - .5), by - 7 * Math.sin(ang - .5)); ctx.lineTo(bx, by); ctx.lineTo(bx - 7 * Math.cos(ang + .5), by - 7 * Math.sin(ang + .5)); ctx.stroke();
+  }
+  ctx.fillStyle = CUR_COL; ctx.beginPath(); ctx.arc(px, py, 2.4, 0, 6.28); ctx.fill();
+}
+function drawCurrentLayer(fr) {
+  if (!CURRENTS || !CURRENTS.stations) return;
+  const lt = new Date(fr.t).toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+  const h = (+lt.slice(0, 2)) + (+lt.slice(3, 5)) / 60;
+  const r = $('tx-map').getBoundingClientRect();
+  for (const s of CURRENTS.stations) {
+    const vel = interpVel(s.series, h); if (vel == null) continue;
+    const pt = map.latLngToContainerPoint([s.lat, s.lon]);
+    if (pt.x < -20 || pt.y < -20 || pt.x > r.width + 20 || pt.y > r.height + 20) continue;
+    drawCurrentArrow(pt.x, pt.y, vel >= 0 ? s.flood : s.ebb, Math.abs(vel));
+  }
+}
+
 // wind-arrow canvas overlay pinned over the map pane
 const canvas = document.createElement('canvas');
 canvas.className = 'tx-arrows';
@@ -481,6 +527,7 @@ function render() {
   }
   ctx.globalAlpha = 1;
   if (sbOn) drawSeaBreezeFront(fr, r);   // convergence-line front, over the arrows
+  if (curOn) drawCurrentLayer(fr);       // tidal current, over the wind
   const rt = rtmaLive ? drawRtmaLayer(fr) : null;
   if (obsOn) drawObsLayer(fr);
   renderValidation(fr);
@@ -503,7 +550,8 @@ function buildLegend() {
     '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>' +
     (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.95">RTMA truth Δ vs HRRR<span id="tx-rtma-status" style="opacity:.85"></span></div>` +
       `<div class="row" style="opacity:.85;font-size:.9em"><span class="sw" style="background:${divColor(0)}"></span>agree<span class="sw" style="margin-left:6px;background:${divColor(3)}"></span>3<span class="sw" style="margin-left:6px;background:${divColor(6)}"></span>6kt+</div>` : '') +
-    (sbOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span class="sw" style="background:rgba(46,160,220,.5)"></span>sea-breeze zone <span style="color:#d81b1b;font-weight:700;margin-left:4px">▬</span> front</div>` : '');
+    (sbOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span class="sw" style="background:rgba(46,160,220,.5)"></span>sea-breeze zone <span style="color:#d81b1b;font-weight:700;margin-left:4px">▬</span> front</div>` : '') +
+    (curOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span style="color:#0aa0a0;font-weight:700">⇒⇒</span> tidal current (set/drift, NOAA)</div>` : '');
 }
 
 // ---- scrubber / play ----
@@ -615,6 +663,7 @@ async function loadDay(dateStr) {
   RTMA = null;
   await loadFramesFromUrl(`${BASE}/fields/year=${y}/month=${m}/${d}.parquet`);   // frames first
   await loadObsForDay(dateStr).catch(() => { });                                 // then obs (same connection)
+  CURRENTS = null; if (curOn) await loadCurrents(dateStr).catch(() => { });      // tidal current for the day
 }
 
 // Snap the scrubber to the frame nearest a given local (ET) hour — robust to
@@ -639,6 +688,12 @@ $('tx-obs')?.addEventListener('change', async e => {
 
 // Relief toggle: 3DEP shaded relief + vector coastline under the wind field.
 $('tx-relief')?.addEventListener('change', e => { setRelief(e.target.checked); });
+// Tidal current toggle: load the day's NOAA current predictions on demand.
+$('tx-current')?.addEventListener('change', async e => {
+  curOn = e.target.checked;
+  if (curOn && !CURRENTS) { try { await loadCurrents($('tx-date').value); } catch { } }
+  buildLegend(); render();
+});
 // Sea-breeze zone + front / distance-from-coast toggles.
 $('tx-seabreeze')?.addEventListener('change', e => { sbOn = e.target.checked; buildLegend(); render(); });
 $('tx-dist')?.addEventListener('change', e => { distOn = e.target.checked; render(); });
@@ -1013,8 +1068,10 @@ $('tx-brief-fcst')?.addEventListener('click', async () => {
   $('tx-rtma-toggle')?.removeAttribute('hidden');   // RTMA truth is live only for today
   try {
     await loadFramesFromUrl(`${BASE}/today/latest.parquet`, "today's forecast F00–F18 · 15-min steps");
-    await loadObsForDay((BRIEF && BRIEF.date) || new Date().toISOString().slice(0, 10)).catch(() => {});
+    const fday = (BRIEF && BRIEF.date) || new Date().toISOString().slice(0, 10);
+    await loadObsForDay(fday).catch(() => {});
     if (rtmaOn) await loadRtma().catch(() => {});
+    CURRENTS = null; if (curOn) await loadCurrents(fday).catch(() => {});
     curFrame = 0; $('tx-scrub').value = 0; setTimeout(() => { map.invalidateSize(); render(); }, 30);
   } catch (e) { setStatus('no forecast feed yet'); }
 });
