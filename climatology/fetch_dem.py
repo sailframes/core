@@ -44,10 +44,11 @@ _s3 = boto3.client("s3")
 
 
 def fetch_dem(size_w=2200, size_h=2000):
-    """Float32 elevation array for the bbox + its geographic transform."""
-    # aspect: keep ~square pixels
-    dlon = (B["lon_max"] - B["lon_min"]) * np.cos(np.radians((B["lat_min"] + B["lat_max"]) / 2))
-    dlat = (B["lat_max"] - B["lat_min"])
+    """Float32 elevation array for the bbox + its geographic transform. The size
+    aspect MUST match the bbox DEGREE aspect (bboxSR=imageSR=4326) — otherwise the
+    ImageServer expands the returned extent to fit and the overlay ends up offset."""
+    dlon = B["lon_max"] - B["lon_min"]                    # degrees (NOT cos-corrected)
+    dlat = B["lat_max"] - B["lat_min"]
     size_h = int(round(size_w * dlat / dlon))
     p = dict(bbox="%f,%f,%f,%f" % (B["lon_min"], B["lat_min"], B["lon_max"], B["lat_max"]),
              bboxSR=4326, imageSR=4326, size="%d,%d" % (size_w, size_h),
