@@ -30,6 +30,12 @@ const BOAT_COLORS = {
     'E4': '#f4212e',  // Red
     'E5': '#a855f7',  // Purple
     'E6': '#22d3ee',  // Cyan
+    'B1': '#ec4899',  // Pink
+    'B2': '#84cc16',  // Lime
+    'B3': '#d946ef',  // Fuchsia
+    'B4': '#eab308',  // Gold
+    'B5': '#14b8a6',  // Teal
+    'B6': '#f43f5e',  // Rose
 };
 
 // Single source of truth for "what color is this boat?" — keyed by
@@ -127,6 +133,9 @@ function rememberRaceNames(race) {
 
 // State
 let regattas = [];
+// regatta_ids flagged visibility==='admin' — hidden from the picker and the
+// site-wide "latest race" auto-load for non-admins (frontend obscurity).
+let hiddenRegattaIds = new Set();
 let raceDays = [];  // Race days for selected regatta
 let races = [];     // Races for selected race day
 let currentRaceDay = null;
@@ -142,6 +151,8 @@ let aisMarkers = {};         // mmsi -> { marker, vessel, times, positions }
 let aisLayerGroup = null;    // L.layerGroup holding the vessel markers
 let aisControl = null;       // Leaflet toggle control
 let aisVisible = false;      // default OFF (data too sparse to be useful); persisted in localStorage 'sf_ais_on'
+let sfwInited = false;       // SFWeather overlay init-once guard
+let weatherObsHidden = false;// Weather "Obs buoys" toggle hides the NOAA wind-rose markers
 let isPlaying = false;
 let playbackSpeed = 10;  // default 10× — 25-min race plays in ~2.5 min
 let currentTime = 0;  // seconds from race start
@@ -228,6 +239,9 @@ let lastLaylineTWD = null;
 //           is the most actionable wind metric on a boat marker: AWA is
 //           nice but only one boat in the fleet has the Calypso, and TWD
 //           is fleet-global (already on the wind picker).
+// Polar-ghost mode: 'targetSpeed' (your own line at polar target speed) or
+// 'optimal' (ideal VMG route to the course marks). Persisted; see updateGhost.
+let ghostMode = 'targetSpeed';
 let markerOverlays = {
     trail:    true,    // only the trail is on by default — keeps the map
     speed:    false,   //   uncluttered until the user opts in to extra
@@ -236,6 +250,9 @@ let markerOverlays = {
     vmg:      false,
     polarPct: false,
     rank:     false,
+    // Polar "ghost" / target-boat overlay for the SELECTED boat — see
+    // updateGhost(). Sails your own line at polar target speed.
+    polarGhost: false,
     // Sail number next to the boat's initials. Off by default — keeps the
     // map cleaner; toggle on via the SHOW legend.
     sail:     false,
@@ -780,8 +797,14 @@ async function loadLatestRaceWithData(regattaFilter = null) {
 
         const now = new Date();
 
+        // Exclude races belonging to admin-only regattas so a hidden regatta
+        // never becomes the default race loaded for non-admins.
+        const visibleRaces = IS_ADMIN
+            ? allRaces
+            : allRaces.filter(r => !hiddenRegattaIds.has(r.regatta_id));
+
         // Find races with boats assigned (boat_count > 0), not in the future, sorted by date descending
-        const racesWithBoats = allRaces
+        const racesWithBoats = visibleRaces
             .filter(r => r.boat_count > 0 && new Date(r.start_time) <= now)
             .sort((a, b) => {
                 // Sort by start_time descending (most recent first)
@@ -1193,7 +1216,7 @@ function addFollowLeaderMapControl() {
     const ctl = L.control({ position: 'topright' });
     ctl.onAdd = function () {
         const div = L.DomUtil.create('div', 'leaflet-bar map-toggle-control');
-        div.innerHTML = `<a href="#" id="follow-toggle" class="${followLeader ? 'active' : ''}" title="Auto-pan/zoom to keep the leader and next mark on screen">⚐ Follow</a>`;
+        div.innerHTML = `<a href="#" id="follow-toggle" class="${followLeader ? 'active' : ''}" title="Click a boat, then auto-pan to keep it centred (pan only, never zooms)">⚐ Follow</a>`;
         L.DomEvent.disableClickPropagation(div);
         const a = div.querySelector('#follow-toggle');
         a.addEventListener('click', (e) => {
@@ -1210,74 +1233,43 @@ function addFollowLeaderMapControl() {
     ctl.addTo(map);
 }
 
-// Camera follow during playback. Two-phase behaviour:
-//   1. While all visible boats + the leader's next mark fit inside the
-//      current viewport (with margin), we just panTo the centre — zoom
-//      stays exactly where the user set it. Boats sailing from start
-//      to first mark stay framed without ever losing the tight zoom.
-//   2. Only when the fleet has spread BEYOND what the current zoom can
-//      contain do we flyToBounds — and even then, capped at the
-//      current zoom so we never zoom IN past the user's setting. Net
-//      effect: zoom only ever loosens, monotonically, as needed.
+// Camera follow during playback. SELECTED-BOAT ONLY, PAN-ONLY.
+//   - No boat selected → the camera never moves on its own. Scrubbing
+//     the timeline or playing back does NOT pan or zoom.
+//   - A boat is selected (clicked → its drawer is open) → the camera
+//     keeps that one boat centred as it moves, panning only. Zoom is
+//     NEVER changed; the user's zoom level is preserved.
+// `drawerDeviceId` is the boatLayers key of the selected boat (covers
+// both fleet device tracks and GPX boat_id tracks; no-track boats open
+// via openCatalogDrawer and have no layer to follow).
 //
-// Throttled to 2.5 s; flight 1.4 s with ease-out; pixel-space
-// hysteresis suppresses micro-corrections when the fleet is already
-// well-framed.
+// Throttled to 2.5 s; pixel-space hysteresis suppresses micro-pans when
+// the boat is already near centre. animate:false so the trail polyline
+// never lags the marker during the pan.
 function applyLeaderFollow(force = false) {
     if (!followLeader && !force) return;
     if (!map || !currentRace) return;
+
+    // Only follow when a single boat is selected.
+    const selKey = drawerDeviceId;
+    if (!selKey) return;
+    const layer = boatLayers[selKey];
+    if (!layer || !layer.visible || !layer.current) return;
+
     const now = Date.now();
     if (!force && now - lastFollowPanMs < 2500) return;
 
-    // Camera target = the fleet, nothing else. The earlier version
-    // included the leader's next mark (and the finish line) in the
-    // bounds so the camera would lead the fleet — but that meant a
-    // far-away windward dragged the zoom out the moment play started.
-    // Per user: "focus on the fleet not all course". We only zoom out
-    // when the BOATS themselves no longer fit at the current zoom.
-    const boatLatLngs = [];
-    for (const layer of Object.values(boatLayers)) {
-        if (!layer.visible || !layer.current) continue;
-        boatLatLngs.push([layer.current.lat, layer.current.lon]);
+    const target = L.latLng(layer.current.lat, layer.current.lon);
+
+    if (!force) {
+        const sz = map.getSize();
+        const cur = map.latLngToLayerPoint(map.getCenter());
+        const tgt = map.latLngToLayerPoint(target);
+        const distPx = Math.hypot(tgt.x - cur.x, tgt.y - cur.y);
+        if (distPx < 0.2 * Math.min(sz.x, sz.y)) return;
     }
-    if (boatLatLngs.length === 0) return;
-
-    const newBounds = L.latLngBounds(boatLatLngs);
-    const newCentre = newBounds.getCenter();
-    const currentZoom = map.getZoom();
-
-    // Camera transitions are INSTANT (animate: false). The previous
-    // smooth animations caused the boat trail polyline to visibly lag
-    // behind the marker — Leaflet repaints the SVG path on each
-    // playback tick while the map's CSS-transformed pane interpolates
-    // over the flight, so the trail-tail and boat appear momentarily
-    // detached. Snapping the view eliminates the mismatch entirely.
-    // The 2.5 s throttle + pixel-space hysteresis keep snaps sparse so
-    // the camera doesn't strobe.
-    //
-    // Phase 1 — bounds fit inside the current viewport: just pan.
-    const viewBounds = map.getBounds().pad(-0.1);
-    if (viewBounds.contains(newBounds)) {
-        if (!force) {
-            const sz = map.getSize();
-            const cur = map.latLngToLayerPoint(map.getCenter());
-            const tgt = map.latLngToLayerPoint(newCentre);
-            const distPx = Math.hypot(tgt.x - cur.x, tgt.y - cur.y);
-            if (distPx < 0.2 * Math.min(sz.x, sz.y)) return;
-        }
-        lastFollowPanMs = now;
-        map.panTo(newCentre, { animate: false });
-        return;
-    }
-
-    // Phase 2 — bounds outgrew the viewport. Snap to fit; cap at
-    // current zoom so we never zoom in unexpectedly.
     lastFollowPanMs = now;
-    map.fitBounds(newBounds, {
-        padding: [60, 60],
-        maxZoom: currentZoom,
-        animate: false,
-    });
+    map.panTo(target, { animate: false });
 }
 
 // Trail window options shown in the SHOW > Trail dropdown. 30s exists
@@ -1311,6 +1303,8 @@ function addMarkerOverlaysMapControl() {
                 if (typeof saved[k] === 'boolean') markerOverlays[k] = saved[k];
             }
         }
+        const gm = localStorage.getItem('sf-ghost-mode');
+        if (gm === 'optimal' || gm === 'targetSpeed') ghostMode = gm;
         const savedWin = localStorage.getItem('sf-trail-window-ms');
         if (savedWin) {
             const n = (savedWin === 'Infinity') ? Infinity : Number(savedWin);
@@ -1330,6 +1324,7 @@ function addMarkerOverlaysMapControl() {
         { key: 'sail',            label: 'Sail #' },
         { key: 'distances',       label: '↔ Dist' },
         { key: 'hdop',            label: '±cm GPS' },
+        { key: 'polarGhost',      label: '👻 Polar' },
     ];
 
     // Initial collapsed state: URL param `legend_compact=1` (set by the
@@ -1362,6 +1357,12 @@ function addMarkerOverlaysMapControl() {
                     return `${cb}<select class="trail-window-select" data-trail-window
                                      title="How much past track to draw">${optionsHtml}</select></label>`;
                 }
+                if (it.key === 'polarGhost') {
+                    return `${cb}<select class="ghost-mode-select" data-ghost-mode title="Ghost mode">`
+                        + `<option value="targetSpeed"${ghostMode === 'targetSpeed' ? ' selected' : ''}>line</option>`
+                        + `<option value="optimal"${ghostMode === 'optimal' ? ' selected' : ''}>optimal</option>`
+                        + `</select></label>`;
+                }
                 return `${cb}</label>`;
             }).join('') +
             // Keyboard hint row — also reminds the user that arrow
@@ -1388,6 +1389,14 @@ function addMarkerOverlaysMapControl() {
                 if (currentRace) updateBoatPositions(playCursorSeconds);
             });
         });
+        const gsel = div.querySelector('.ghost-mode-select');
+        if (gsel) {
+            gsel.addEventListener('change', () => {
+                ghostMode = gsel.value === 'optimal' ? 'optimal' : 'targetSpeed';
+                try { localStorage.setItem('sf-ghost-mode', ghostMode); } catch {}
+                if (currentRace) updateBoatPositions(playCursorSeconds);
+            });
+        }
         const sel = div.querySelector('.trail-window-select');
         if (sel) {
             sel.addEventListener('change', () => {
@@ -1731,6 +1740,7 @@ const TEAM_INITIALS_OVERRIDES = {
     'Anchor Management':  'AM',
     'Rooster Alumni Club':  'RAC',
     'Always Lost':  'AL',
+    "l'avalanche":  "L'A",
 };
 function teamInitials(name) {
     if (!name) return '';
@@ -2994,7 +3004,370 @@ function updateBoatPositions(timeSeconds) {
     // internally to one fly per ~700 ms so slider scrubbing or fast
     // playback doesn't ricochet the viewport.
     applyLeaderFollow(false);
+    updateGhost(targetTime);
     updateBoatDrawer();
+}
+
+// ── Polar ghost (target boat) ───────────────────────────────────────────
+// For the SELECTED boat, simulate sailing the SAME geographic line at polar
+// TARGET speed (boat's own VPP + NOAA wind), anchored at the class-start
+// gun. Renders a ghost marker ahead on your own track, highlights the lead
+// it has built, and labels the time/distance you're leaving out there.
+// v1 mode = 'targetSpeed'; 'optimal' (ideal angles to the mark) is a planned
+// second mode. Same NOAA wind source the drawer %polar uses — so the two
+// numbers reconcile (note: that buoy carries a ~15-20° course bias, so this
+// is an estimate, not gospel).
+let _ghostMarker = null, _ghostLead = null;
+
+function _ensureGhostObjects() {
+    if (!_ghostLead) {
+        _ghostLead = L.polyline([], { color: '#22d3ee', weight: 4, opacity: 0.7,
+            dashArray: '5 6', interactive: false });
+    }
+    if (!_ghostMarker) {
+        _ghostMarker = L.marker([0, 0], { interactive: false, keyboard: false,
+            zIndexOffset: 300 });
+    }
+}
+
+function hideGhost() {
+    if (_ghostMarker && map && map.hasLayer(_ghostMarker)) map.removeLayer(_ghostMarker);
+    if (_ghostLead && map && map.hasLayer(_ghostLead)) map.removeLayer(_ghostLead);
+}
+
+function _boatClassStartMs(boat) {
+    const cls = (currentRace?.classes || []).find(c => c.id === boat?.class);
+    return cls?.start_time ? new Date(cls.start_time).getTime() : null;
+}
+
+function _fmtGap(sec) {
+    const s = Math.round(Math.abs(sec));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// ghostElapsed[i] = seconds from the class-start gun to reach vertex i if
+// this line were sailed at polar target speed. Anchored at startIdx (first
+// vertex at/after the gun) so the gap is 0 at the gun and grows only from
+// in-race losses. Cached + signature-keyed (boat | wind source | mode |
+// window) so it only recomputes when something material changes.
+function computeGhost(layer) {
+    const boat = layer.boat;
+    const polar = boat?.polar;
+    if (!polar || !(polar.nospin || polar.spin)) return null;
+    if (!weatherWindSamples || !weatherWindSamples.length) return null;
+    const classStartMs = _boatClassStartMs(boat);
+    if (classStartMs == null) return null;
+
+    const times = layer.times, cum = layer.cumDist, data = layer.data;
+    const n = data.length;
+    const finishMs = boat?.finish_time ? new Date(boat.finish_time).getTime() : times[n - 1];
+    const sig = `${boat.boat_id || layer.deviceId}|${weatherWindSource}|${ghostMode}|${classStartMs}|${finishMs}`;
+    if (layer._ghost && layer._ghost.sig === sig) return layer._ghost;
+
+    let startIdx = 0;
+    while (startIdx < n - 1 && times[startIdx] < classStartMs) startIdx++;
+    let finishIdx = startIdx;
+    while (finishIdx < n - 1 && times[finishIdx + 1] <= finishMs) finishIdx++;
+    if (finishIdx <= startIdx) { layer._ghost = { sig, invalid: true }; return null; }
+
+    const ghostElapsed = new Float64Array(n);
+    for (let i = startIdx + 1; i <= finishIdx; i++) {
+        const segLen = cum[i] - cum[i - 1];               // metres along the line
+        const w = windAt(times[i - 1]);
+        let dt;
+        if (w && w.tws != null) {
+            const twa = ((w.twd - (data[i - 1].course || 0) + 540) % 360) - 180;
+            const tgtKn = _polarSpeedKn(polar, twa, w.tws);
+            const tgtMps = tgtKn ? tgtKn * 0.514444 : null;
+            dt = (tgtMps && tgtMps > 0.05) ? segLen / tgtMps : (times[i] - times[i - 1]) / 1000;
+        } else {
+            dt = (times[i] - times[i - 1]) / 1000;        // no wind → match actual
+        }
+        ghostElapsed[i] = ghostElapsed[i - 1] + dt;
+    }
+    layer._ghost = { sig, startIdx, finishIdx, classStartMs, ghostElapsed };
+    return layer._ghost;
+}
+
+function updateGhost(targetTimeMs) {
+    const sel = drawerDeviceId;
+    const layer = sel ? boatLayers[sel] : null;
+    if (!markerOverlays.polarGhost || !layer || !layer.visible) { hideGhost(); return; }
+    if (ghostMode === 'optimal') { updateGhostOptimal(targetTimeMs, layer); return; }
+    const g = computeGhost(layer);
+    if (!g || g.invalid) { hideGhost(); return; }
+    const { startIdx, finishIdx, classStartMs, ghostElapsed } = g;
+    const times = layer.times, cum = layer.cumDist, coords = layer.coords;
+
+    const Treal = (targetTimeMs - classStartMs) / 1000;
+    if (Treal <= 0) { hideGhost(); return; }              // pre-start: no ghost
+
+    const realIdx = Math.min(Math.max(layer.currentIdx ?? startIdx, startIdx), finishIdx);
+
+    // Locate the ghost: vertex j with ghostElapsed[j] <= Treal <= [j+1].
+    let j, f = 0, terminal = false;
+    if (Treal >= ghostElapsed[finishIdx]) {
+        j = finishIdx; terminal = true;                   // ghost already finished
+    } else {
+        j = realIdx;
+        if (ghostElapsed[j] > Treal) { while (j > startIdx && ghostElapsed[j] > Treal) j--; }
+        else { while (j < finishIdx && ghostElapsed[j + 1] <= Treal) j++; }
+        const span = ghostElapsed[j + 1] - ghostElapsed[j];
+        f = span > 0 ? (Treal - ghostElapsed[j]) / span : 0;
+    }
+    const jb = Math.min(j + 1, finishIdx);
+    const a = coords[j], b = coords[jb];
+    const ghostPos = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+    const ghostS = cum[j] + (cum[jb] - cum[j]) * f;
+
+    // Headline: how long your polar-self reached your CURRENT spot before you.
+    const gapSec = (times[realIdx] - classStartMs) / 1000 - ghostElapsed[realIdx];
+    const gapM = ghostS - cum[realIdx];
+    const ahead = gapSec < -1;                            // you're beating polar
+
+    _ensureGhostObjects();
+    const color = layer.color || '#22d3ee';
+    const label = terminal
+        ? `🏁 polar finished +${_fmtGap(gapSec)} ahead`
+        : (ahead ? `▲ ${_fmtGap(gapSec)} ahead of polar`
+                 : `👻 +${_fmtGap(gapSec)}${Math.abs(gapM) >= 10 ? ` · ${Math.round(gapM)}m` : ''}`);
+    _ghostMarker.setIcon(L.divIcon({
+        className: 'ghost-marker',
+        html: `<span class="ghost-dot" style="background:${color}"></span>`
+            + `<span class="ghost-label">${label}</span>`,
+        iconSize: [0, 0], iconAnchor: [0, 0],
+    }));
+    _ghostMarker.setLatLng(ghostPos);
+    if (!map.hasLayer(_ghostMarker)) _ghostMarker.addTo(map);
+
+    // Lead segment: the slice of YOUR own line between you and the ghost.
+    const loI = Math.min(realIdx, j), hiI = Math.max(realIdx, j);
+    const lead = coords.slice(loI, hiI + 1).map(c => [c[0], c[1]]);
+    if (!terminal) { (realIdx <= j) ? lead.push(ghostPos) : lead.unshift(ghostPos); }
+    _ghostLead.setLatLngs(lead);
+    _ghostLead.setStyle({ color, opacity: ahead ? 0.4 : 0.7, dashArray: '5 6', weight: 4 });
+    if (!map.hasLayer(_ghostLead)) _ghostLead.addTo(map);
+}
+
+// ── Optimal-routing ghost (mode 2) ──────────────────────────────────────
+// Sails the IDEAL route to each course mark — an actually-sailable path:
+// TACKS up the laylines at the polar's best beat angle on legs to windward,
+// GYBES down the runs at the best downwind angle, fetches straight on
+// reaches. One tack/gybe per leg (no-shift optimum). Times each segment at
+// the boat's own polar boatspeed for that angle, with per-leg NOAA wind,
+// anchored at the gun. ESTIMATE — sensitive to the buoy wind's ~15-20° bias,
+// which moves both the laylines and the time gap.
+
+// Best VMG point of sail from a boat's own polar, CLAMPED to the polar's
+// published TWA range (extrapolating below it invents bogus high speeds and
+// a false-optimal pinching angle). Returns {twa, vmg(kn toward/away wind), speed}.
+function _bestVMG(polar, tws, upwind) {
+    const tA = polar?.twa_values || [];
+    if (!tA.length) return null;
+    const lo = Math.ceil(tA[0]), hi = Math.floor(tA[tA.length - 1]);
+    let best = null;
+    for (let twa = lo; twa <= hi; twa++) {
+        if (upwind ? twa >= 90 : twa < 90) continue;
+        const v = _polarSpeedKn(polar, twa, tws);
+        if (!v) continue;
+        const vmg = upwind ? v * Math.cos(twa * Math.PI / 180)
+                           : v * Math.cos((180 - twa) * Math.PI / 180);
+        if (vmg > 0 && (!best || vmg > best.vmg)) best = { twa, vmg, speed: v };
+    }
+    return best;
+}
+
+// Local ENU helpers (small-area equirectangular) for layline geometry.
+function _llToXY(p, ref) {
+    const k = Math.PI / 180;
+    return { x: (p.lon - ref.lon) * Math.cos(ref.lat * k) * 111320,
+             y: (p.lat - ref.lat) * 110540 };
+}
+function _xyToLL(xy, ref) {
+    const k = Math.PI / 180;
+    return { lat: ref.lat + xy.y / 110540,
+             lon: ref.lon + xy.x / (Math.cos(ref.lat * k) * 111320) };
+}
+function _dirVec(bearingDeg) {
+    const r = bearingDeg * Math.PI / 180;
+    return { x: Math.sin(r), y: Math.cos(r) };   // (East, North)
+}
+// Fraction (0..1) of P's projection onto segment A→B (along-course position).
+function _projFrac(A, B, P) {
+    const b = _llToXY(B, A), p = _llToXY(P, A);   // A at origin
+    const L2 = b.x * b.x + b.y * b.y;
+    if (L2 < 1e-6) return 0;
+    return Math.max(0, Math.min(1, (p.x * b.x + p.y * b.y) / L2));
+}
+// Single tack (downwind=false) / gybe (true) corner from A to B sailing at
+// optimal angle `theta` (TWA) given wind-from `twd`: the boat sails one tack
+// to the layline, then the other to lay B. Returns the corner {lat,lon} or
+// null when no forward two-tack solution exists (treat as a straight fetch).
+function _cornerPoint(A, B, twd, theta, downwind) {
+    const base = downwind ? (twd + 180) : twd;     // axis we're sailing toward
+    const off = downwind ? (180 - theta) : theta;  // angle off that axis
+    const Bxy = _llToXY(B, A);                      // A at origin
+    let best = null;
+    for (const [hA, hB] of [[base - off, base + off], [base + off, base - off]]) {
+        const d1 = _dirVec(hA), d2 = _dirVec(hB);
+        const det = d1.x * d2.y - d2.x * d1.y;
+        if (Math.abs(det) < 1e-9) continue;
+        const t1 = (Bxy.x * d2.y - d2.x * Bxy.y) / det;   // A + t1*d1 = corner
+        const t2 = (d1.x * Bxy.y - d1.y * Bxy.x) / det;
+        if (t1 > 2 && t2 > 2 && (!best || t1 + t2 < best.total)) {  // forward, favoured (shorter)
+            best = { total: t1 + t2, xy: { x: t1 * d1.x, y: t1 * d1.y } };
+        }
+    }
+    return best ? _xyToLL(best.xy, A) : null;
+}
+
+// Build the optimal route as an actually-sailable path: tack to the layline
+// on beats, gybe on runs, fetch straight on reaches. Returns route lat/lngs
+// plus cumulative TIME and cumulative along-course (rhumb) distance per
+// vertex — the latter so the gap compares against your own rhumb progress.
+function _buildOptimalRoute(layer, wps) {
+    const polar = layer.boat.polar;
+    const classStartMs = _boatClassStartMs(layer.boat);
+    const routeLL = [[wps[0].lat, wps[0].lon]];
+    const cumTime = [0], cumRhumb = [0];
+    const push = (p, segSec, rhumb) => {
+        routeLL.push([p.lat, p.lon]);
+        cumTime.push(cumTime[cumTime.length - 1] + segSec);
+        cumRhumb.push(rhumb);
+    };
+    for (let i = 1; i < wps.length; i++) {
+        const A = wps[i - 1], B = wps[i];
+        const L = haversineMeters(A.lat, A.lon, B.lat, B.lon);
+        const be = bearingDegrees(A.lat, A.lon, B.lat, B.lon);
+        const w = windAt(classStartMs + cumTime[cumTime.length - 1] * 1000) || windAt(classStartMs);
+        const S_A = cumRhumb[cumRhumb.length - 1];
+        const up = w ? _bestVMG(polar, w.tws, true) : null;
+        const dn = w ? _bestVMG(polar, w.tws, false) : null;
+        const g = w ? Math.abs(((be - w.twd + 540) % 360) - 180) : 90;
+        let corner = null, vKn = null;
+        if (w && up && g <= up.twa) { corner = _cornerPoint(A, B, w.twd, up.twa, false); vKn = up.speed; }
+        else if (w && dn && g >= dn.twa) { corner = _cornerPoint(A, B, w.twd, dn.twa, true); vKn = dn.speed; }
+        if (corner && vKn) {
+            const v = vKn * 0.514444;
+            const l1 = haversineMeters(A.lat, A.lon, corner.lat, corner.lon);
+            const l2 = haversineMeters(corner.lat, corner.lon, B.lat, B.lon);
+            push(corner, l1 / v, S_A + _projFrac(A, B, corner) * L);
+            push(B, l2 / v, S_A + L);
+        } else {
+            const v = ((w && _polarSpeedKn(polar, g, w.tws)) || 3) * 0.514444;
+            push(B, L / v, S_A + L);
+        }
+    }
+    return { routeLL, cumTime, cumRhumb, classStartMs };
+}
+
+// Course waypoints: start-line midpoint → each mark in the course → finish
+// midpoint. Returns null if the race has no usable course.
+function _courseWaypoints(race) {
+    const start = startMidpoint(race);
+    const byId = buildMarksById(race);
+    const marks = (race?.course || []).map(id => byId[id]).filter(m => m && m.lat != null);
+    if (!start || marks.length < 1) return null;
+    const wps = [{ lat: start.lat, lon: start.lon }, ...marks.map(m => ({ lat: m.lat, lon: m.lon }))];
+    const fl = race?.finish_line;
+    if (fl && fl.pin_lat != null && fl.boat_lat != null) {
+        wps.push({ lat: (fl.pin_lat + fl.boat_lat) / 2, lon: (fl.pin_lon + fl.boat_lon) / 2 });
+    }
+    return { wps, nMarks: marks.length };
+}
+
+// Your along-course distance over [start, …marks, finish], using rounded
+// marks (legsDone) + projection onto the current leg. Mirrors
+// progressMetersAt but extends to the finish leg.
+function _ghostCourseProgressM(wps, nMarks, point, legsDone) {
+    const reached = Math.min(legsDone, nMarks);
+    let cum = 0;
+    for (let i = 1; i <= reached; i++) {
+        cum += haversineMeters(wps[i - 1].lat, wps[i - 1].lon, wps[i].lat, wps[i].lon);
+    }
+    const nextI = reached + 1;
+    if (nextI < wps.length && point) {
+        const prev = wps[reached], target = wps[nextI];
+        const legLen = haversineMeters(prev.lat, prev.lon, target.lat, target.lon);
+        const dToT = haversineMeters(point.lat, point.lon, target.lat, target.lon);
+        cum += Math.max(0, Math.min(legLen, legLen - dToT));
+    }
+    return cum;
+}
+
+function _interp(xs, ys, x) {
+    const n = xs.length;
+    if (n === 0) return 0;
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    let k = 0;
+    while (k < n - 1 && xs[k + 1] < x) k++;
+    const span = xs[k + 1] - xs[k];
+    const f = span > 0 ? (x - xs[k]) / span : 0;
+    return ys[k] + (ys[k + 1] - ys[k]) * f;
+}
+
+// Precompute the optimal (tacked/gybed) route + per-vertex time and rhumb
+// progress, anchored at the gun. Cached + signature-keyed.
+function computeOptimalGhost(layer) {
+    const boat = layer.boat, polar = boat?.polar;
+    if (!polar || !(polar.nospin || polar.spin)) return null;
+    if (!weatherWindSamples || !weatherWindSamples.length) return null;
+    if (_boatClassStartMs(boat) == null) return null;
+    const cw = _courseWaypoints(currentRace);
+    if (!cw) return null;
+    const sig = `${boat.boat_id || layer.deviceId}|${weatherWindSource}|opt|${currentRace.race_id}|${cw.wps.length}`;
+    if (layer._ghostOpt && layer._ghostOpt.sig === sig) return layer._ghostOpt;
+    const route = _buildOptimalRoute(layer, cw.wps);
+    layer._ghostOpt = { sig, ...route, wps: cw.wps, nMarks: cw.nMarks };
+    return layer._ghostOpt;
+}
+
+function updateGhostOptimal(targetTimeMs, layer) {
+    const g = computeOptimalGhost(layer);
+    if (!g) { hideGhost(); return; }
+    const { routeLL, cumTime, cumRhumb, classStartMs, wps, nMarks } = g;
+    const T = (targetTimeMs - classStartMs) / 1000;
+    if (T <= 0) { hideGhost(); return; }
+    const last = cumTime.length - 1;
+
+    let pos, sOpt, terminal = false;
+    if (T >= cumTime[last]) {
+        pos = routeLL[last]; sOpt = cumRhumb[last]; terminal = true;
+    } else {
+        let k = 0;
+        while (k < last && cumTime[k + 1] <= T) k++;
+        const span = cumTime[k + 1] - cumTime[k];
+        const f = span > 0 ? (T - cumTime[k]) / span : 0;
+        pos = [routeLL[k][0] + (routeLL[k + 1][0] - routeLL[k][0]) * f,
+               routeLL[k][1] + (routeLL[k + 1][1] - routeLL[k][1]) * f];
+        sOpt = cumRhumb[k] + (cumRhumb[k + 1] - cumRhumb[k]) * f;
+    }
+
+    const legsDone = legsCompletedAt(layer, targetTimeMs);
+    const sYou = layer.current ? _ghostCourseProgressM(wps, nMarks, layer.current, legsDone) : 0;
+    const gapSec = T - _interp(cumRhumb, cumTime, sYou);   // time behind optimal pace
+    const gapM = sOpt - sYou;
+    const ahead = gapSec < -1;
+
+    _ensureGhostObjects();
+    const color = layer.color || '#22d3ee';
+    _ghostLead.setLatLngs(routeLL);                          // actual tacked/gybed route
+    _ghostLead.setStyle({ color, opacity: 0.55, dashArray: '3 6', weight: 3 });
+    if (!map.hasLayer(_ghostLead)) _ghostLead.addTo(map);
+
+    const label = terminal
+        ? `🎯 optimal done · you +${_fmtGap(gapSec)}`
+        : (ahead ? `▲ ${_fmtGap(gapSec)} ahead of optimal`
+                 : `🎯 +${_fmtGap(gapSec)}${Math.abs(gapM) >= 10 ? ` · ${Math.round(gapM)}m` : ''}`);
+    _ghostMarker.setIcon(L.divIcon({
+        className: 'ghost-marker',
+        html: `<span class="ghost-dot" style="background:${color}"></span>`
+            + `<span class="ghost-label">${label}</span>`,
+        iconSize: [0, 0], iconAnchor: [0, 0],
+    }));
+    _ghostMarker.setLatLng(pos);
+    if (!map.hasLayer(_ghostMarker)) _ghostMarker.addTo(map);
 }
 
 // Refresh the map's top-left wind picker (rotating arrow + TWD/TWS
@@ -3075,6 +3448,10 @@ function createWindRoseIcon(twd, tws, opts = {}) {
 // Each marker rotates and updates with the playback cursor.
 function updateAllWindMarkers(targetTimeMs) {
     if (!map) return;
+    if (weatherObsHidden) {   // Weather panel hid the obs buoys — clear rose markers
+        for (const sid of Object.keys(windMarkers)) { map.removeLayer(windMarkers[sid]); delete windMarkers[sid]; }
+        return;
+    }
     const present = new Set();
     for (const [sid, buoy] of Object.entries(raceBuoyData)) {
         if (!windStationStats[sid]) continue;
@@ -3501,8 +3878,16 @@ function computePHRFResults() {
         let elapsedSec = null;
         let correctedSec = null;
         if (status === 'FIN' && startMs != null && finishMs != null) {
-            elapsedSec = (finishMs - startMs) / 1000;
-            if (Number.isFinite(rating) && rating > 0) {
+            // Pursuit races start each boat at its own staggered gun — elapsed
+            // is from that boat's own start, not the class (first) gun.
+            const ownStart = boat.pursuit_start ? _parseTimeToMs(boat.pursuit_start) : null;
+            elapsedSec = (finishMs - (ownStart != null ? ownStart : startMs)) / 1000;
+            // PHRF stores a precomputed corrected time (ToT/ToD/pursuit don't
+            // reduce to elapsed×rating, and `rating` holds the real PHRF number).
+            // ORR-EZ falls back to elapsed×rating as before.
+            if (Number.isFinite(boat.corrected_sec)) {
+                correctedSec = boat.corrected_sec;
+            } else if (Number.isFinite(rating) && rating > 0) {
                 correctedSec = elapsedSec * rating;
             }
         }
@@ -3564,10 +3949,61 @@ function renderOrrEzExplainer() {
     if (!classes.length) {
         return '<div class="modal-empty">This race isn’t scored on a handicap rating — boats finish on the line (first-to-finish), so there’s no corrected time to explain.</div>';
     }
+    const esc = (typeof _attrEsc === 'function') ? _attrEsc : (s => String(s ?? ''));
+    // PHRF regattas use a different handicap model than ORR-EZ — show a
+    // PHRF-specific explainer instead of the elapsed×rating one.
+    const sys0 = `${classes[0]?.rating_system || ''} ${classes[0]?.rating_type || ''}`.toUpperCase();
+    if (sys0.includes('PHRF')) {
+        const pursuit = sys0.includes('PURSUIT');
+        const tod = !pursuit && (sys0.includes('DISTANCE') || sys0.includes('TOD'));
+        if (pursuit) {
+            return `
+            <div class="orrez">
+              <p class="orrez-lede">A <strong>pursuit race</strong> puts the handicap into the <em>start</em>, not a
+              post-race correction. <strong>Slower boats (higher PHRF) start first</strong>; faster boats start later
+              by their rating. If everyone sailed exactly to handicap they’d all finish together — so the
+              <strong>first boat across the line wins</strong>. No corrected time: finish order is the result.</p>
+              <div class="orrez-formula">
+                <div class="orrez-formula-main">Start&nbsp;delay&nbsp;=&nbsp;(slowest&nbsp;rating&nbsp;−&nbsp;your&nbsp;rating)&nbsp;×&nbsp;course&nbsp;distance</div>
+                <div class="orrez-formula-sub">Everyone sails the same course &nbsp;·&nbsp; <strong>first to finish wins</strong></div>
+              </div>
+              <div class="orrez-grid2">
+                <div class="orrez-card"><h4>Reading the table</h4>
+                  <p><strong>Place = finish order.</strong> Each boat’s <em>start</em> is its own staggered gun and
+                  <em>elapsed</em> is its real time on the course (finish − own start) — a faster elapsed means the
+                  boat beat its rating, even if it didn’t cross first.</p></div>
+                <div class="orrez-card"><h4>Which way does the rating go?</h4>
+                  <p>A <strong>lower PHRF = a faster boat</strong>, so it starts later and has less time to make up
+                  the gap. A boat that finishes ahead of its scheduled rivals sailed better than its handicap.</p></div>
+              </div>
+            </div>`;
+        }
+        return `
+        <div class="orrez">
+          <p class="orrez-lede">Boats of different size and speed race together, so first-across-the-line
+          wouldn’t be fair. <strong>PHRF</strong> gives each boat a <strong>rating</strong> (seconds-per-mile
+          handicap) and scores on <strong>corrected time</strong> — lowest corrected wins.</p>
+          <div class="orrez-formula">
+            <div class="orrez-formula-main">${tod
+                ? 'Corrected&nbsp;=&nbsp;Elapsed&nbsp;−&nbsp;(Rating&nbsp;×&nbsp;Distance)'
+                : 'Corrected&nbsp;=&nbsp;Elapsed&nbsp;×&nbsp;TCF,&nbsp;&nbsp;TCF&nbsp;=&nbsp;650&nbsp;/&nbsp;(550&nbsp;+&nbsp;Rating)'}</div>
+            <div class="orrez-formula-sub">Elapsed = finish − class start &nbsp;·&nbsp;
+              ${tod ? 'Time-on-Distance' : 'Time-on-Time'} &nbsp;·&nbsp; <strong>lowest corrected wins</strong></div>
+          </div>
+          <div class="orrez-grid2">
+            <div class="orrez-card"><h4>Which way does the rating go?</h4>
+              <p>A <strong>lower PHRF rating = a faster boat</strong> (it owes time). Slower boats carry a higher
+              rating and are given time back, so a smaller boat can beat a bigger one on corrected time.</p></div>
+            <div class="orrez-card"><h4>How this regatta was scored</h4>
+              <p>${tod
+                ? 'A distance race scored <strong>Time-on-Distance</strong>: each boat’s corrected time subtracts its rating times the course distance sailed.'
+                : 'Buoy races scored <strong>Time-on-Time</strong>: corrected time multiplies elapsed by a Time-Correction-Factor derived from the boat’s PHRF rating.'}</p></div>
+          </div>
+        </div>`;
+    }
     const results = computePHRFResults();
     const band = (classes[0]?.rating_type || '').split('-').pop().trim() || '—';
     const ratingLabel = _ratingLabel(classes[0]);
-    const esc = (typeof _attrEsc === 'function') ? _attrEsc : (s => String(s ?? ''));
     const nm = (b) => (b?.boat_name || b?.team_name || 'Boat');
 
     // --- Concept + formula (static) ---
@@ -3705,16 +4141,16 @@ function renderPHRFLeaderboard() {
     const visibleClasses = classes.filter(c => classFilter === 'all' || classFilter === c.id);
     const drawerActive = drawerDeviceId;
 
-    // 3-state filter — A · B · Both. Built every render so a class
-    // added/renamed in the editor reflects immediately.
+    // Class filter — "All" first, then one tab per class. Built every
+    // render so a class added/renamed in the editor reflects immediately.
     const toggle = `
         <div class="lb-class-filter" role="tablist" aria-label="Filter by class">
+            <button type="button" data-class-filter="all"
+                    class="${classFilter === 'all' ? 'active' : ''}">All</button>
             ${classes.map(c => `
                 <button type="button" data-class-filter="${_attrEsc(c.id)}"
                         class="${classFilter === c.id ? 'active' : ''}">${_attrEsc(c.name || c.id)}</button>
             `).join('')}
-            <button type="button" data-class-filter="all"
-                    class="${classFilter === 'all' ? 'active' : ''}">Both</button>
         </div>
     `;
 
@@ -4451,6 +4887,9 @@ function openBoatDrawer(deviceId) {
     if (el) el.classList.add('open');
     updateBoatDrawer();
     renderLeaderboard();  // re-render to highlight active row
+    // Reposition follow + polar ghost for the newly selected boat right
+    // away (so they appear even while paused).
+    if (currentRace) updateBoatPositions(playCursorSeconds);
 }
 
 // Open the drawer for a boat that has no GPS track this race. Same
@@ -4470,6 +4909,7 @@ function closeBoatDrawer() {
     drawerBoatId = null;
     const el = document.getElementById('boat-drawer');
     if (el) el.classList.remove('open');
+    hideGhost();           // ghost is selected-boat only
     renderLeaderboard();
 }
 
@@ -4542,8 +4982,14 @@ function updateBoatDrawer() {
     const sog = point.speed_kn || 0;
     const cog = point.course || 0;
     const twa = noaa ? (((noaa.twd - cog + 540) % 360) - 180) : null;
-    const polTarget = polarTargetSpeed(twa, noaa?.tws);
-    const polPct = polarPercent(sog, twa, noaa?.tws);
+    // Use THIS boat's own loaded VPP polar (from its ORR-EZ cert) — not the
+    // generic J/80 table — so Target/%polar reflect the actual boat. When no
+    // boat polar is loaded we hide the section entirely rather than show a
+    // misleading J/80 default.
+    const hasPolar = !!(boat?.polar && (boat.polar.nospin || boat.polar.spin));
+    const polarLabel = (boat?.boat_type || '').trim() || 'VPP';
+    const polTarget = hasPolar ? _polarSpeedKn(boat.polar, twa, noaa?.tws) : null;
+    const polPct = (polTarget && polTarget > 0.1 && Number.isFinite(sog)) ? (sog / polTarget) * 100 : null;
     const tack = twa == null ? '—' : (twa < 0 ? 'Port' : 'Starboard');
 
     // Course-aware
@@ -4637,15 +5083,26 @@ function updateBoatDrawer() {
                 <div class="drawer-stat"><div class="drawer-label">Tack</div><div class="drawer-value">${tack}</div></div>
             </div>
         </div>
+        ${hasPolar ? `
         <div class="drawer-section">
-            <div class="drawer-section-title">Polar (J/80)</div>
+            <div class="drawer-section-title">Polar (${_attrEsc(polarLabel)}) · <a href="#" class="cert-link drawer-polar-plot-link">📈 plot</a>${
+                boat?.cert_url
+                    ? ` · <a href="${_attrEsc(boat.cert_url)}" target="_blank" rel="noopener" class="cert-link">🏷 cert ↗</a>`
+                    : ''
+            }</div>
             <div class="drawer-grid">
                 <div class="drawer-stat"><div class="drawer-label">Target</div><div class="drawer-value">${fmt(polTarget, 1, ' kn')}</div></div>
                 <div class="drawer-stat"><div class="drawer-label">% polar</div><div class="drawer-value drawer-strong">${fmt(polPct, 0, '%')}</div></div>
             </div>
-        </div>
+        </div>` : ''}
         ${nextMarkBlock}
     `;
+
+    // Wire the in-app "polar plot" link in the Polar header. The cert link
+    // is a plain external anchor and needs no JS. Re-queried each render
+    // (the drawer re-renders every playback tick).
+    const _ppLink = document.querySelector('#drawer-body .drawer-polar-plot-link');
+    if (_ppLink) _ppLink.addEventListener('click', (e) => { e.preventDefault(); openPolarOverlay(); });
 }
 
 // Catalog-only drawer renderer: opens for boats with no GPS this
@@ -4707,8 +5164,10 @@ function _catalogDrawerResultBlock(raceBoat) {
 
     let elapsedSec = null, correctedSec = null;
     if (status === 'FIN' && startMs != null && finishMs != null) {
-        elapsedSec = (finishMs - startMs) / 1000;
-        if (Number.isFinite(rating) && rating > 0) correctedSec = elapsedSec * rating;
+        const ownStart = raceBoat.pursuit_start ? _parseTimeToMs(raceBoat.pursuit_start) : null;
+        elapsedSec = (finishMs - (ownStart != null ? ownStart : startMs)) / 1000;
+        if (Number.isFinite(raceBoat.corrected_sec)) correctedSec = raceBoat.corrected_sec;
+        else if (Number.isFinite(rating) && rating > 0) correctedSec = elapsedSec * rating;
     }
 
     // Place: re-derive within class using the same logic as the
@@ -7639,6 +8098,24 @@ function updatePlaybackPosition() {
     // Update AIS traffic positions (map-only; never touches leaderboard)
     updateAISPositions(currentTime);
 
+    // Weather overlay (HRRR wind / sea-breeze / tide / relief / dist) — driven by
+    // the race clock. Init once (after map + race are ready), then sync each tick.
+    if (window.SFWeather && map && currentRace?.start_time) {
+        const wxMs = new Date(currentRace.start_time).getTime() + currentTime * 1000;
+        if (!sfwInited) {
+            sfwInited = true;
+            SFWeather.init({
+                map,
+                date: currentRace.date || currentRace.start_time.slice(0, 10),
+                onObsToggle: (show) => {
+                    weatherObsHidden = !show;
+                    updateAllWindMarkers(new Date(currentRace.start_time).getTime() + currentTime * 1000);
+                },
+            });
+        }
+        SFWeather.setTime(wxMs);
+    }
+
     // Update leaderboard
     renderLeaderboard();
 }
@@ -7684,11 +8161,21 @@ async function loadRegattas() {
         const data = await resp.json();
         regattas = data.regattas || [];
 
+        // Track admin-only regattas so non-admins never see them in the
+        // picker and their races never win the site-wide auto-load below.
+        hiddenRegattaIds = new Set(
+            regattas.filter(r => (r.visibility || 'public') === 'admin')
+                    .map(r => r.regatta_id)
+        );
+        const pickerRegattas = IS_ADMIN
+            ? regattas
+            : regattas.filter(r => !hiddenRegattaIds.has(r.regatta_id));
+
         // Populate regatta selects
         const regattaSelect = document.getElementById('regatta-select');
         const regattaInput = document.getElementById('regatta-input');
 
-        const options = regattas.map(r =>
+        const options = pickerRegattas.map(r =>
             `<option value="${r.regatta_id}">${r.name}</option>`
         ).join('');
 
@@ -8415,7 +8902,7 @@ function renderPHRFRoster(boats) {
     const container = document.getElementById('phrf-roster');
     if (!container) return;
 
-    const ALL_DEVICES = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6'];
+    const ALL_DEVICES = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6'];
 
     container.innerHTML = boats.map((boat, idx) => {
         const yacht = (boat.boat_name || '').trim();
