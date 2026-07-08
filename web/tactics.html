@@ -11,7 +11,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="./assets/css/tactics.css?v=11">
+    <link rel="stylesheet" href="./assets/css/tactics.css?v=12">
     <script src="./config.js"></script>
     <script src="./assets/js/analytics.js"></script>
 </head>
@@ -36,10 +36,10 @@
         <section class="tx-view" id="view-replay">
             <div class="tx-toolbar">
                 <label>Day
-                    <input type="date" id="tx-date" value="2025-07-01" min="2016-08-23" max="2026-10-15">
+                    <input type="date" id="tx-date" value="2026-07-04" min="2016-08-23" max="2026-10-15">
                 </label>
                 <button id="tx-play" class="tx-btn">▶ Play</button>
-                <input type="range" id="tx-scrub" min="0" max="23" value="18" step="1" class="tx-scrub">
+                <input type="range" id="tx-scrub" min="0" max="23" value="16" step="1" class="tx-scrub">
                 <span class="tx-clock" id="tx-clock">—</span>
                 <label class="tx-obs-toggle" title="Overlay independent buoy + airport wind observations to check the model"><input type="checkbox" id="tx-obs" checked> Obs ◎</label>
                 <label class="tx-obs-toggle" id="tx-rtma-toggle" title="Overlay NOAA RTMA 2.5 km obs-anchored surface analysis (Analysis of Record) — the model-confirmation truth field. Live on today's forecast." hidden><input type="checkbox" id="tx-rtma"> RTMA ⛆</label>
@@ -116,6 +116,6 @@
         </section>
     </main>
 
-    <script type="module" src="./assets/js/tactics-app.js?v=11"></script>
+    <script type="module" src="./assets/js/tactics-app.js?v=12"></script>
 </body>
 </html>

@@ -30,7 +30,7 @@ const ctx = canvas.getContext('2d');
 
 let GRID = null;       // {nx, ny, lats[], lons[], land_mask[], ...}
 let FRAMES = [];       // FRAMES[h] = {t, u:Float32Array, v:Float32Array} per cycle hour
-let curFrame = 18;     // default to ~14 EDT (18Z) — peak sea-breeze hour
+let curFrame = 16;     // default landing ~noon ET (16Z in EDT) — see landAtEtHour
 let playing = false;
 let playTimer = null;
 
@@ -414,6 +414,19 @@ async function loadDay(dateStr) {
   await loadObsForDay(dateStr).catch(() => { });                                 // then obs (same connection)
 }
 
+// Snap the scrubber to the frame nearest a given local (ET) hour — robust to
+// DST and to missing cycles (picks by time, not index). Used for the landing.
+function landAtEtHour(hourEt) {
+  if (!FRAMES.length) return;
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < FRAMES.length; i++) {
+    const h = +new Date(FRAMES[i].t).toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', hour12: false }).replace('24', '0');
+    const dd = Math.abs(h - hourEt);
+    if (dd < bd) { bd = dd; best = i; }
+  }
+  curFrame = best; $('tx-scrub').value = best;
+}
+
 // Obs toggle: reload obs for the current day when enabled, then repaint.
 $('tx-obs')?.addEventListener('change', async e => {
   obsOn = e.target.checked;
@@ -793,7 +806,7 @@ window.addEventListener('resize', () => { if (!$('view-stats').hidden) renderMon
     // Engine + map are ready now — page is usable. Load the default day's wind
     // field in the background so the map paints immediately instead of blocking.
     window.__tacticsReady = true;
-    loadDay($('tx-date').value).then(render)
+    loadDay($('tx-date').value).then(() => { landAtEtHour(12); render(); })   // land at ~noon ET
       .catch(() => setStatus(`No archived wind field for ${$('tx-date').value} yet.`));
   } catch (err) {
     setStatus('load failed: ' + err.message);
