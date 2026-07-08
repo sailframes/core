@@ -43,29 +43,21 @@ B = dict(lat_min=41.5, lat_max=42.95, lon_min=-71.35, lon_max=-69.7)
 _s3 = boto3.client("s3")
 
 
-def fetch_dem(tiles=2, tile_w=2600):
-    """Float32 elevation MOSAIC for the bbox. The ImageServer's f=image raster cap is
-    ~3000 px, so to get finer than ~60 m over the whole region we fetch a `tiles`×`tiles`
-    grid (degree-aspect per tile so the extent isn't expanded) and stitch. tiles=2,
-    tile_w=2600 → ~5200×4570 ≈ 26 m/px."""
+def fetch_dem(size_w=3000):
+    """Float32 elevation for the bbox in ONE request (tiling caused stitch/offset
+    seams). The size aspect MUST match the bbox DEGREE aspect (bboxSR=imageSR=4326),
+    else the ImageServer expands the returned extent and the overlay is offset.
+    3000 px is under the f=image raster cap; ~45 m/px over the whole region."""
     dlon = B["lon_max"] - B["lon_min"]                    # degrees (NOT cos-corrected)
     dlat = B["lat_max"] - B["lat_min"]
-    tlon, tlat = dlon / tiles, dlat / tiles
-    tile_h = int(round(tile_w * tlat / tlon))
-    mos = np.full((tile_h * tiles, tile_w * tiles), np.nan, "f4")
-    for tr in range(tiles):          # tr=0 → northern row
-        for tc in range(tiles):
-            lon0 = B["lon_min"] + tc * tlon
-            lat1 = B["lat_max"] - tr * tlat
-            p = dict(bbox="%f,%f,%f,%f" % (lon0, lat1 - tlat, lon0 + tlon, lat1),
-                     bboxSR=4326, imageSR=4326, size="%d,%d" % (tile_w, tile_h),
-                     format="tiff", pixelType="F32", f="image",
-                     interpolation="RSP_BilinearInterpolation", nodata=-9999)
-            r = requests.get(IMG, params=p, timeout=180); r.raise_for_status()
-            t = tifffile.imread(io.BytesIO(r.content)).astype("f4")   # row0 = north
-            th, tw = t.shape
-            mos[tr * tile_h:tr * tile_h + th, tc * tile_w:tc * tile_w + tw] = t[:tile_h, :tile_w]
-    return np.where(mos < -1000, np.nan, mos)                # mask nodata (-9999)
+    size_h = int(round(size_w * dlat / dlon))
+    p = dict(bbox="%f,%f,%f,%f" % (B["lon_min"], B["lat_min"], B["lon_max"], B["lat_max"]),
+             bboxSR=4326, imageSR=4326, size="%d,%d" % (size_w, size_h),
+             format="tiff", pixelType="F32", f="image",
+             interpolation="RSP_BilinearInterpolation", nodata=-9999)
+    r = requests.get(IMG, params=p, timeout=180); r.raise_for_status()
+    a = tifffile.imread(io.BytesIO(r.content)).astype("f4")   # row0 = north
+    return np.where(a < -1000, np.nan, a)                      # mask nodata (-9999)
 
 
 def latlon_of(a):
@@ -158,7 +150,7 @@ def main():
     print("  relief vmax=%.0f m; coastline %d pts / %d segments; %s" % (vmax, npts, nseg, stats["note"]))
     relief_meta = {"bounds": [[B["lat_min"], B["lon_min"]], [B["lat_max"], B["lon_max"]]],
                    "max_elev_m": round(float(np.nanmax(a)), 0), **stats,
-                   "source": "USGS 3DEP 10 m (mosaicked ~26 m)"}
+                   "source": "USGS 3DEP 10 m (~45 m single-fetch)"}
     json.dump(relief_meta, open("/tmp/relief.json", "w"))
     json.dump({"heights": heights, **stats}, open("/tmp/coast_heights.json", "w"))
     put("/tmp/relief.png", "relief.png", "image/png")
