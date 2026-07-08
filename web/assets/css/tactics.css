@@ -168,3 +168,38 @@ body { padding-bottom: 48px; }
   .tx-view[hidden] { display: none; } #view-briefing { display: block !important; }
   .tx-card { break-inside: avoid; border-color: #ccc; }
 }
+
+/* ===== Sea-breeze analysis (Bernot walkthrough) ===== */
+.bz-body { max-width: 1000px; margin: 0 auto; padding: 4px 2px 40px; }
+.bz-body canvas { background:#fff; border-radius:6px; max-width:100%; }
+.bz-head { display:flex; gap:16px; align-items:flex-start; margin:6px 0 12px; }
+.bz-qbadge { font:800 30px/1 system-ui; color:#fff; width:64px; height:64px; border-radius:12px;
+  display:flex; align-items:center; justify-content:center; flex:0 0 auto; }
+.bz-headmain { flex:1; }
+.bz-date { font-size:.82rem; color:var(--text-secondary,#8b98a5); }
+.bz-verdict { font-weight:700; font-size:1.15rem; margin:2px 0; }
+.bz-verdict.ok { color:#2ec16d; } .bz-verdict.bad { color:#ef6a6a; }
+.bz-sum { font-size:.92rem; color:var(--text-primary,#dfe6ee); line-height:1.4; }
+.bz-kvs { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-bottom:18px; }
+.bz-kv { background:#1c2128; border:1px solid #2a3038; border-radius:8px; padding:7px 10px; }
+.bz-kv span { display:block; font-size:.68rem; color:var(--text-secondary,#8b98a5); text-transform:uppercase; letter-spacing:.03em; }
+.bz-kv b { font-size:.98rem; color:var(--text-primary,#e8edf2); }
+.bz-section-t { font-weight:700; font-size:1.05rem; margin:22px 0 8px; color:var(--text-primary,#e8edf2); border-bottom:1px solid #2a3038; padding-bottom:4px; }
+.bz-step { background:#171b22; border:1px solid #2a3038; border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+.bz-step-h { display:flex; align-items:center; gap:10px; }
+.bz-step-n { background:#3a86c8; color:#fff; font-weight:700; width:24px; height:24px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.85rem; }
+.bz-step-t { font-weight:700; font-size:1rem; color:var(--text-primary,#e8edf2); flex:1; }
+.bz-badge { color:#fff; font-size:.72rem; font-weight:700; padding:3px 8px; border-radius:20px; white-space:nowrap; }
+.bz-rule { font-size:.8rem; color:var(--text-secondary,#8b98a5); font-style:italic; margin:4px 0 10px; }
+.bz-two { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+@media (max-width:720px){ .bz-two { grid-template-columns:1fr; } }
+.bz-lbl { font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; color:var(--text-secondary,#8b98a5); margin-bottom:5px; }
+.bz-p { font-size:.9rem; color:var(--text-primary,#dfe6ee); line-height:1.45; margin-bottom:8px; }
+.bz-note { font-size:.82rem; color:var(--text-secondary,#9aa7b4); }
+.bz-valtext { font-size:.88rem; color:var(--text-primary,#dfe6ee); line-height:1.45; margin-bottom:8px; }
+.bz-wis { width:100%; border-collapse:collapse; font-size:.8rem; }
+.bz-wis th { text-align:left; color:var(--text-secondary,#8b98a5); font-weight:600; border-bottom:1px solid #2a3038; padding:3px 4px; }
+.bz-wis td { padding:3px 4px; border-bottom:1px solid #21262e; color:var(--text-primary,#dfe6ee); }
+.bz-wis .bz-unknown td { opacity:.5; }
+.bz-wis .bz-wis-tot td { border-top:2px solid #2a3038; border-bottom:none; padding-top:6px; font-size:.9rem; }
+.bz-xsec { width:100%; }

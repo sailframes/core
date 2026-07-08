@@ -11,7 +11,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
             integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="./assets/css/tactics.css?v=13">
+    <link rel="stylesheet" href="./assets/css/tactics.css?v=14">
     <script src="./config.js"></script>
     <script src="./assets/js/analytics.js"></script>
 </head>
@@ -28,6 +28,7 @@
         <button class="tx-tab" data-view="calendar">Calendar</button>
         <button class="tx-tab" data-view="stats">Climatology stats</button>
         <button class="tx-tab" data-view="briefing">Race briefing</button>
+        <button class="tx-tab" data-view="breeze">Sea-breeze analysis</button>
         <span class="tx-status" id="tx-status">loading…</span>
     </nav>
 
@@ -114,8 +115,17 @@
                 <p class="tx-note">Loading today's briefing…</p>
             </div>
         </section>
+
+        <!-- ===== Sea-breeze analysis (Bernot decision walkthrough) ===== -->
+        <section class="tx-view" id="view-breeze" hidden>
+            <div class="tx-toolbar">
+                <span class="tx-sub">Bernot sea-breeze decision walkthrough for <b id="bz-day-echo">the selected day</b> — pick a day in <b>Day replay</b>. Analysis runs 2026-07-04 →.</span>
+            </div>
+            <div id="breeze-body" class="bz-body"><p class="tx-note">Select the tab to load…</p></div>
+        </section>
     </main>
 
     <script type="module" src="./assets/js/tactics-app.js?v=13"></script>
+    <script src="./assets/js/tactics-breeze.js?v=1"></script>
 </body>
 </html>
