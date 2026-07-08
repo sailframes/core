@@ -22,6 +22,26 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
   { maxZoom: 19, subdomains: 'abcd' }).addTo(map);
 window.__map = map;   // debug/headless hook
 
+// ---- USGS 3DEP shaded relief + vector coastline (topography, Bernot Ch.5) ----
+let reliefLayer = null, coastLayer = null, reliefOn = false;
+async function ensureRelief() {
+  if (reliefLayer) return;
+  try {
+    const meta = await (await fetch(`${BASE}/relief.json`, { cache: 'force-cache' })).json();
+    reliefLayer = L.imageOverlay(`${BASE}/relief.png`, meta.bounds, { opacity: 0.6, interactive: false });
+    const gj = await (await fetch(`${BASE}/coastline.geojson`, { cache: 'force-cache' })).json();
+    coastLayer = L.geoJSON(gj, { style: { color: '#2c3e50', weight: 0.8, opacity: 0.7, fill: false } });
+  } catch (e) { reliefLayer = null; }
+}
+async function setRelief(on) {
+  reliefOn = on;
+  await ensureRelief();
+  if (!reliefLayer) return;
+  if (on) { reliefLayer.addTo(map); coastLayer.addTo(map); reliefLayer.bringToBack(); }
+  else { map.removeLayer(reliefLayer); map.removeLayer(coastLayer); }
+  setTimeout(render, 20);
+}
+
 // wind-arrow canvas overlay pinned over the map pane
 const canvas = document.createElement('canvas');
 canvas.className = 'tx-arrows';
@@ -463,6 +483,9 @@ $('tx-obs')?.addEventListener('change', async e => {
   if (obsOn) { try { await loadObsForDay($('tx-date').value); } catch { } } else OBS = null;
   render();
 });
+
+// Relief toggle: 3DEP shaded relief + vector coastline under the wind field.
+$('tx-relief')?.addEventListener('change', e => { setRelief(e.target.checked); });
 
 // RTMA toggle: load the live analysis snapshot on demand, then repaint.
 $('tx-rtma')?.addEventListener('change', async e => {
