@@ -336,17 +336,23 @@ def main():
         },
     })
 
-    # STEP 4 — Wisdorff force grid
-    # instability from CAPE; 800 m return-current aid = 925 mb wind has an offshore
-    # (from-land) component that would slide under the synoptic
-    unstable = None if cape_mid is None else bool(cape_mid >= 150)
+    # STEP 4 — Wisdorff force grid (calibrated against the day's observed peak)
+    # 4) instability: convective mixing over the heated land — driven by CAPE OR a
+    #    strong land-sea ΔT (a sea breeze fills at low CAPE, so don't demand deep CAPE).
+    if (cape_mid is not None and cape_mid >= 100) or (dt_c is not None and dt_c >= 6):
+        unstable = True
+    elif (cape_mid is None or cape_mid < 40) and (dt_c is None or dt_c < 3):
+        unstable = False
+    else:
+        unstable = None
+    # 5) 800 m return-current aid: only a SIGNIFICANT (>=8 kt) mid-level wind matters —
+    #    from land aids the return current, from sea opposes; a light wind is neutral.
     wind800_aids = None
-    if dir925 is not None and cf is not None:
-        # aids if the ~750 m wind is from land (offshore) -> feeds the return current
-        wind800_aids = bool(abs(B.ang_diff((dir925 + 180) % 360, cf)) < 90)
-    air_temp_class = None
-    if tmax is not None:
-        air_temp_class = "hot" if tmax >= 28 else ("cool" if tmax <= 20 else "mild")
+    if dir925 is not None and spd925_kt is not None and cf is not None and spd925_kt >= 8:
+        wind800_aids = bool(abs(B.ang_diff((dir925 + 180) % 360, cf)) < 90)   # blows to sea = from land
+    # 6) air-mass temperature: only genuinely cool (post-frontal) air earns the bonus;
+    #    a hot surface Tmax is a poor proxy for a "hot subsident air mass", so no penalty.
+    air_temp_class = None if tmax is None else ("cool" if tmax <= 22 else "mild")
     # sunshine from morning cloud/insolation in the existing fields parquet (loaded above)
     sunshine_class = None
     if fields is not None:

@@ -9,6 +9,20 @@
   const KT = 1.943844;
   let CHARTS = [];
   let loaded = null;   // cache by date
+  let RELIEF = null;   // {img, meta, coast} — 3DEP shaded relief + coastline
+
+  async function ensureReliefBz() {
+    if (RELIEF) return RELIEF;
+    try {
+      const [meta, coast] = await Promise.all([
+        fetch(`${BASE}/relief.json`, { cache: 'force-cache' }).then(r => r.json()),
+        fetch(`${BASE}/coastline.geojson`, { cache: 'force-cache' }).then(r => r.json()),
+      ]);
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = `${BASE}/relief.png`; });
+      RELIEF = { img, meta, coast };
+    } catch (e) { RELIEF = { img: null }; }
+    return RELIEF;
+  }
 
   const VERDICT = {
     yes: ['✓', '#1f9d55', 'confirmed'], no: ['✗', '#d64545', 'not confirmed'],
@@ -113,11 +127,27 @@
     const b = grid.bbox, nx = grid.nx, ny = grid.ny, lm = grid.land_mask, la = grid.lats, lo = grid.lons;
     const X = lon => (lon - b.lon_min) / (b.lon_max - b.lon_min) * W;
     const Y = lat => (b.lat_max - lat) / (b.lat_max - b.lat_min) * H;
-    // basemap: land vs water cells
-    const cw = W / nx * 1.4, ch = H / ny * 1.4;
-    for (let k = 0; k < lm.length; k++) {
-      g.fillStyle = lm[k] ? '#dfe6d8' : '#cfe0ef';
-      g.fillRect(X(lo[k]) - cw / 2, Y(la[k]) - ch / 2, cw, ch);
+    // sea backdrop
+    g.fillStyle = '#cfe0ef'; g.fillRect(0, 0, W, H);
+    // basemap: 3DEP shaded relief (cropped to the analysis bbox), else land/water cells
+    if (RELIEF && RELIEF.img) {
+      const rb = RELIEF.meta.bounds, RW = RELIEF.img.naturalWidth, RH = RELIEF.img.naturalHeight;
+      const [[rlatS, rlonW], [rlatN, rlonE]] = rb;
+      const sx = (b.lon_min - rlonW) / (rlonE - rlonW) * RW;
+      const sx2 = (b.lon_max - rlonW) / (rlonE - rlonW) * RW;
+      const sy = (rlatN - b.lat_max) / (rlatN - rlatS) * RH;
+      const sy2 = (rlatN - b.lat_min) / (rlatN - rlatS) * RH;
+      try { g.drawImage(RELIEF.img, sx, sy, sx2 - sx, sy2 - sy, 0, 0, W, H); } catch (e) { }
+      // vector coastline
+      g.strokeStyle = 'rgba(44,62,80,.7)'; g.lineWidth = 0.8; g.beginPath();
+      for (const f of (RELIEF.coast.features || [])) for (const line of f.geometry.coordinates) {
+        let started = false;
+        for (const [lon, lat] of line) { const px = X(lon), py = Y(lat); if (!started) { g.moveTo(px, py); started = true; } else g.lineTo(px, py); }
+      }
+      g.stroke();
+    } else {
+      const cw = W / nx * 1.4, ch = H / ny * 1.4;
+      for (let k = 0; k < lm.length; k++) { g.fillStyle = lm[k] ? '#dfe6d8' : '#cfe0ef'; g.fillRect(X(lo[k]) - cw / 2, Y(la[k]) - ch / 2, cw, ch); }
     }
     // center = venue racing area
     const cx = W * 0.42, cy = H * 0.5;
@@ -259,6 +289,7 @@
     drawRaceField(d);
     drawCrossSection($('bz-xsec'), d);
     document.querySelectorAll('.bz-gauge').forEach(c => drawGauge(c, +c.dataset.syn));
+    await ensureReliefBz();
     document.querySelectorAll('.bz-qmap').forEach(c => drawQuadrantMap(c, d, grid));
     drawObs(d);
     loaded = d;

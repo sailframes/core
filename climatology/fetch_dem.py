@@ -36,11 +36,14 @@ import hrrr_grid as hg
 IMG = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
 BUCKET = os.environ.get("CLIMO_BUCKET", "sailframes-data-prod")
 PFX = "climatology"
-B = hg.BBOX
+# Relief/coastline extent is GENEROUS (whole sailing region: Boston → Cape Ann →
+# Cape Cod) so the basemap overlay covers the map view at any zoom — larger than the
+# HRRR analysis bbox (hg.BBOX), which stays the small racing venue.
+B = dict(lat_min=41.5, lat_max=42.95, lon_min=-71.35, lon_max=-69.7)
 _s3 = boto3.client("s3")
 
 
-def fetch_dem(size_w=3000, size_h=2000):
+def fetch_dem(size_w=2200, size_h=2000):
     """Float32 elevation array for the bbox + its geographic transform."""
     # aspect: keep ~square pixels
     dlon = (B["lon_max"] - B["lon_min"]) * np.cos(np.radians((B["lat_min"] + B["lat_max"]) / 2))
@@ -53,7 +56,7 @@ def fetch_dem(size_w=3000, size_h=2000):
     r = requests.get(IMG, params=p, timeout=180)
     r.raise_for_status()
     a = tifffile.imread(io.BytesIO(r.content)).astype("f4")   # row0 = north
-    a = np.where(a < -1e4, np.nan, a)
+    a = np.where(a < -1000, np.nan, a)                         # mask nodata (-9999)
     return a
 
 
