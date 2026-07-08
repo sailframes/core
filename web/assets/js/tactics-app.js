@@ -36,50 +36,70 @@ function cellPx() {   // approximate cell spacing in screen px (from two adjacen
 }
 // onshore (marine inflow) if wind blows FROM within ±HALF of the cell's seaward bearing
 const SB_HALF = 75, SB_MINKT = 2.5;
+// water dilated ~2 cells = the "sea-breeze can reach here" mask: open water + the
+// coastal/harbour strip (the 3 km land mask wrongly calls Boston Harbour 'land').
+function nearWaterMask() {
+  if (GRID._nearWater) return GRID._nearWater;
+  const { land_mask, nx, ny } = GRID, n = land_mask.length;
+  let cur = Uint8Array.from(land_mask, v => v ? 0 : 1);   // water=1
+  for (let pass = 0; pass < 2; pass++) {
+    const nxt = cur.slice();
+    for (let row = 0; row < ny; row++) for (let col = 0; col < nx; col++) {
+      const k = row * nx + col; if (cur[k]) continue;
+      for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+        const r2 = row + dr, c2 = col + dc; if (r2 < 0 || r2 >= ny || c2 < 0 || c2 >= nx) continue;
+        if (cur[r2 * nx + c2]) { nxt[k] = 1; dr = dc = 2; }
+      }
+    }
+    cur = nxt;
+  }
+  GRID._nearWater = cur; return cur;
+}
 function seaBreezeMask(fr) {
   const { land_mask, seaward_deg } = GRID;
   if (!seaward_deg) return null;
-  const m = new Uint8Array(land_mask.length);
+  const nw = nearWaterMask();
+  const m = new Uint8Array(land_mask.length);       // 1 = onshore display cell, 2 = onshore open water
   for (let k = 0; k < land_mask.length; k++) {
-    if (land_mask[k]) continue;
+    if (!nw[k]) continue;                            // only water + coastal strip (reaches the harbour)
     const u = fr.u[k], v = fr.v[k]; if (!isFinite(u) || !isFinite(v)) continue;
     const kt = Math.hypot(u, v) * _KTsb; if (kt < SB_MINKT) continue;
-    if (Math.abs(angDiffSb(windFromDeg(u, v), seaward_deg[k])) <= SB_HALF) m[k] = 1;
+    if (Math.abs(angDiffSb(windFromDeg(u, v), seaward_deg[k])) <= SB_HALF) m[k] = land_mask[k] ? 1 : 2;
   }
   return m;
 }
 function drawSeaBreezeZone(fr, r) {
   const m = seaBreezeMask(fr); if (!m) return null;
-  const { lats, lons, nx, ny } = GRID; const [cw, ch] = cellPx();
-  ctx.fillStyle = 'rgba(46,160,220,.22)';
+  const { lats, lons } = GRID; const [cw, ch] = cellPx();
+  ctx.fillStyle = 'rgba(46,160,220,.28)'; ctx.beginPath();   // ONE path -> uniform alpha, no seams
   for (let k = 0; k < m.length; k++) {
     if (!m[k]) continue;
     const pt = map.latLngToContainerPoint([lats[k], lons[k]]);
-    if (pt.x < -20 || pt.y < -20 || pt.x > r.width + 20 || pt.y > r.height + 20) continue;
-    ctx.fillRect(pt.x - cw / 2, pt.y - ch / 2, cw + 1, ch + 1);
+    if (pt.x < -30 || pt.y < -30 || pt.x > r.width + 30 || pt.y > r.height + 30) continue;
+    ctx.rect(pt.x - cw / 2 - 1, pt.y - ch / 2 - 1, cw + 2, ch + 2);
   }
+  ctx.fill();
   return m;
 }
 function drawSeaBreezeFront(m, r) {
-  // front = seaward edge of the onshore zone: an onshore cell whose neighbour toward
-  // the sea (larger coast distance) is water but NOT onshore.
+  // front = seaward edge of the onshore zone: an onshore OPEN-WATER cell whose
+  // neighbour toward the sea (larger coast distance) is water but NOT onshore.
   const { lats, lons, nx, ny, land_mask, coast_dist_nm } = GRID; if (!coast_dist_nm) return;
   const [cw, ch] = cellPx();
   ctx.strokeStyle = '#d81b1b'; ctx.lineWidth = 2.6; ctx.setLineDash([]); ctx.beginPath();
   let any = false;
   const nb = [[1, 0], [-1, 0], [0, 1], [0, -1]];
   for (let row = 0; row < ny; row++) for (let col = 0; col < nx; col++) {
-    const k = row * nx + col; if (!m[k]) continue;
+    const k = row * nx + col; if (m[k] !== 2) continue;                 // onshore OPEN WATER only
     for (const [dc, dr] of nb) {
       const c2 = col + dc, r2 = row + dr; if (c2 < 0 || c2 >= nx || r2 < 0 || r2 >= ny) continue;
       const k2 = r2 * nx + c2;
-      if (land_mask[k2] || m[k2]) continue;                         // neighbour must be open water, not onshore
-      if (coast_dist_nm[k2] <= coast_dist_nm[k] + 0.2) continue;     // …and toward the sea
+      if (land_mask[k2] || m[k2]) continue;                            // neighbour open water, not onshore
+      if (coast_dist_nm[k2] <= coast_dist_nm[k] + 0.2) continue;        // …and toward the sea
       const p1 = map.latLngToContainerPoint([lats[k], lons[k]]);
       const p2 = map.latLngToContainerPoint([lats[k2], lons[k2]]);
       const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
       if (mx < -20 || my < -20 || mx > r.width + 20 || my > r.height + 20) continue;
-      // segment across the shared edge, perpendicular to the cell-connection
       const ex = -(p2.y - p1.y), ey = (p2.x - p1.x); const el = Math.hypot(ex, ey) || 1;
       const hx = ex / el * (Math.abs(dc) ? ch : cw) / 2, hy = ey / el * (Math.abs(dc) ? ch : cw) / 2;
       ctx.moveTo(mx - hx, my - hy); ctx.lineTo(mx + hx, my + hy); any = true;
@@ -89,31 +109,28 @@ function drawSeaBreezeFront(m, r) {
 }
 function drawCoastDist(r) {
   const { lats, lons, nx, ny, coast_dist_nm } = GRID; if (!coast_dist_nm) return;
-  const levels = [3, 6, 12, 20];
-  ctx.fillStyle = 'rgba(60,80,110,.55)';
-  for (const L of levels) {
-    for (let row = 0; row < ny; row++) for (let col = 0; col < nx - 1; col++) {
-      const k = row * nx + col, k2 = k + 1;
-      const a = coast_dist_nm[k], b = coast_dist_nm[k2];
-      if ((a - L) * (b - L) < 0) {                       // level crossing between cells
-        const t = (L - a) / (b - a);
-        const p1 = map.latLngToContainerPoint([lats[k], lons[k]]);
-        const p2 = map.latLngToContainerPoint([lats[k2], lons[k2]]);
-        const x = p1.x + (p2.x - p1.x) * t, y = p1.y + (p2.y - p1.y) * t;
-        if (x < 0 || y < 0 || x > r.width || y > r.height) continue;
-        ctx.beginPath(); ctx.arc(x, y, 1.1, 0, 6.28); ctx.fill();
-      }
+  const levels = [[3, '#1f9d55'], [6, '#3a86c8'], [12, '#e8843a'], [20, '#d64545']];
+  const pt = k => map.latLngToContainerPoint([lats[k], lons[k]]);
+  for (const [L, col] of levels) {
+    ctx.fillStyle = col; let label = null;
+    const cross = (ka, kb) => {                       // dot at the L-crossing on the edge ka-kb
+      const a = coast_dist_nm[ka], b = coast_dist_nm[kb];
+      if ((a - L) * (b - L) >= 0) return;
+      const t = (L - a) / (b - a), p1 = pt(ka), p2 = pt(kb);
+      const x = p1.x + (p2.x - p1.x) * t, y = p1.y + (p2.y - p1.y) * t;
+      if (x < 0 || y < 0 || x > r.width || y > r.height) return;
+      ctx.beginPath(); ctx.arc(x, y, 1.7, 0, 6.28); ctx.fill();
+      if (!label && x > 30 && x < r.width - 34 && y > 14 && y < r.height - 6) label = { x, y };
+    };
+    for (let row = 0; row < ny; row++) for (let col2 = 0; col2 < nx; col2++) {
+      const k = row * nx + col2;
+      if (col2 < nx - 1) cross(k, k + 1);             // horizontal edge
+      if (row < ny - 1) cross(k, k + nx);             // vertical edge
     }
-    // one label per level near the middle row
-    const midrow = Math.floor(ny / 2);
-    for (let col = 1; col < nx - 1; col++) {
-      const k = midrow * nx + col;
-      if (Math.abs(coast_dist_nm[k] - L) < 0.6) {
-        const pt = map.latLngToContainerPoint([lats[k], lons[k]]);
-        if (pt.x > 20 && pt.x < r.width - 30 && pt.y > 10 && pt.y < r.height - 10) {
-          ctx.fillStyle = '#3c506e'; ctx.font = '10px system-ui'; ctx.fillText(L + ' NM', pt.x, pt.y); ctx.fillStyle = 'rgba(60,80,110,.55)'; break;
-        }
-      }
+    if (label) {
+      ctx.font = 'bold 11px system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillRect(label.x - 1, label.y - 10, 34, 13);
+      ctx.fillStyle = col; ctx.fillText(L + ' NM', label.x, label.y);
     }
   }
 }
