@@ -45,6 +45,8 @@
                 <label class="tx-obs-toggle" title="Overlay independent buoy + airport wind observations to check the model"><input type="checkbox" id="tx-obs" checked> Obs ◎</label>
                 <label class="tx-obs-toggle" id="tx-rtma-toggle" title="Overlay NOAA RTMA 2.5 km obs-anchored surface analysis (Analysis of Record) — the model-confirmation truth field. Live on today's forecast." hidden><input type="checkbox" id="tx-rtma"> RTMA ⛆</label>
                 <label class="tx-obs-toggle" title="USGS 3DEP 10 m shaded relief + vector coastline (topography / Bernot Ch.5)"><input type="checkbox" id="tx-relief"> Relief ⛰</label>
+                <label class="tx-obs-toggle" title="Shade the sea-breeze zone (marine onshore flow) + draw the sea-breeze front (its seaward leading edge)"><input type="checkbox" id="tx-seabreeze"> Sea-breeze ⛵</label>
+                <label class="tx-obs-toggle" title="Distance-from-coast isolines (3 / 6 / 12 / 20 NM)"><input type="checkbox" id="tx-dist"> Dist ▦</label>
             </div>
             <div class="tx-stage">
                 <div id="tx-map" class="tx-map"></div>
@@ -126,7 +128,7 @@
         </section>
     </main>
 
-    <script type="module" src="./assets/js/tactics-app.js?v=14"></script>
+    <script type="module" src="./assets/js/tactics-app.js?v=15"></script>
     <script src="./assets/js/tactics-breeze.js?v=3"></script>
 </body>
 </html>

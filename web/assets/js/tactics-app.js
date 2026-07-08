@@ -22,6 +22,102 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
   { maxZoom: 19, subdomains: 'abcd' }).addTo(map);
 window.__map = map;   // debug/headless hook
 
+// ---- sea-breeze ZONE + FRONT + distance-from-coast (Bernot Ch.2/4) ------------
+let sbOn = false, distOn = false;
+const _KTsb = 1.943844;
+function windFromDeg(u, v) { return (Math.atan2(u, v) * 180 / Math.PI + 180) % 360; }
+function angDiffSb(a, b) { return (a - b + 180) % 360 - 180; }
+function cellPx() {   // approximate cell spacing in screen px (from two adjacent cells)
+  const { lats, lons, nx } = GRID;
+  const a = map.latLngToContainerPoint([lats[0], lons[0]]);
+  const bx = map.latLngToContainerPoint([lats[1], lons[1]]);
+  const by = map.latLngToContainerPoint([lats[nx], lons[nx]]);
+  return [Math.max(3, Math.abs(bx.x - a.x)), Math.max(3, Math.abs(by.y - a.y))];
+}
+// onshore (marine inflow) if wind blows FROM within ±HALF of the cell's seaward bearing
+const SB_HALF = 75, SB_MINKT = 2.5;
+function seaBreezeMask(fr) {
+  const { land_mask, seaward_deg } = GRID;
+  if (!seaward_deg) return null;
+  const m = new Uint8Array(land_mask.length);
+  for (let k = 0; k < land_mask.length; k++) {
+    if (land_mask[k]) continue;
+    const u = fr.u[k], v = fr.v[k]; if (!isFinite(u) || !isFinite(v)) continue;
+    const kt = Math.hypot(u, v) * _KTsb; if (kt < SB_MINKT) continue;
+    if (Math.abs(angDiffSb(windFromDeg(u, v), seaward_deg[k])) <= SB_HALF) m[k] = 1;
+  }
+  return m;
+}
+function drawSeaBreezeZone(fr, r) {
+  const m = seaBreezeMask(fr); if (!m) return null;
+  const { lats, lons, nx, ny } = GRID; const [cw, ch] = cellPx();
+  ctx.fillStyle = 'rgba(46,160,220,.22)';
+  for (let k = 0; k < m.length; k++) {
+    if (!m[k]) continue;
+    const pt = map.latLngToContainerPoint([lats[k], lons[k]]);
+    if (pt.x < -20 || pt.y < -20 || pt.x > r.width + 20 || pt.y > r.height + 20) continue;
+    ctx.fillRect(pt.x - cw / 2, pt.y - ch / 2, cw + 1, ch + 1);
+  }
+  return m;
+}
+function drawSeaBreezeFront(m, r) {
+  // front = seaward edge of the onshore zone: an onshore cell whose neighbour toward
+  // the sea (larger coast distance) is water but NOT onshore.
+  const { lats, lons, nx, ny, land_mask, coast_dist_nm } = GRID; if (!coast_dist_nm) return;
+  const [cw, ch] = cellPx();
+  ctx.strokeStyle = '#d81b1b'; ctx.lineWidth = 2.6; ctx.setLineDash([]); ctx.beginPath();
+  let any = false;
+  const nb = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  for (let row = 0; row < ny; row++) for (let col = 0; col < nx; col++) {
+    const k = row * nx + col; if (!m[k]) continue;
+    for (const [dc, dr] of nb) {
+      const c2 = col + dc, r2 = row + dr; if (c2 < 0 || c2 >= nx || r2 < 0 || r2 >= ny) continue;
+      const k2 = r2 * nx + c2;
+      if (land_mask[k2] || m[k2]) continue;                         // neighbour must be open water, not onshore
+      if (coast_dist_nm[k2] <= coast_dist_nm[k] + 0.2) continue;     // …and toward the sea
+      const p1 = map.latLngToContainerPoint([lats[k], lons[k]]);
+      const p2 = map.latLngToContainerPoint([lats[k2], lons[k2]]);
+      const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+      if (mx < -20 || my < -20 || mx > r.width + 20 || my > r.height + 20) continue;
+      // segment across the shared edge, perpendicular to the cell-connection
+      const ex = -(p2.y - p1.y), ey = (p2.x - p1.x); const el = Math.hypot(ex, ey) || 1;
+      const hx = ex / el * (Math.abs(dc) ? ch : cw) / 2, hy = ey / el * (Math.abs(dc) ? ch : cw) / 2;
+      ctx.moveTo(mx - hx, my - hy); ctx.lineTo(mx + hx, my + hy); any = true;
+    }
+  }
+  if (any) ctx.stroke();
+}
+function drawCoastDist(r) {
+  const { lats, lons, nx, ny, coast_dist_nm } = GRID; if (!coast_dist_nm) return;
+  const levels = [3, 6, 12, 20];
+  ctx.fillStyle = 'rgba(60,80,110,.55)';
+  for (const L of levels) {
+    for (let row = 0; row < ny; row++) for (let col = 0; col < nx - 1; col++) {
+      const k = row * nx + col, k2 = k + 1;
+      const a = coast_dist_nm[k], b = coast_dist_nm[k2];
+      if ((a - L) * (b - L) < 0) {                       // level crossing between cells
+        const t = (L - a) / (b - a);
+        const p1 = map.latLngToContainerPoint([lats[k], lons[k]]);
+        const p2 = map.latLngToContainerPoint([lats[k2], lons[k2]]);
+        const x = p1.x + (p2.x - p1.x) * t, y = p1.y + (p2.y - p1.y) * t;
+        if (x < 0 || y < 0 || x > r.width || y > r.height) continue;
+        ctx.beginPath(); ctx.arc(x, y, 1.1, 0, 6.28); ctx.fill();
+      }
+    }
+    // one label per level near the middle row
+    const midrow = Math.floor(ny / 2);
+    for (let col = 1; col < nx - 1; col++) {
+      const k = midrow * nx + col;
+      if (Math.abs(coast_dist_nm[k] - L) < 0.6) {
+        const pt = map.latLngToContainerPoint([lats[k], lons[k]]);
+        if (pt.x > 20 && pt.x < r.width - 30 && pt.y > 10 && pt.y < r.height - 10) {
+          ctx.fillStyle = '#3c506e'; ctx.font = '10px system-ui'; ctx.fillText(L + ' NM', pt.x, pt.y); ctx.fillStyle = 'rgba(60,80,110,.55)'; break;
+        }
+      }
+    }
+  }
+}
+
 // ---- USGS 3DEP shaded relief + vector coastline (topography, Bernot Ch.5) ----
 let reliefLayer = null, coastLayer = null, reliefOn = false;
 async function ensureRelief() {
@@ -316,6 +412,10 @@ function render() {
   const { nx, ny, lats, lons, land_mask } = GRID;
   // draw every other cell to avoid clutter at low zoom
   const step = map.getZoom() >= 10 ? 1 : 2;
+  // sea-breeze zone (under the arrows) + coast-distance isolines
+  let sbMask = null;
+  if (distOn) drawCoastDist(r);
+  if (sbOn) sbMask = drawSeaBreezeZone(fr, r);
   const rtmaLive = rtmaOn && RTMA && RTMA.length;
   ctx.globalAlpha = rtmaLive ? 0.4 : 1;   // fade HRRR so the RTMA truth stands out
   for (let row = 0; row < ny; row += step) {
@@ -329,6 +429,7 @@ function render() {
     }
   }
   ctx.globalAlpha = 1;
+  if (sbOn && sbMask) drawSeaBreezeFront(sbMask, r);   // front over the arrows
   const rt = rtmaLive ? drawRtmaLayer(fr) : null;
   if (obsOn) drawObsLayer(fr);
   renderValidation(fr);
@@ -350,7 +451,8 @@ function buildLegend() {
     '<div class="row" style="margin-top:5px;opacity:.85">◎ obs — □ buoy · ○ airport</div>' +
     '<div class="row" style="opacity:.6;font-size:.9em">white-ringed = observed wind</div>' +
     (rtmaOn ? `<div class="row" style="margin-top:5px;opacity:.95">RTMA truth Δ vs HRRR<span id="tx-rtma-status" style="opacity:.85"></span></div>` +
-      `<div class="row" style="opacity:.85;font-size:.9em"><span class="sw" style="background:${divColor(0)}"></span>agree<span class="sw" style="margin-left:6px;background:${divColor(3)}"></span>3<span class="sw" style="margin-left:6px;background:${divColor(6)}"></span>6kt+</div>` : '');
+      `<div class="row" style="opacity:.85;font-size:.9em"><span class="sw" style="background:${divColor(0)}"></span>agree<span class="sw" style="margin-left:6px;background:${divColor(3)}"></span>3<span class="sw" style="margin-left:6px;background:${divColor(6)}"></span>6kt+</div>` : '') +
+    (sbOn ? `<div class="row" style="margin-top:5px;opacity:.9"><span class="sw" style="background:rgba(46,160,220,.5)"></span>sea-breeze zone <span style="color:#d81b1b;font-weight:700;margin-left:4px">▬</span> front</div>` : '');
 }
 
 // ---- scrubber / play ----
@@ -486,6 +588,9 @@ $('tx-obs')?.addEventListener('change', async e => {
 
 // Relief toggle: 3DEP shaded relief + vector coastline under the wind field.
 $('tx-relief')?.addEventListener('change', e => { setRelief(e.target.checked); });
+// Sea-breeze zone + front / distance-from-coast toggles.
+$('tx-seabreeze')?.addEventListener('change', e => { sbOn = e.target.checked; buildLegend(); render(); });
+$('tx-dist')?.addEventListener('change', e => { distOn = e.target.checked; render(); });
 
 // RTMA toggle: load the live analysis snapshot on demand, then repaint.
 $('tx-rtma')?.addEventListener('change', async e => {

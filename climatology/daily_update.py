@@ -75,6 +75,29 @@ def rebuild_field_index():
     log(f"fields_index.json: {len(set(dates))} replayable days")
 
 
+def rebuild_breeze_index():
+    """List climatology/breeze/*.json and publish breeze_index.json (days with a
+    Bernot sea-breeze analysis)."""
+    import re
+    dates, tok = [], None
+    while True:
+        kw = dict(Bucket=BUCKET, Prefix=f"{PFX}/breeze/")
+        if tok:
+            kw["ContinuationToken"] = tok
+        r = s3.list_objects_v2(**kw)
+        for o in r.get("Contents", []):
+            m = re.search(r"breeze/(\d{4}-\d{2}-\d{2})\.json$", o["Key"])
+            if m:
+                dates.append(m.group(1))
+        if r.get("IsTruncated"):
+            tok = r["NextContinuationToken"]
+        else:
+            break
+    s3.put_object(Bucket=BUCKET, Key=f"{PFX}/breeze_index.json", Body=json.dumps(sorted(set(dates))).encode(),
+                  ContentType="application/json", CacheControl="max-age=300")
+    log(f"breeze_index.json: {len(set(dates))} analysed days")
+
+
 def put(local, key, ctype, cache):
     s3.upload_file(local, BUCKET, f"{PFX}/{key}",
                    ExtraArgs={"ContentType": ctype, "CacheControl": cache})
@@ -98,8 +121,27 @@ def main():
             invalidate.append(f"/{PFX}/{fkey}")
             rebuild_field_index()   # refresh replayable-days list for the UI
             invalidate.append(f"/{PFX}/fields_index.json")
+            # 15-min: merge HRRR sub-hourly wind into the day parquet (replay scrubber)
+            try:
+                run([PY, "climatology/merge_subh_day.py", "--date", y.isoformat()])
+            except Exception as e:
+                log(f"WARN subh 15-min merge failed ({e}); day stays hourly")
     except Exception as e:
         log(f"WARN fields backfill failed ({e}); continuing to labels")
+
+    # 1b) Bernot sea-breeze analysis for yesterday -> breeze/<date>.json (+ index)
+    if in_season(y):
+        try:
+            run([PY, "climatology/breeze_day.py", "--date", y.isoformat(),
+                 "--out-dir", os.path.join(WORK, "breeze")])
+            bpath = os.path.join(WORK, "breeze", f"{y.isoformat()}.json")
+            if os.path.exists(bpath):
+                put(bpath, f"breeze/{y.isoformat()}.json", "application/json", "max-age=300")
+                invalidate.append(f"/{PFX}/breeze/{y.isoformat()}.json")
+                rebuild_breeze_index()
+                invalidate.append(f"/{PFX}/breeze_index.json")
+        except Exception as e:
+            log(f"WARN breeze analysis failed ({e})")
 
     # 2) labels — in-season only; relabel current year and splice into history
     if in_season(y):
