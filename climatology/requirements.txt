@@ -10,3 +10,5 @@ duckdb>=1.1          # local queries / verification (browser uses duckdb-wasm)
 pytz>=2024.1         # required by duckdb for tz-aware timestamps (label_days.py)
 pyproj>=3.6          # HRRR Lambert Conformal <-> lat/lon
 requests>=2.31       # NDBC / CO-OPS / IEM HTTP fetches
+cfgrib>=0.9          # GRIB2 read for RTMA/URMA + HRRR sub-hourly
+eccodes>=2.40        # GRIB2 decode backend (bundles ecmwflibs binaries)
