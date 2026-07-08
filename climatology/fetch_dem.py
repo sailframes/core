@@ -43,22 +43,29 @@ B = dict(lat_min=41.5, lat_max=42.95, lon_min=-71.35, lon_max=-69.7)
 _s3 = boto3.client("s3")
 
 
-def fetch_dem(size_w=2200, size_h=2000):
-    """Float32 elevation array for the bbox + its geographic transform. The size
-    aspect MUST match the bbox DEGREE aspect (bboxSR=imageSR=4326) — otherwise the
-    ImageServer expands the returned extent to fit and the overlay ends up offset."""
+def fetch_dem(tiles=2, tile_w=2600):
+    """Float32 elevation MOSAIC for the bbox. The ImageServer's f=image raster cap is
+    ~3000 px, so to get finer than ~60 m over the whole region we fetch a `tiles`×`tiles`
+    grid (degree-aspect per tile so the extent isn't expanded) and stitch. tiles=2,
+    tile_w=2600 → ~5200×4570 ≈ 26 m/px."""
     dlon = B["lon_max"] - B["lon_min"]                    # degrees (NOT cos-corrected)
     dlat = B["lat_max"] - B["lat_min"]
-    size_h = int(round(size_w * dlat / dlon))
-    p = dict(bbox="%f,%f,%f,%f" % (B["lon_min"], B["lat_min"], B["lon_max"], B["lat_max"]),
-             bboxSR=4326, imageSR=4326, size="%d,%d" % (size_w, size_h),
-             format="tiff", pixelType="F32", f="image",
-             interpolation="RSP_BilinearInterpolation", nodata=-9999)
-    r = requests.get(IMG, params=p, timeout=180)
-    r.raise_for_status()
-    a = tifffile.imread(io.BytesIO(r.content)).astype("f4")   # row0 = north
-    a = np.where(a < -1000, np.nan, a)                         # mask nodata (-9999)
-    return a
+    tlon, tlat = dlon / tiles, dlat / tiles
+    tile_h = int(round(tile_w * tlat / tlon))
+    mos = np.full((tile_h * tiles, tile_w * tiles), np.nan, "f4")
+    for tr in range(tiles):          # tr=0 → northern row
+        for tc in range(tiles):
+            lon0 = B["lon_min"] + tc * tlon
+            lat1 = B["lat_max"] - tr * tlat
+            p = dict(bbox="%f,%f,%f,%f" % (lon0, lat1 - tlat, lon0 + tlon, lat1),
+                     bboxSR=4326, imageSR=4326, size="%d,%d" % (tile_w, tile_h),
+                     format="tiff", pixelType="F32", f="image",
+                     interpolation="RSP_BilinearInterpolation", nodata=-9999)
+            r = requests.get(IMG, params=p, timeout=180); r.raise_for_status()
+            t = tifffile.imread(io.BytesIO(r.content)).astype("f4")   # row0 = north
+            th, tw = t.shape
+            mos[tr * tile_h:tr * tile_h + th, tc * tile_w:tc * tile_w + tw] = t[:tile_h, :tile_w]
+    return np.where(mos < -1000, np.nan, mos)                # mask nodata (-9999)
 
 
 def latlon_of(a):
@@ -69,19 +76,33 @@ def latlon_of(a):
 
 
 def make_relief(a, out="/tmp/relief.png"):
-    """Coloured hillshade PNG (RGBA): land shaded green->tan->grey by elevation,
-    water fully transparent so the basemap shows through."""
+    """Coloured hillshade PNG (RGBA): land shaded by elevation + a strong light-source
+    hillshade (slope shading) so this LOW-relief venue actually reads; water fully
+    transparent so the basemap/wind show through.
+
+    Altitude enters twice: (1) the hypsometric COLOUR ramps low→high, stretched to the
+    *local coastal* range (0..~p92 of land elevation, not the 195 m Blue Hills max) so
+    0–80 m terrain uses the whole ramp instead of a pale sliver; (2) the HILLSHADE
+    darkens NW-lit slopes, computed from the terrain gradient with vert_exag=32 to
+    amplify the gentle relief."""
     elev = np.nan_to_num(a, nan=0.0)
     water = (a <= 0.3) | np.isnan(a)
-    ls = LightSource(azdeg=315, altdeg=45)
-    cmap = LinearSegmentedColormap.from_list("terr", ["#cfe6c2", "#e8dca8", "#c9a87a", "#9a8f88", "#f2f2f2"])
-    vmax = max(30.0, float(np.nanpercentile(a[~water], 98)) if (~water).any() else 30.0)
-    norm = np.clip(elev / vmax, 0, 1)
-    rgb = ls.shade(norm, cmap=cmap, blend_mode="soft", vert_exag=25,
-                   dx=30, dy=30, fraction=1.1)[:, :, :3]
-    rgba = np.dstack([rgb, np.where(water, 0.0, 0.85)])      # alpha: water transparent
+    land = a[~water]
+    vhi = max(50.0, float(np.nanpercentile(land, 92))) if land.size else 60.0
+    norm = np.clip(elev / vhi, 0, 1)                          # 0..local-coastal-high
+    # muted New-England hypsometric ramp (marsh green → tan → soft brown → hill grey)
+    cmap = LinearSegmentedColormap.from_list(
+        "terr", ["#d3e0c4", "#c8d7a6", "#d9cf98", "#cdb488", "#ad9a82", "#c9c3bd"])
+    ls = LightSource(azdeg=315, altdeg=42)
+    # pixel spacing in metres (actual DEM resolution) so the hillshade is scaled right
+    ny, nx = a.shape
+    dx = (B["lon_max"] - B["lon_min"]) * 111000 * np.cos(np.radians((B["lat_min"] + B["lat_max"]) / 2)) / nx
+    dy = (B["lat_max"] - B["lat_min"]) * 111000 / ny
+    rgb = ls.shade(norm, cmap=cmap, blend_mode="soft", vert_exag=32,
+                   dx=dx, dy=dy, fraction=1.15)[:, :, :3]
+    rgba = np.dstack([rgb, np.where(water, 0.0, 0.82)])       # alpha: water transparent
     plt.imsave(out, np.clip(rgba, 0, 1))
-    return vmax
+    return vhi
 
 
 def coastline(a, out="/tmp/coastline.geojson"):
@@ -137,7 +158,7 @@ def main():
     print("  relief vmax=%.0f m; coastline %d pts / %d segments; %s" % (vmax, npts, nseg, stats["note"]))
     relief_meta = {"bounds": [[B["lat_min"], B["lon_min"]], [B["lat_max"], B["lon_max"]]],
                    "max_elev_m": round(float(np.nanmax(a)), 0), **stats,
-                   "source": "USGS 3DEP 10 m (sampled ~30 m)"}
+                   "source": "USGS 3DEP 10 m (mosaicked ~26 m)"}
     json.dump(relief_meta, open("/tmp/relief.json", "w"))
     json.dump({"heights": heights, **stats}, open("/tmp/coast_heights.json", "w"))
     put("/tmp/relief.png", "relief.png", "image/png")
