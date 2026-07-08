@@ -94,19 +94,21 @@ def cycles_for(ymd):
     return sorted(hg.list_anl_cycles(ymd))
 
 
-def _summary(q, dt_c, syn_kt, genuine, ambiguous, peak):
+def _summary(q, dt_c, syn_kt, syn_dir, cf, established, onset, peak, stations_without):
     quad = q["quadrant"] if q else "?"
     dtf = "" if dt_c is None else "ΔT %.0f°C" % dt_c
-    synf = "" if syn_kt is None else "850 hPa synoptic %.0f kt" % syn_kt
-    if genuine:
-        extra = " A Q2 'combat douteux' that the breeze won." if quad == "Q2" else ""
-        return "A %s day: a thermal sea breeze filled at the coast (peak onshore %.0f kt).%s" % (quad, peak, extra)
-    if ambiguous:
-        return ("A %s day: the afternoon wind was onshore, but it was already onshore in the morning — this is the sea-origin synoptic, not a distinct thermal breeze (Bernot's Q3/Q4 'breeze indistinct' case)." % quad)
+    if established:
+        held = ""
+        if stations_without:
+            held = " (%s stayed in the offshore synoptic — the sea breeze was over the open bay, not the enclosed corner)" % ", ".join(stations_without)
+        extra = {"Q1": "", "Q2": " A Q2 'combat douteux' that the breeze won.",
+                 "Q3": " The breeze reinforced the onshore synoptic.", "Q4": ""}.get(quad, "")
+        return ("A %s day: a sea breeze filled the racing area (onset ~%02d LT, peak %.0f kt, veering right)%s.%s"
+                % (quad, int(onset) if onset is not None else 0, peak, held, extra))
     if quad in ("Q1", "Q3") and syn_kt is not None and syn_kt >= 16:
-        return ("A %s day that looked favourable (%s) yet did NOT deliver: the %s sat near the ~18 kt ceiling and held all afternoon, so the sea breeze never established (peak onshore only %.0f kt). Quadrant favourability is overridden when the synoptic is near the ceiling." % (quad, dtf, synf, peak))
+        return ("A %s day that looked favourable (%s) yet did NOT deliver: the 850 hPa synoptic %.0f kt sat near the ~18 kt ceiling and held all afternoon, so the sea breeze never established (peak onshore only %.0f kt)." % (quad, dtf, syn_kt, peak))
     if quad == "Q4":
-        return ("A %s day (worst case): the sea breeze did not lift (peak onshore %.0f kt) — as expected." % (quad, peak))
+        return ("A %s day (worst case): the sea breeze did not lift over the racing area (peak onshore %.0f kt) — as expected." % (quad, peak))
     return ("A %s day: despite %s, the sea breeze did not establish — the synoptic held (peak onshore %.0f kt)." % (quad, dtf, peak))
 
 
@@ -128,6 +130,16 @@ def main():
     coast_face = B.coast_facing(land, lats, lons, region=region)
     coast_face_all = B.coast_facing(land, lats, lons, region=None)
     cf = coast_face if coast_face is not None else coast_face_all
+    HALF = 85.0     # onshore = wind FROM within +/-HALF of the coast facing (the
+    #                 Boston sea-breeze arc runs NE->SSW; a ±55° window misses the S)
+
+    def onshore(d):
+        return d is not None and abs(B.ang_diff(d, cf)) <= HALF
+    # central/outer Mass Bay water cells = the racing area (where boats sail & the
+    # sea breeze shows — NOT the enclosed Logan corner). Field over these cells is the
+    # primary truth (it's what the /tactics replay shows; HRRR F00 is obs-assimilated).
+    race = ((lats >= 42.30) & (lats <= 42.52) & (lons >= -70.95) & (lons <= -70.55) & (land == 0)).ravel()
+    race_gi = np.where(race)[0]
 
     # ---- obs ----------------------------------------------------------------
     obs = {s: obs_series(s, ymd) for s in STATIONS}
@@ -151,6 +163,36 @@ def main():
                  if gg[i] in landgi and t2c[i] is not None and 10 <= _lt(tcol[i]).hour <= 17]
         tmax = max(tland) if tland else None
     dt_c = (tmax - sst) if (tmax is not None and sst is not None) else None
+
+    # ---- racing-area HRRR field wind by LT hour (PRIMARY sea-breeze truth) ----
+    race_field = {}     # hour -> {from, spd_kt, max_kt}
+    if fields is not None:
+        raceset = set(race_gi.tolist())
+        vt = fields.column("valid_time_utc").to_pylist(); gg = fields.column("gi").to_pylist()
+        uu = fields.column("u10").to_pylist(); vv = fields.column("v10").to_pylist()
+        acc = {}
+        for i in range(len(gg)):
+            if gg[i] in raceset and uu[i] is not None and vv[i] is not None:
+                acc.setdefault(_lt(vt[i]).hour, []).append((uu[i], vv[i]))
+        for h, arr in acc.items():
+            um = float(np.mean([a[0] for a in arr])); vm = float(np.mean([a[1] for a in arr]))
+            fd, sp = B.from_uv(um, vm)
+            mx = max(math.hypot(a[0], a[1]) for a in arr) * KT
+            race_field[h] = {"from": None if fd is None else round(fd, 0), "spd_kt": round(sp * KT, 1), "max_kt": round(mx, 1)}
+    # field-based sea-breeze detection: a sea breeze = an afternoon onshore flow that
+    # is a clear BACKING (>=40°) from the morning offshore direction (robust to the
+    # quick right-veer, which breaks a "2 consecutive onshore hours" test).
+    rf_morn = [race_field[h]["from"] for h in range(6, 10) if h in race_field and race_field[h]["from"] is not None]
+    morn_dir, _ = B.vec_mean(rf_morn, [1.0] * len(rf_morn)) if rf_morn else (None, None)
+    rf_morn_off = morn_dir is not None and not onshore(morn_dir)
+    field_onset = None
+    for h in range(10, 17):
+        rc = race_field.get(h)
+        if rc and rc["from"] is not None and onshore(rc["from"]) and rc["spd_kt"] >= 4.0 \
+                and morn_dir is not None and abs(B.ang_diff(rc["from"], morn_dir)) >= 40.0:
+            field_onset = h; break
+    field_established = field_onset is not None and rf_morn_off
+    field_peak_kt = max((race_field[h]["max_kt"] for h in race_field if 11 <= h <= 17), default=0.0)
 
     # ---- HRRR extra fields (hourly) -----------------------------------------
     cyc = cycles_for(ymd)
@@ -213,50 +255,20 @@ def main():
     # ---- STEP computations ---------------------------------------------------
     steps = []
 
-    # onshore sector from coast facing
-    half = 55.0
+    # PRIMARY truth = the racing-area HRRR field (computed above). Point stations are
+    # a secondary cross-check (Logan sits in the enclosed SW corner and can hold the
+    # synoptic while the open bay gets the breeze — exactly why the field matters).
+    established = field_established
+    obs_onset = field_onset if field_established else None
+    peak_breeze = field_peak_kt
 
-    def onshore(d):
-        return d is not None and abs(B.ang_diff(d, cf)) <= half
-
-    # observed: did a clean onshore sea breeze establish at the coast?
+    # per-station onset (for reconciliation text + charts)
     def onset_at(stn):
         ser = [(h, d, s) for (h, d, s, _) in obs[stn]]
-        return B.detect_onset(ser, cf, half=half, min_kt=6.0)
-
-    onset_inshore = {s: onset_at(s) for s in INSHORE}
-    onset_offshore = {s: onset_at(s) for s in OFFSHORE}
-
-    def morning_onshore_frac(stn):
-        ms = [d for (h, d, s, _) in obs[stn] if 6 <= h < 10 and d is not None]
-        if not ms:
-            return None
-        return sum(1 for d in ms if abs(B.ang_diff(d, cf)) <= half) / len(ms)
-
-    def is_genuine(stn, onset):
-        """A real (thermal) sea breeze = an afternoon onshore onset that was NOT
-        already onshore in the morning. If the morning was onshore, the afternoon
-        onshore wind is the synoptic (Bernot's Q3/Q4 'breeze indistinct')."""
-        if onset["onset_lt"] is None:
-            return False
-        mo = morning_onshore_frac(stn)
-        return mo is None or mo < 0.5
-
-    genuine_inshore = any(is_genuine(s, onset_inshore[s]) for s in INSHORE)
-    ambiguous_inshore = any(onset_inshore[s]["onset_lt"] is not None and not is_genuine(s, onset_inshore[s]) for s in INSHORE)
-    genuine_offshore = any(is_genuine(s, onset_offshore[s]) for s in OFFSHORE)
-    any_inshore_fill = genuine_inshore
-    any_offshore_fill = genuine_offshore
-
-    # afternoon peak onshore-component speed (the "breeze" strength, not synoptic)
-    def peak_onshore_kt(stn):
-        vals = []
-        for (h, d, s, _) in obs[stn]:
-            if 11 <= h <= 19 and d is not None and s is not None:
-                comp = s * math.cos(math.radians(B.ang_diff(d, cf)))   # component from seaward
-                vals.append(max(0.0, comp))
-        return max(vals) if vals else 0.0
-    peak_breeze = max(peak_onshore_kt(s) for s in STATIONS)
+        return B.detect_onset(ser, cf, half=HALF, min_kt=5.0)
+    station_onset = {s: onset_at(s) for s in STATIONS}
+    stations_with_breeze = [s for s in STATIONS if station_onset[s]["onset_lt"] is not None]
+    stations_without = [s for s in STATIONS if station_onset[s]["onset_lt"] is None]
 
     # STEP 1 — will it establish?
     gate_dt = (dt_c is not None and dt_c >= 2.0)
@@ -277,12 +289,12 @@ def main():
                         (gspd or 0))),
         },
         "validation": {
-            "verdict": "yes" if genuine_inshore else ("info" if ambiguous_inshore else "no"),
-            "detail": ("Coastal stations swung from offshore to a sustained onshore breeze — a thermal sea breeze."
-                       if genuine_inshore else
-                       ("Afternoon wind was onshore, but it was already onshore in the morning — this is the synoptic, not a distinct thermal breeze."
-                        if ambiguous_inshore else
-                        "Coastal stations (Logan/Beverly) never established a thermal onshore breeze — stayed offshore/synoptic all afternoon.")),
+            "verdict": "yes" if established else "no",
+            "detail": (("The HRRR field over the racing area shows the wind BACKED from the morning offshore flow to onshore at ~%02d LT and a sea breeze filled the bay (peak %.0f kt). Stations that saw it: %s%s."
+                        % (obs_onset, peak_breeze, ", ".join(stations_with_breeze) or "field only",
+                           ("; %s held the synoptic" % ", ".join(stations_without)) if stations_without else ""))
+                       if established else
+                       "The racing-area field never backed to a sustained onshore breeze — the synoptic held all afternoon (peak onshore %.0f kt)." % peak_breeze),
         },
     })
 
@@ -290,27 +302,21 @@ def main():
     q = B.quadrant(SYN_DIR, cf)
     div = B.divergence_sign(SYN_DIR, cf)
     # observed behaviour classification for validation
-    if genuine_inshore:
-        obs_behav = "a thermal sea breeze filled at the coast"
-    elif ambiguous_inshore:
-        obs_behav = "afternoon wind was onshore but it is the synoptic (already onshore in the morning) — no distinct thermal breeze"
-    elif genuine_offshore:
-        obs_behav = "only weak offshore attempts — no coastal fill"
+    if established:
+        obs_behav = "a sea breeze filled the racing area (field-confirmed; onset ~%02d LT, peak %.0f kt)" % (obs_onset, peak_breeze)
     else:
-        obs_behav = "no thermal onshore fill anywhere — the synoptic held"
+        obs_behav = "no sustained onshore sea breeze over the racing area — the synoptic held"
     q_expect = {"Q1": "early coastal fill", "Q2": "offshore-first attempts, may fail (combat douteux)",
                 "Q3": "there-and-back, seems to reinforce synoptic", "Q4": "no lift"}.get(q["quadrant"] if q else None, "?")
     q_ok, q_verdict = None, "n/a"
     if q:
         Q = q["quadrant"]
         if Q == "Q1":
-            q_ok = genuine_inshore; q_verdict = "yes" if q_ok else "no"
-        elif Q == "Q2":
-            q_ok = True; q_verdict = "info"          # combat douteux — either outcome is consistent
-        elif Q == "Q3":
-            q_ok = True; q_verdict = "info"
+            q_ok = established; q_verdict = "yes" if q_ok else "no"
+        elif Q in ("Q2", "Q3"):
+            q_ok = True; q_verdict = "info"          # combat douteux / round-trip — either outcome is consistent
         else:  # Q4 — expect no thermal lift
-            q_ok = (not genuine_inshore); q_verdict = "yes" if q_ok else "no"
+            q_ok = (not established); q_verdict = "yes" if q_ok else "no"
     steps.append({
         "n": 2, "title": "Quadrant (synoptic vs coastline)",
         "rule": "Quadrant is defined relative to the COAST, not compass. Q1 best · Q2 combat douteux · Q3 round-trip · Q4 worst.",
@@ -385,7 +391,6 @@ def main():
         am = np.mean([v for h, v in vis_ts if 8 <= h <= 11]) if any(8 <= h <= 11 for h, _ in vis_ts) else None
         pm = np.mean([v for h, v in vis_ts if 12 <= h <= 16]) if any(12 <= h <= 16 for h, _ in vis_ts) else None
         vis_clear = (am is not None and pm is not None and pm > am + 1.0)
-    obs_onset = min([o["onset_lt"] for o in {**onset_inshore, **onset_offshore}.values() if o["onset_lt"] is not None], default=None)
     steps.append({
         "n": 5, "title": "Onset cues (horizon clearing) & observed onset",
         "rule": "Offshore visibility rising = subsidence 'nettoyage de l'horizon' → imminent breeze (Bernot §2.3/§3.2).",
@@ -393,22 +398,33 @@ def main():
         "validation": {
             "verdict": ("yes" if obs_onset is not None else "no"),
             "observed_onset_lt": obs_onset,
-            "detail": ("Onshore breeze onset observed ~%02d:%02d LT." % (int(obs_onset), int((obs_onset % 1) * 60))
-                       if obs_onset is not None else "No sustained onshore onset observed."),
+            "detail": ("Sea-breeze onset in the racing-area field ~%02d:00 LT (wind backed to onshore)." % int(obs_onset)
+                       if obs_onset is not None else "No sustained onshore onset in the field."),
         },
     })
 
-    # STEP 6 — rotation (only meaningful if it filled)
+    # STEP 6 — rotation: the racing-area field direction hour-by-hour (the clean signal)
+    field_dir_by_hour = [[h, race_field[h]["from"]] for h in sorted(race_field) if race_field[h]["from"] is not None]
     dir_by_hour = {s: [[h, d] for (h, d, sp, _) in obs_h[s] if d is not None] for s in STATIONS}
+    # measure the veer from onset to +3h
+    veer = None
+    if obs_onset is not None:
+        d0 = race_field.get(int(obs_onset), {}).get("from")
+        d1 = race_field.get(int(obs_onset) + 3, {}).get("from")
+        if d0 is not None and d1 is not None:
+            veer = round(B.ang_diff(d1, d0), 0)     # +ve = veered right
     steps.append({
         "n": 6, "title": "Rotation (~10°/h right, Coriolis)",
         "rule": "Once established, a pure breeze veers right ~10°/hour.",
-        "prediction": {"expected_rate_deg_per_h": 10, "applies": bool(obs_onset is not None)},
+        "prediction": {"expected_rate_deg_per_h": 10, "applies": bool(obs_onset is not None),
+                       "field_dir_by_hour": field_dir_by_hour},
         "validation": {
-            "verdict": "n/a" if obs_onset is None else "info",
-            "obs_dir_by_hour": dir_by_hour,
-            "detail": ("Breeze never established — rotation not applicable; wind direction shown is synoptic."
-                       if obs_onset is None else "Observed hourly wind direction shown; compare the right-rotation."),
+            "verdict": "n/a" if obs_onset is None else ("yes" if (veer is not None and veer > 10) else "info"),
+            "obs_dir_by_hour": dir_by_hour, "veer_3h_deg": veer,
+            "detail": ("Breeze never established — rotation not applicable."
+                       if obs_onset is None else
+                       ("Racing-area field veered %+.0f° in the 3 h after onset — right rotation confirmed." % veer
+                        if veer is not None else "Field wind direction shown; compare the right rotation.")),
         },
     })
 
@@ -462,9 +478,12 @@ def main():
         "loop": loop,
         "steps": steps,
         "obs_hourly": {s: [[round(h, 2), d, None if sp is None else round(sp, 1)] for (h, d, sp, _) in obs_h[s]] for s in STATIONS},
+        "race_field_hourly": [[h, race_field[h]["from"], race_field[h]["spd_kt"], race_field[h]["max_kt"]] for h in sorted(race_field)],
         "stations_meta": STATIONS,
-        "established": bool(genuine_inshore),
-        "summary_verdict": _summary(q, dt_c, SYN_KT, genuine_inshore, ambiguous_inshore, peak_breeze),
+        "onset_lt": obs_onset,
+        "peak_kt": round(peak_breeze, 1),
+        "established": bool(established),
+        "summary_verdict": _summary(q, dt_c, SYN_KT, SYN_DIR, cf, established, obs_onset, peak_breeze, stations_without),
     }
 
     def clean(o):

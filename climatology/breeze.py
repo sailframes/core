@@ -59,6 +59,56 @@ def vec_mean(dirs, spds):
 
 
 # --------------------------- coast geometry ---------------------------------
+def sea_sector(land, lats, lons, clat, clon, rad_km=45, bin_deg=15, wf=0.6):
+    """The arc of compass bearings (from a venue centre) that opens onto open water
+    — i.e. the directions a sea breeze can blow FROM. Returns a set of bin-start
+    bearings (multiples of bin_deg) where >wf of nearby cells are water. Robust venue
+    replacement for a single local coast normal (which misses that Boston's breeze is
+    S-SSE even though the immediate shore faces ESE)."""
+    import numpy as np
+    lat = np.asarray(lats, "f8"); lon = np.asarray(lons, "f8"); L = np.asarray(land).astype(bool)
+    dy = (lat - clat) * 111.0
+    dx = (lon - clon) * 111.0 * math.cos(math.radians(clat))
+    dist = np.hypot(dx, dy)
+    near = (dist <= rad_km) & (dist > 3)
+    brg = np.degrees(np.arctan2(dx, dy)) % 360.0
+    bins = set()
+    for b in range(0, 360, bin_deg):
+        m = near & (brg >= b) & (brg < b + bin_deg)
+        if m.sum() >= 3 and (~L[m]).mean() > wf:
+            bins.add(b)
+    return sorted(bins), bin_deg
+
+
+def in_sea_sector(from_deg, sector):
+    bins, bd = sector
+    if from_deg is None or not bins:
+        return False
+    return (int(from_deg // bd) * bd) in bins
+
+
+def venue_sea_bearing(land, lats, lons, clat, clon, rad_km=60):
+    """The direction a sea breeze blows FROM at this venue = opposite the bulk of the
+    heated land. Bearing to the land centre-of-mass (within rad_km), +180. This
+    captures that Boston's breeze is S-SSE even though the immediate shore faces ESE
+    (the New England landmass sits to the NW, so the marine inflow comes from the SE/S)."""
+    import numpy as np
+    lat = np.asarray(lats, "f8"); lon = np.asarray(lons, "f8"); L = np.asarray(land).astype(bool)
+    dy = (lat - clat) * 111.0
+    dx = (lon - clon) * 111.0 * math.cos(math.radians(clat))
+    dist = np.hypot(dx, dy)
+    m = L & (dist <= rad_km) & (dist > 2)
+    if not m.any():
+        return None
+    lb = math.degrees(math.atan2(dx[m].mean(), dy[m].mean())) % 360.0   # bearing TO land c.o.m.
+    return (lb + 180.0) % 360.0                                          # breeze blows from opposite
+
+
+def is_onshore(from_deg, sea_bearing, half=80.0):
+    """Wind FROM within +/-half of the venue sea bearing = marine/onshore inflow."""
+    return from_deg is not None and sea_bearing is not None and abs(ang_diff(from_deg, sea_bearing)) <= half
+
+
 def coast_facing(land_2d, lats_2d, lons_2d, region=None, smooth=2):
     """Seaward-normal bearing (deg) averaged over coastal cells: which way the coast
     faces. `land_2d` is 1=land/0=water (ny,nx); lats/lons same shape. `region` is an

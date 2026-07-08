@@ -170,6 +170,30 @@
 
   function newChart(ctx, cfg) { const c = new Chart(ctx, cfg); CHARTS.push(c); return c; }
 
+  function drawRaceField(d) {
+    const rf = d.race_field_hourly || [];
+    const cf = d.coast_faces_deg != null ? d.coast_faces_deg : 113;
+    const dir = $('bz-race-dir');
+    if (dir) newChart(dir.getContext('2d'), {
+      data: {
+        datasets: [
+          { type: 'line', label: 'onshore arc', data: rf.map(r => ({ x: r[0], y: Math.min(360, cf + 85) })), borderWidth: 0, pointRadius: 0, backgroundColor: 'rgba(31,157,85,.13)', fill: '+1' },
+          { type: 'line', label: '_lo', data: rf.map(r => ({ x: r[0], y: Math.max(0, cf - 85) })), borderWidth: 0, pointRadius: 0, fill: false },
+          { type: 'line', label: 'field wind (from°)', data: rf.map(r => ({ x: r[0], y: r[1] })), borderColor: '#1f6fb0', tension: .2, pointRadius: 2.5 },
+        ]
+      }, options: chartOpts('LT hour', 'wind from °', { yMax: 360, yStep: 90 })
+    });
+    const spd = $('bz-race-spd');
+    if (spd) newChart(spd.getContext('2d'), {
+      data: {
+        datasets: [
+          { type: 'line', label: 'mean kt', data: rf.map(r => ({ x: r[0], y: r[2] })), borderColor: '#1f9d55', tension: .3, pointRadius: 2 },
+          { type: 'line', label: 'max cell kt', data: rf.map(r => ({ x: r[0], y: r[3] })), borderColor: '#e8b13a', borderDash: [4, 3], tension: .3, pointRadius: 2 },
+        ]
+      }, options: chartOpts('LT hour', 'kt')
+    });
+  }
+
   function drawObs(d) {
     const meta = d.stations_meta || {};
     const hours = Array.from({ length: 24 }, (_, i) => i);
@@ -202,7 +226,7 @@
   }
 
   function chartOpts(xt, yt, extra = {}) {
-    const o = { animation: false, plugins: { legend: { labels: { boxWidth: 10, font: { size: 10 } } } }, scales: { x: { type: 'linear', min: 0, max: 24, title: { display: true, text: xt }, ticks: { stepSize: 6 } }, y: { title: { display: true, text: yt } } } };
+    const o = { animation: false, plugins: { legend: { labels: { boxWidth: 10, font: { size: 10 }, filter: it => !String(it.text).startsWith('_') } } }, scales: { x: { type: 'linear', min: 0, max: 24, title: { display: true, text: xt }, ticks: { stepSize: 6 } }, y: { title: { display: true, text: yt } } } };
     if (extra.yMax) { o.scales.y.max = extra.yMax; o.scales.y.min = 0; o.scales.y.ticks = { stepSize: extra.yStep }; }
     return o;
   }
@@ -220,15 +244,19 @@
     CHARTS.forEach(c => c.destroy()); CHARTS = [];
     const steps = (d.steps || []).map(stepHTML).join('');
     body.innerHTML = `${headerHTML(d)}
+      <div class="bz-section-t">Racing-area wind — HRRR field <span class="tx-hint">(central Mass Bay; the sea-breeze evidence the replay shows)</span></div>
+      <div class="bz-two"><div><div class="bz-lbl">Direction by hour — backs to onshore then veers right</div><canvas id="bz-race-dir" width="330" height="175"></canvas></div>
+        <div><div class="bz-lbl">Speed by hour — mean &amp; max cell (convergence band)</div><canvas id="bz-race-spd" width="330" height="175"></canvas></div></div>
       <div class="bz-section-t">Loop cross-section</div>
       <canvas class="bz-xsec" id="bz-xsec" width="640" height="240"></canvas>
       <div class="bz-section-t">Decision walkthrough — prediction vs. what actually happened</div>
       ${steps}
-      <div class="bz-section-t">Observed wind (all stations)</div>
+      <div class="bz-section-t">Point observations (stations) <span class="tx-hint">— secondary; the enclosed corner can hold the synoptic</span></div>
       <div class="bz-two"><div><div class="bz-lbl">Wind direction by hour</div><canvas id="bz-obs-dir" width="330" height="170"></canvas></div>
         <div><div class="bz-lbl">Wind speed by hour</div><canvas id="bz-obs-speed" width="330" height="170"></canvas></div></div>
-      <p class="tx-note">Method: Jean-Yves Bernot, <i>Météo locale et stratégie</i> (theory of quadrants; Wisdorff force grid). Every step is validated against the day's real Logan (KBOS), Beverly (KBVY), NDBC 44013 & NERACOOS A01 observations. See <a href="./tactics-methodology.html">How it works</a>.</p>`;
+      <p class="tx-note">Method: Jean-Yves Bernot, <i>Météo locale et stratégie</i> (theory of quadrants; Wisdorff force grid). Validated against the day's HRRR field over the racing area + real Logan (KBOS), Beverly (KBVY), NDBC 44013 &amp; NERACOOS A01 observations. See <a href="./tactics-methodology.html">How it works</a>.</p>`;
     // draw
+    drawRaceField(d);
     drawCrossSection($('bz-xsec'), d);
     document.querySelectorAll('.bz-gauge').forEach(c => drawGauge(c, +c.dataset.syn));
     document.querySelectorAll('.bz-qmap').forEach(c => drawQuadrantMap(c, d, grid));
