@@ -103,8 +103,9 @@
                 <div class="tx-card">
                     <h3>Breeze rotation rose <span class="tx-hint">(wind-rose-by-coast, fill days)</span></h3>
                     <div class="tx-chartbox" style="display:flex;justify-content:center"><canvas id="tx-rose" width="260" height="240"></canvas></div>
-                    <p class="tx-cardnote">Mean afternoon breeze direction (wind FROM) by solar hour on fill days,
-                       from the 44013 buoy. The clockwise trace = Bernot's ~10°/h right rotation (Coriolis).</p>
+                    <p class="tx-cardnote">Mean breeze direction (wind FROM) by solar hour on fill days, from the
+                       <b>racing-area HRRR field</b> (central Mass Bay). Clockwise trace + growing radius
+                       (consistency) = Bernot's ~10°/h right rotation as the breeze establishes.</p>
                 </div>
                 <div class="tx-card tx-card-wide" id="tx-skill-card">
                     <h3>Model skill vs observations <span class="tx-hint">(HRRR F00 vs buoy/airport wind, whole archive)</span></h3>
@@ -134,7 +135,7 @@
         </section>
     </main>
 
-    <script type="module" src="./assets/js/tactics-app.js?v=17"></script>
+    <script type="module" src="./assets/js/tactics-app.js?v=18"></script>
     <script src="./assets/js/tactics-breeze.js?v=4"></script>
 </body>
 </html>
