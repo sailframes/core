@@ -533,7 +533,11 @@ function render() {
   renderValidation(fr);
   const d = new Date(fr.t);
   const lt = d.toLocaleString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
-  $('tx-clock').textContent = `${fr.t.slice(0, 10)}  ${lt} EDT  (${fr.t.slice(11, 16)}Z)`;
+  $('tx-clock').innerHTML =
+    `<span class="tx-clk-date">${fr.t.slice(0, 10)}</span>` +
+    `<span class="tx-clk-main">${lt} EDT</span>` +
+    `<span class="tx-clk-solar" title="Local apparent solar time at the racing area (Bernot 'heure solaire') — sun-highest ≈ 12:00. Sea-breeze onset, the ~10°/h rotation, and the 8–9 h morning-wind synoptic read are all in solar time.">☉ ${solarHM(fr.t)} sol</span>` +
+    `<span class="tx-clk-utc">${fr.t.slice(11, 16)}Z</span>`;
   const rs = $('tx-rtma-status');   // RTMA readout lives in the legend, not the toolbar (avoids clock-width toolbar shift)
   if (rs) rs.textContent = rtmaLive ? (rt ? ` ${new Date(rt.t).toISOString().slice(11, 16)}Z · avg Δ ${rt.avg.toFixed(1)} kt` : ' · n/a here (analysis ≤ now)') : '';
 }
@@ -916,6 +920,22 @@ let FIELD_DATES = null;   // Set of YYYY-MM-DD that have an archived wind field 
 function doyOf(dateStr) {
   const d = new Date(dateStr + 'T00:00:00Z');
   return Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 0)) / 86400000);
+}
+// Local apparent solar time at the racing-area meridian (Bernot "heure solaire":
+// sun-highest ≈ 12:00). = UTC + longitude/15 + equation-of-time. The sea-breeze
+// onset clock, the ~10°/h Coriolis rotation, and the 8–9 h morning-wind synoptic
+// read are all keyed to solar time, not the DST clock.
+const VENUE_LON = -70.75;   // central Mass Bay racing centre
+function solarHM(iso) {
+  const d = new Date(iso);
+  const utcH = d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600;
+  const N = Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 0)) / 86400000);
+  const B = 2 * Math.PI * (N - 81) / 364;
+  const eot = 9.87 * Math.sin(2 * B) - 7.53 * Math.cos(B) - 1.5 * Math.sin(B);   // minutes
+  let s = ((utcH + VENUE_LON / 15 + eot / 60) % 24 + 24) % 24;                    // solar hours
+  let hh = Math.floor(s), mm = Math.round((s - hh) * 60);
+  if (mm === 60) { mm = 0; hh = (hh + 1) % 24; }
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 const DIRNAME = d => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((d % 360) / 45)) % 8];
 const fmt1 = v => (v == null || isNaN(v)) ? '—' : (+v).toFixed(1);   // one decimal, always

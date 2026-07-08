@@ -35,7 +35,11 @@ body { padding-bottom: 48px; }
 }
 .tx-btn:disabled { opacity: .5; cursor: wait; }
 .tx-scrub { flex: 1 1 260px; accent-color: var(--accent, #3aa0ff); }
-.tx-clock { font-family: ui-monospace, Menlo, monospace; font-size: .95rem; min-width: 168px; }
+.tx-clock { font-family: ui-monospace, Menlo, monospace; font-size: .95rem; min-width: 290px; display: inline-flex; align-items: baseline; gap: 8px; }
+.tx-clk-date { color: var(--text-secondary, #8b98a5); font-size: .78rem; }
+.tx-clk-main { font-weight: 700; font-size: 1rem; color: var(--text-primary, #e8edf2); }
+.tx-clk-solar { color: #f0b45a; font-size: .82rem; cursor: help; }
+.tx-clk-utc { color: var(--text-secondary, #8b98a5); font-size: .72rem; opacity: .7; }
 .tx-obs-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: .85rem; color: var(--text-secondary, #8b98a5); cursor: pointer; }
 .tx-obs-toggle input { accent-color: var(--accent, #3aa0ff); }
 
