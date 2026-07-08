@@ -100,6 +100,12 @@
                     <h3>Tide phase at onset <span class="tx-hint">(hrs rel. Boston HW)</span></h3>
                     <div class="tx-chartbox"><canvas id="tx-chart-tide"></canvas></div>
                 </div>
+                <div class="tx-card">
+                    <h3>Breeze rotation rose <span class="tx-hint">(wind-rose-by-coast, fill days)</span></h3>
+                    <div class="tx-chartbox" style="display:flex;justify-content:center"><canvas id="tx-rose" width="260" height="240"></canvas></div>
+                    <p class="tx-cardnote">Mean afternoon breeze direction (wind FROM) by solar hour on fill days,
+                       from the 44013 buoy. The clockwise trace = Bernot's ~10°/h right rotation (Coriolis).</p>
+                </div>
                 <div class="tx-card tx-card-wide" id="tx-skill-card">
                     <h3>Model skill vs observations <span class="tx-hint">(HRRR F00 vs buoy/airport wind, whole archive)</span></h3>
                     <div id="tx-skill"></div>
@@ -128,7 +134,7 @@
         </section>
     </main>
 
-    <script type="module" src="./assets/js/tactics-app.js?v=15"></script>
-    <script src="./assets/js/tactics-breeze.js?v=3"></script>
+    <script type="module" src="./assets/js/tactics-app.js?v=16"></script>
+    <script src="./assets/js/tactics-breeze.js?v=4"></script>
 </body>
 </html>

@@ -745,7 +745,36 @@ function renderStats() {
     type: 'bar', data: { labels: th.labels.map(x => x + 'h'), datasets: [{ data: th.bins, backgroundColor: '#3ec46d' }] },
     options: { plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#8b98a5' } }, y: { ticks: { color: '#8b98a5' } } } }
   });
+  drawBreezeRose();
   loadSkill().then(renderSkill);
+}
+
+// Climatological breeze rotation rose (Bernot Fig 10 "wind-rose-by-coast"): mean
+// afternoon breeze direction by solar hour over fill days -> the clockwise trace
+// shows the ~10°/h right rotation. Built from the 44013 buoy afternoon directions.
+function drawBreezeRose() {
+  const cv = $('tx-rose'); if (!cv || !LABELS) return;
+  const g = cv.getContext('2d'), W = cv.width, H = cv.height; g.clearRect(0, 0, W, H);
+  const O = { x: W / 2, y: H / 2 + 2 }, R = Math.min(W, H) / 2 - 26;
+  const fill = LABELS.filter(r => ['F', 'R', 'P'].includes(r.type));
+  const hours = [['dir_12lt', 12], ['dir_14lt', 14], ['dir_16lt', 16], ['dir_18lt', 18]];
+  const pts = [];
+  for (const [col, h] of hours) {
+    let su = 0, sv = 0, n = 0;
+    for (const r of fill) { const d = r[col]; if (d == null) continue; su += Math.sin(d * Math.PI / 180); sv += Math.cos(d * Math.PI / 180); n++; }
+    if (!n) continue;
+    const brg = (Math.atan2(su, sv) * 180 / Math.PI + 360) % 360, res = Math.hypot(su, sv) / n;
+    pts.push({ h, brg, res, n });
+  }
+  const P = (brg, rad) => ({ x: O.x + rad * R * Math.sin(brg * Math.PI / 180), y: O.y - rad * R * Math.cos(brg * Math.PI / 180) });
+  g.strokeStyle = '#2a3038'; for (const rr of [0.5, 1]) { g.beginPath(); g.arc(O.x, O.y, R * rr, 0, 6.28); g.stroke(); }
+  g.fillStyle = '#8b98a5'; g.font = '10px system-ui';
+  for (const [b, lab] of [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W']]) { const e = P(b, 1); g.strokeStyle = '#242a31'; g.beginPath(); g.moveTo(O.x, O.y); g.lineTo(e.x, e.y); g.stroke(); g.fillStyle = '#8b98a5'; g.fillText(lab, e.x - 3, e.y + (b === 0 ? -2 : b === 180 ? 11 : 3)); }
+  g.strokeStyle = '#3aa0ff'; g.lineWidth = 2; g.beginPath();
+  pts.forEach((p, i) => { const q = P(p.brg, p.res); if (i) g.lineTo(q.x, q.y); else g.moveTo(q.x, q.y); });
+  g.stroke();
+  pts.forEach(p => { const q = P(p.brg, p.res); const warm = (p.h - 12) / 6; g.fillStyle = `rgb(${Math.round(58 + warm * 180)},${Math.round(160 - warm * 90)},${Math.round(219 - warm * 170)})`; g.beginPath(); g.arc(q.x, q.y, 4, 0, 6.28); g.fill(); g.fillStyle = '#dfe6ee'; g.font = '9px system-ui'; g.fillText(p.h + 'h', q.x + 5, q.y + 3); });
+  if (pts.length >= 2) { const veer = ((pts[pts.length - 1].brg - pts[0].brg + 540) % 360) - 180; g.fillStyle = '#8b98a5'; g.font = '9px system-ui'; g.fillText(`${fill.length} fill days · veer ${veer >= 0 ? '+' : ''}${veer.toFixed(0)}°`, 4, H - 4); }
 }
 
 // ---- model-skill card (precomputed venue validation) ----

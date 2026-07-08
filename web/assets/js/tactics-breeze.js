@@ -255,6 +255,44 @@
     if (io && step8) newChart(io.getContext('2d'), { type: 'bar', data: { labels: ['coast (Logan/Beverly)', 'offshore (44013/A01)'], datasets: [{ data: [step8.validation.inshore_onshore_comp_kt, step8.validation.offshore_onshore_comp_kt], backgroundColor: ['#1f6fb0', '#8bb0d6'] }] }, options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { title: { display: true, text: 'onshore comp kt' } } } } });
   }
 
+  // Breeze polygon (Wisdorff, Ch.7 §2.4): solar-hour wind vectors from a common
+  // origin O; the tips trace the day's evolution; G = centroid = daily-mean wind.
+  // We plot the FROM-bearing rose (radius = speed) so the right-rotation is visible.
+  function drawBreezePolygon(cv, d) {
+    const g = cv.getContext('2d'), W = cv.width, H = cv.height; g.clearRect(0, 0, W, H);
+    const O = { x: W / 2, y: H / 2 + 4 }, R = Math.min(W, H) / 2 - 22;
+    const rf = (d.race_field_hourly || []).filter(r => r[1] != null && r[0] >= 8 && r[0] <= 19);
+    const maxkt = Math.max(8, ...rf.map(r => r[2]));
+    const P = (brg, kt) => ({ x: O.x + (kt / maxkt * R) * Math.sin(brg * Math.PI / 180), y: O.y - (kt / maxkt * R) * Math.cos(brg * Math.PI / 180) });
+    // compass rings + spokes
+    g.strokeStyle = '#2a3038'; g.fillStyle = '#8b98a5'; g.font = '10px system-ui';
+    for (const rr of [0.5, 1]) { g.beginPath(); g.arc(O.x, O.y, R * rr, 0, 6.28); g.stroke(); }
+    for (const [b, lab] of [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W']]) {
+      const e = P(b, maxkt); g.strokeStyle = '#242a31'; g.beginPath(); g.moveTo(O.x, O.y); g.lineTo(e.x, e.y); g.stroke();
+      g.fillStyle = '#8b98a5'; g.fillText(lab, e.x - 3, e.y + (b === 0 ? -2 : b === 180 ? 10 : 3));
+    }
+    g.fillStyle = '#8b98a5'; g.fillText(maxkt.toFixed(0) + ' kt', O.x + 3, O.y - R + 2);
+    // the hour trace (morning cool -> afternoon warm colour), tips connected
+    g.lineWidth = 2; g.beginPath();
+    rf.forEach((r, i) => { const p = P(r[1], r[2]); if (i) g.lineTo(p.x, p.y); else g.moveTo(p.x, p.y); });
+    g.strokeStyle = '#3a86c8'; g.stroke();
+    let su = 0, sv = 0;
+    rf.forEach(r => {
+      const p = P(r[1], r[2]); const warm = (r[0] - 8) / 11;
+      g.fillStyle = `rgb(${Math.round(58 + warm * 180)},${Math.round(134 - warm * 70)},${Math.round(200 - warm * 160)})`;
+      g.beginPath(); g.arc(p.x, p.y, 3, 0, 6.28); g.fill();
+      if ([9, 12, 15, 18].includes(Math.round(r[0]))) { g.fillStyle = '#dfe6ee'; g.font = '9px system-ui'; g.fillText(Math.round(r[0]) + 'h', p.x + 4, p.y); }
+      su += Math.sin(r[1] * Math.PI / 180) * r[2]; sv += Math.cos(r[1] * Math.PI / 180) * r[2];
+    });
+    // G = daily mean (centroid)
+    if (rf.length) {
+      const gb = (Math.atan2(su, sv) * 180 / Math.PI + 360) % 360, gk = Math.hypot(su, sv) / rf.length;
+      const p = P(gb, gk); g.fillStyle = '#1f9d55'; g.beginPath(); g.arc(p.x, p.y, 4.5, 0, 6.28); g.fill();
+      g.fillStyle = '#1f9d55'; g.font = 'bold 10px system-ui'; g.fillText('G', p.x + 5, p.y + 3);
+    }
+    g.fillStyle = '#8b98a5'; g.font = '9px system-ui'; g.fillText('wind FROM · morning→afternoon · G = daily mean', 4, H - 4);
+  }
+
   function chartOpts(xt, yt, extra = {}) {
     const o = { animation: false, plugins: { legend: { labels: { boxWidth: 10, font: { size: 10 }, filter: it => !String(it.text).startsWith('_') } } }, scales: { x: { type: 'linear', min: 0, max: 24, title: { display: true, text: xt }, ticks: { stepSize: 6 } }, y: { title: { display: true, text: yt } } } };
     if (extra.yMax) { o.scales.y.max = extra.yMax; o.scales.y.min = 0; o.scales.y.ticks = { stepSize: extra.yStep }; }
@@ -277,8 +315,10 @@
       <div class="bz-section-t">Racing-area wind — HRRR field <span class="tx-hint">(central Mass Bay; the sea-breeze evidence the replay shows)</span></div>
       <div class="bz-two"><div><div class="bz-lbl">Direction by hour — backs to onshore then veers right</div><canvas id="bz-race-dir" width="330" height="175"></canvas></div>
         <div><div class="bz-lbl">Speed by hour — mean &amp; max cell (convergence band)</div><canvas id="bz-race-spd" width="330" height="175"></canvas></div></div>
-      <div class="bz-section-t">Loop cross-section</div>
-      <canvas class="bz-xsec" id="bz-xsec" width="640" height="240"></canvas>
+      <div class="bz-two"><div><div class="bz-section-t">Loop cross-section</div>
+        <canvas class="bz-xsec" id="bz-xsec" width="440" height="240"></canvas></div>
+        <div><div class="bz-section-t">Breeze polygon <span class="tx-hint">(Wisdorff — solar-hour wind, G = daily mean)</span></div>
+        <canvas id="bz-polygon" width="240" height="240"></canvas></div></div>
       <div class="bz-section-t">Decision walkthrough — prediction vs. what actually happened</div>
       ${steps}
       <div class="bz-section-t">Point observations (stations) <span class="tx-hint">— secondary; the enclosed corner can hold the synoptic</span></div>
@@ -288,6 +328,7 @@
     // draw
     drawRaceField(d);
     drawCrossSection($('bz-xsec'), d);
+    if ($('bz-polygon')) drawBreezePolygon($('bz-polygon'), d);
     document.querySelectorAll('.bz-gauge').forEach(c => drawGauge(c, +c.dataset.syn));
     await ensureReliefBz();
     document.querySelectorAll('.bz-qmap').forEach(c => drawQuadrantMap(c, d, grid));
