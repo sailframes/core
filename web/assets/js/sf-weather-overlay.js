@@ -108,7 +108,11 @@ window.SFWeather = (function () {
       .sfw-control .sfw-title{font-weight:700;margin-bottom:4px}
       .sfw-control .sfw-row{display:block;white-space:nowrap;cursor:pointer;padding:1px 0}
       .sfw-control .sfw-row input{vertical-align:-1px;margin-right:4px}
-      .sfw-control .sfw-busy{color:#3a86c8;font-style:italic}`;
+      .sfw-control .sfw-busy{color:#3a86c8;font-style:italic}
+      .sfw-legend{background:rgba(255,255,255,.94);padding:6px 8px;font:11px/1.4 system-ui,sans-serif;color:#1c2b3a;box-shadow:0 1px 4px rgba(0,0,0,.3);border-radius:6px;max-width:250px}
+      .sfw-legend .sfw-lg-title{font-weight:700;margin-bottom:3px;font-size:12px}
+      .sfw-legend .sfw-lg-row{white-space:nowrap;margin-top:2px}
+      .sfw-sw{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:-1px;margin:0 2px}`;
     document.head.appendChild(s);
   }
   function mount() {
@@ -121,6 +125,32 @@ window.SFWeather = (function () {
     fp.appendChild(canvas); ctx = canvas.getContext('2d');
     map.on('move zoom viewreset resize zoomanim', redraw);
     window.addEventListener('resize', redraw);
+    addLegend();
+  }
+
+  // ---- legend (bottom-left; shows only the enabled layers' keys) ------------------
+  let legendDiv = null;
+  function addLegend() {
+    const ctl = L.control({ position: 'bottomright' });   // bottom-left holds the playback controls
+    ctl.onAdd = function () {
+      legendDiv = L.DomUtil.create('div', 'sfw-legend'); legendDiv.style.display = 'none';
+      L.DomEvent.disableClickPropagation(legendDiv);
+      updateLegend(); return legendDiv;
+    };
+    ctl.addTo(map);
+  }
+  function updateLegend() {
+    if (!legendDiv) return;
+    const sw = c => `<span class="sfw-sw" style="background:${c}"></span>`;
+    const parts = [];
+    if (on.wind) parts.push(`<div class="sfw-lg-row"><b>HRRR wind</b> kt ${[[0, 'calm'], [6, '6'], [12, '12'], [18, '18'], [26, '26+']].map(([s, l]) => sw(spdColor(s)) + l).join(' ')}</div>`);
+    if (on.seabreeze) parts.push(`<div class="sfw-lg-row">${sw('rgba(46,160,220,.5)')}sea-breeze zone <span style="color:#d81b1b;font-weight:700;margin-left:3px">▬</span> front</div>`);
+    if (on.tide) parts.push(`<div class="sfw-lg-row"><span style="color:#0aa0a0;font-weight:700">⇒⇒</span> tidal current (set/drift, NOAA)</div>`);
+    if (on.dist) parts.push(`<div class="sfw-lg-row">dist-to-coast NM ${[[3, '#1f9d55'], [6, '#3a86c8'], [12, '#e8843a'], [20, '#d64545']].map(([Lv, c]) => sw(c) + Lv).join(' ')}</div>`);
+    if (on.relief) parts.push(`<div class="sfw-lg-row"><span class="sfw-sw" style="background:linear-gradient(90deg,#2e6e3f,#c8b88a,#efe6d0)"></span>3DEP shaded relief</div>`);
+    if (on.obs) parts.push(`<div class="sfw-lg-row">◎ obs buoy wind rose (NOAA)</div>`);
+    legendDiv.innerHTML = parts.length ? `<div class="sfw-lg-title">Weather ☁</div>` + parts.join('') : '';
+    legendDiv.style.display = parts.length ? 'block' : 'none';
   }
   function sizeCanvas() {
     const size = map.getSize(), dpr = window.devicePixelRatio || 1;
@@ -346,6 +376,7 @@ window.SFWeather = (function () {
       } else if (name === 'obs') { if (onObsToggle) onObsToggle(val); }
     } catch (e) { setBusy(name, false); console.warn('[SFWeather]', name, e); }
     try { localStorage.setItem('sfw_' + name, val ? '1' : '0'); } catch {}
+    updateLegend();
     redraw();
   }
   function setBusy(name, b) {
