@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script>
+        (function () {
+            try {
+                if (location.hostname === 'www.sailframes.com') {
+                    location.replace(location.href.replace('//www.sailframes.com', '//sailframes.com'));
+                }
+            } catch (e) {}
+        })();
+    </script>
+    <title>SailFrames — Race Days × Sea Breeze</title>
+    <meta name="description" content="Every race day matched to its Bernot sea-breeze analysis — with links to review the day in the race replay and in the tactics engine.">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>*</text></svg>">
+    <link rel="stylesheet" href="./assets/css/main.css?v=10">
+    <link rel="stylesheet" href="./assets/css/races.css?v=5">
+    <script src="./config.js"></script>
+    <script src="./assets/js/analytics.js"></script>
+    <style>
+      .rb-main { max-width: 1000px; margin: 0 auto; padding: 0 20px 60px; }
+      .rb-stat { color: var(--text-secondary, #8b98a5); font-size: .9rem; margin: 2px 0 14px; }
+      .rb-toolbar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; }
+      .rb-toolbar label { font-size: .85rem; color: var(--text-secondary, #8b98a5); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+      .rb-toolbar select { background: var(--bg-secondary, #14181f); color: var(--text-primary, #e8edf2); border: 1px solid var(--border-color, #2a3038); border-radius: 6px; padding: 5px 8px; }
+      .rb-day { background: var(--bg-secondary, #14181f); border: 1px solid var(--border-color, #2a3038); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+      .rb-day-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+      .rb-date { font-weight: 700; font-size: 1.08rem; color: var(--text-primary, #e8edf2); }
+      .rb-verdict { font-size: .9rem; font-weight: 600; }
+      .rb-qbadge { display: inline-block; min-width: 22px; text-align: center; border-radius: 5px; color: #0d1117; font-weight: 700; padding: 1px 5px; font-size: .8rem; }
+      .rb-day-link { margin-left: auto; font-size: .86rem; color: var(--accent, #3aa0ff); text-decoration: none; white-space: nowrap; }
+      .rb-day-link:hover { text-decoration: underline; }
+      .rb-sum { color: var(--text-secondary, #9aa7b4); font-size: .86rem; margin: 6px 0 10px; line-height: 1.45; }
+      .rb-races { display: flex; flex-direction: column; gap: 6px; }
+      .rb-race { display: grid; grid-template-columns: minmax(150px, 1.3fr) minmax(120px, 1fr) minmax(160px, 1.6fr) auto; gap: 10px; align-items: center;
+                 background: var(--bg-primary, #0d1117); border: 1px solid var(--border-color, #2a3038); border-radius: 7px; padding: 7px 10px; font-size: .85rem; }
+      .rb-race-name { color: var(--text-primary, #e8edf2); font-weight: 600; }
+      .rb-race-name .rb-reg { color: var(--text-secondary, #8b98a5); font-weight: 400; }
+      .rb-race-time { color: var(--text-secondary, #8b98a5); }
+      .rb-race-wind { color: #cfe0ef; }
+      .rb-race-wind .rb-status { display: block; font-size: .78rem; margin-top: 1px; }
+      .rb-race-link { color: var(--accent, #3aa0ff); text-decoration: none; white-space: nowrap; font-weight: 600; }
+      .rb-race-link:hover { text-decoration: underline; }
+      .st-yes { color: #1f9d55; } .st-no { color: #8b98a5; } .st-pre { color: #e8b13a; } .st-mid { color: #3a86c8; } .st-na { color: #6b7684; }
+      .rb-noan { color: #6b7684; font-size: .86rem; font-style: italic; }
+      @media (max-width: 680px) { .rb-race { grid-template-columns: 1fr; gap: 3px; } .rb-day-link { margin-left: 0; } }
+    </style>
+</head>
+<body class="races-landing-page">
+    <header class="rl-nav">
+        <a href="/" class="rl-nav-logo">SailFrames</a>
+        <nav class="rl-nav-links">
+            <a href="./races.html">Series &amp; Races</a>
+            <a href="./race.html">Race Dashboard</a>
+            <a href="./tactics.html">Tactics</a>
+            <a href="./sessions.html">Sessions</a>
+        </nav>
+    </header>
+
+    <main class="rl-main rb-main">
+        <section class="rl-hero">
+            <h1>Race Days × Sea Breeze</h1>
+        </section>
+        <p class="rb-stat" id="rb-stat">Loading race days…</p>
+        <div class="rb-toolbar">
+            <label><input type="checkbox" id="rb-only"> Only days with a sea-breeze analysis</label>
+            <label><input type="checkbox" id="rb-estab"> Only established sea-breeze days</label>
+            <label>Sort
+                <select id="rb-sort"><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select>
+            </label>
+        </div>
+        <div id="rb-list"><div class="rl-loading">Loading…</div></div>
+        <p class="rb-stat" style="margin-top:20px">Each day links to its full <b>Bernot sea-breeze analysis</b> in Tactics; each race links to the <b>race replay</b> (toggle the Weather panel there for the HRRR wind / sea-breeze / tide overlay the boats sailed in). Wind shown per race is the racing-area HRRR 10&nbsp;m field over that race's local-time window.</p>
+    </main>
+
+    <script type="module" src="./assets/js/race-breeze-page.js?v=1"></script>
+</body>
+</html>

@@ -1125,11 +1125,17 @@ window.addEventListener('resize', () => { if (!$('view-stats').hidden) renderMon
     map.invalidateSize();
     map.fitBounds([[Math.min(...GRID.lats), Math.min(...GRID.lons)],
                    [Math.max(...GRID.lats), Math.max(...GRID.lons)]], { padding: [8, 8] });
+    // Deep link: ?date=YYYY-MM-DD lands on that day; ?view=breeze|calendar|stats|
+    // briefing opens that tab (used by race-breeze.html to jump to a day's analysis).
+    const qsDate = params.get('date');
+    if (qsDate && /^\d{4}-\d{2}-\d{2}$/.test(qsDate) && $('tx-date')) $('tx-date').value = qsDate;
     // Engine + map are ready now — page is usable. Load the default day's wind
     // field in the background so the map paints immediately instead of blocking.
     window.__tacticsReady = true;
     loadDay($('tx-date').value).then(() => { landAtEtHour(12); render(); })   // land at ~noon ET
       .catch(() => setStatus(`No archived wind field for ${$('tx-date').value} yet.`));
+    const qsView = params.get('view');
+    if (qsView && qsView !== 'replay') { switchView(qsView); if (qsView === 'breeze') setTimeout(() => window.__renderBreeze?.(), 40); }
   } catch (err) {
     setStatus('load failed: ' + err.message);
     window.__tacticsError = String(err);
