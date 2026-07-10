@@ -1,0 +1,17 @@
+# core (SST pipeline + met_em patch)
+numpy
+scipy
+xarray
+netCDF4          # also provides the OPeNDAP backend for ERDDAP
+requests         # NDBC buoy anchor in build_coldest_sst.py
+matplotlib       # --plot quicklooks
+# optional
+pydap            # alternative OPeNDAP backend if netCDF4-DAP is unavailable
+# validation (KBOX radar) -- install when implementing validation/kbox_fine_line.py
+# nexradaws
+# arm-pyart
+# metpy
+# fleet proxy store -- install when implementing fleet/fleet_wind_proxy.py
+# pandas
+# pyarrow
+# duckdb

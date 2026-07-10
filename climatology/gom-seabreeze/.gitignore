@@ -1,0 +1,27 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+
+# SST outputs
+sst_out/
+*.png
+
+# WPS / WRF working files (large, regenerated)
+WPS/
+run/wrfout_*
+run/wrfinput_*
+run/wrfbdy_*
+run/wrflowinp_*
+met_em.d0*
+FILE:*
+GRIBFILE.*
+geo_em.d0*
+*.bak
+WPS_GEOG/
+
+# driver GRIB
+*.grib
+*.grib2
+*.grb2

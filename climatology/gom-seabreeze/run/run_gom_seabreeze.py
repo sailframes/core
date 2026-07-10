@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""
+run_gom_seabreeze.py  --  end-to-end driver
+============================================
+Chain a full run for one date + mode:
+
+    render namelists (dates / num_metgrid_levels / grid_fdda)
+      -> geogrid (once, cached)
+      -> stage_driver: link GFS|ERA5 GRIB + Vtable -> ungrib
+      -> metgrid                                    -> met_em.d0{1,2,3}.*
+      -> sst/build_coldest_sst.py                   -> sst_<date>.nc
+      -> sst/patch_met_em_sst.py                    -> met_em w/ cold SST
+      -> real.exe
+      -> wrf.exe                                    -> wrfout_d03
+
+Mode switch (README "Run modes"):
+    forecast : GFS 0.25 ICs/LBCs, num_metgrid_levels=34, &fdda OFF
+    hindcast : ERA5 ICs/LBCs,     num_metgrid_levels=38, &fdda grid-nudge d01 ON
+
+Orchestration only -- the science lives in sst/ and the namelists. Renders the
+date/mode fields into copies under WPS_DIR / WRF_RUN and leaves the annotated
+template namelists in wrf/ untouched. WPS/real/wrf are external binaries; each
+step fails loudly and does not fall through.
+
+Machine paths via env (or edit defaults): GOM_WPS, GOM_WRFRUN, GOM_WPSGEOG,
+GOM_VTABLES (WPS ungrib/Variable_Tables), GOM_MPIRUN, GOM_PYTHON.
+
+Examples:
+    ./run_gom_seabreeze.py --date 2024-07-31 --mode forecast --grib-dir ~/gfs --fetch-gfs
+    ./run_gom_seabreeze.py --date 2024-07-31 --mode hindcast --grib-dir ~/era5
+    ./run_gom_seabreeze.py --date 2024-07-31 --dry          # print steps, render only
+"""
+import argparse
+import datetime as dt
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent                                  # gom-seabreeze/
+TEMPLATES = ROOT / "wrf"                             # annotated namelist templates
+WPS_DIR = Path(os.environ.get("GOM_WPS", "./WPS")).resolve()
+WRF_RUN = Path(os.environ.get("GOM_WRFRUN", "./run")).resolve()
+SST_DIR = Path(os.environ.get("GOM_SST", "./sst_out")).resolve()
+WPSGEOG = os.environ.get("GOM_WPSGEOG", "/path/to/WPS_GEOG")
+VTABLES = os.environ.get("GOM_VTABLES", str(WPS_DIR / "ungrib" / "Variable_Tables"))
+MPIRUN = os.environ.get("GOM_MPIRUN", "mpirun -np 4")
+PY = os.environ.get("GOM_PYTHON", sys.executable)
+
+# Per-mode driver config. NOTE (verify against the WPS registry before a real run):
+#   ERA5 pressure-level = 38 metgrid levels (37 pl + sfc); Vtable.ERA5 is the
+#   correct table -- Vtable.ERA-interim.pl substitutes but its soil/land entries
+#   differ. GFS 0.25 = 34 levels, Vtable.GFS.
+MODE_CFG = {
+    "forecast": dict(num_metgrid_levels=34, interval_seconds=10800, fdda=False, vtable="Vtable.GFS"),
+    "hindcast": dict(num_metgrid_levels=38, interval_seconds=3600,  fdda=True,  vtable="Vtable.ERA5"),
+}
+DRY = False
+
+
+def sh(cmd, cwd=None):
+    print(f"$ {cmd}   (cwd={cwd or os.getcwd()})")
+    if DRY:
+        return
+    r = subprocess.run(cmd, shell=True, cwd=cwd)
+    if r.returncode != 0:
+        sys.exit(f"FAILED ({r.returncode}): {cmd}")
+
+
+# ---- namelist rendering (targeted; preserves the templates' comments) ----------
+def set_nml(text, key, value):
+    """Replace the value of `key = ...` on its line, keeping any trailing !comment."""
+    pat = re.compile(rf"^(?P<pre>\s*{re.escape(key)}\s*=[ \t]*)(?P<val>[^!\n]*?)(?P<pad>[ \t]*)(?P<cmt>!.*)?$", re.M)
+    def repl(m):
+        cmt = m.group("cmt")
+        return f"{m.group('pre')}{value}" + (f"   {cmt}" if cmt else "")
+    out, n = pat.subn(repl, text)
+    if n == 0:
+        sys.exit(f"namelist key not found: {key}")
+    return out
+
+
+def uncomment_keys(text, keys):
+    """Strip a leading '! ' from lines assigning any of `keys` (enable &fdda params)."""
+    for k in keys:
+        text = re.sub(rf"^(\s*)!\s?(\s*{re.escape(k)}\s*=)", r"\1 \2", text, flags=re.M)
+    return text
+
+
+def render_namelists(date, mode, start_hour, run_hours):
+    cfg = MODE_CFG[mode]
+    y, m, d = map(int, date.split("-"))
+    start = dt.datetime(y, m, d, start_hour)
+    end = start + dt.timedelta(hours=run_hours)
+    triple = lambda v: f"{v}, {v}, {v},"
+
+    # --- namelist.wps ---
+    wps = (TEMPLATES / "namelist.wps").read_text()
+    wps = set_nml(wps, "start_date", triple(f"'{start:%Y-%m-%d_%H:%M:%S}'"))
+    wps = set_nml(wps, "end_date",   triple(f"'{end:%Y-%m-%d_%H:%M:%S}'"))
+    wps = set_nml(wps, "interval_seconds", f"{cfg['interval_seconds']},")
+    wps = set_nml(wps, "geog_data_path", f"'{WPSGEOG}'")
+    WPS_DIR.mkdir(parents=True, exist_ok=True)
+    (WPS_DIR / "namelist.wps").write_text(wps)
+
+    # --- namelist.input ---
+    inp = (TEMPLATES / "namelist.input").read_text()
+    inp = set_nml(inp, "run_hours", f"{run_hours},")
+    inp = set_nml(inp, "start_year", triple(f"{start:%Y}"))
+    inp = set_nml(inp, "start_month", triple(f"{start:%m}"))
+    inp = set_nml(inp, "start_day", triple(f"{start:%d}"))
+    inp = set_nml(inp, "start_hour", triple(f"{start:%H}"))
+    inp = set_nml(inp, "end_year", triple(f"{end:%Y}"))
+    inp = set_nml(inp, "end_month", triple(f"{end:%m}"))
+    inp = set_nml(inp, "end_day", triple(f"{end:%d}"))
+    inp = set_nml(inp, "end_hour", triple(f"{end:%H}"))
+    inp = set_nml(inp, "interval_seconds", f"{cfg['interval_seconds']},")
+    inp = set_nml(inp, "num_metgrid_levels", f"{cfg['num_metgrid_levels']},")
+    inp = set_nml(inp, "auxinput4_end_h", f"{run_hours},")
+    if cfg["fdda"]:
+        inp = set_nml(inp, "grid_fdda", "1, 0, 0,")
+        inp = uncomment_keys(inp, ["gfdda_inname", "grid_sfdda", "fgdt",
+                                   "if_no_pbl_nudging_uv", "if_no_pbl_nudging_t", "if_no_pbl_nudging_q",
+                                   "k_zfac_uv", "k_zfac_t", "k_zfac_q"])
+        print("  NOTE hindcast: grid (analysis) nudging on d01 requires wrffdda_d01 staged from ERA5 "
+              "(obsgrid/real) + gfdda_interval_m/gfdda_end_h set in the template — verify before running.")
+    else:
+        inp = set_nml(inp, "grid_fdda", "0, 0, 0,")
+    WRF_RUN.mkdir(parents=True, exist_ok=True)
+    (WRF_RUN / "namelist.input").write_text(inp)
+    print(f"  rendered namelists: {start:%Y-%m-%d_%H} +{run_hours}h  "
+          f"levels={cfg['num_metgrid_levels']}  fdda={'on' if cfg['fdda'] else 'off'}")
+
+
+# ---- driver staging (ungrib) ---------------------------------------------------
+def _alpha(n):                                       # 0->AAA, 1->AAB, ...  (link_grib suffixes)
+    a = ""
+    for _ in range(3):
+        a = chr(ord("A") + n % 26) + a; n //= 26
+    return a
+
+
+def link_grib(paths):
+    for f in WPS_DIR.glob("GRIBFILE.*"):
+        f.unlink()
+    for i, p in enumerate(sorted(paths)):
+        link = WPS_DIR / f"GRIBFILE.{_alpha(i)}"
+        print(f"  link GRIBFILE.{_alpha(i)} -> {p}")
+        if not DRY:
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            link.symlink_to(Path(p).resolve())
+    return len(paths)
+
+
+def fetch_gfs(date, cycle, fhours, out):
+    """Pull GFS 0.25 f000..fNNN for one cycle from NOMADS into `out` (forecast mode)."""
+    out = Path(out); out.mkdir(parents=True, exist_ok=True)
+    ymd = date.replace("-", "")
+    base = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
+    got = []
+    for fh in fhours:
+        q = (f"?dir=%2Fgfs.{ymd}%2F{cycle:02d}%2Fatmos&file=gfs.t{cycle:02d}z.pgrb2.0p25.f{fh:03d}"
+             "&all_lev=on&all_var=on")
+        dest = out / f"gfs.t{cycle:02d}z.f{fh:03d}.grib2"
+        print(f"  fetch GFS f{fh:03d} -> {dest}")
+        if DRY:
+            got.append(dest); continue
+        try:
+            urllib.request.urlretrieve(base + q, dest)
+            got.append(dest)
+        except Exception as e:
+            print(f"    ! GFS f{fh:03d} failed: {e}")
+    return got
+
+
+def stage_driver(date, mode, grib_dir, fetch, run_hours, cycle):
+    cfg = MODE_CFG[mode]
+    if fetch:
+        if mode != "forecast":
+            sys.exit("--fetch-gfs is forecast-mode only; stage ERA5 into --grib-dir (cdsapi).")
+        fhours = list(range(0, run_hours + 1, cfg["interval_seconds"] // 3600))
+        paths = fetch_gfs(date, cycle, fhours, grib_dir)
+    else:
+        if not grib_dir:
+            sys.exit("provide --grib-dir with the staged driver GRIB (or --fetch-gfs for GFS).")
+        paths = sorted(Path(grib_dir).glob("*"))
+        if not paths:
+            sys.exit(f"no GRIB files in {grib_dir}")
+    n = link_grib(paths)
+    vtab = Path(VTABLES) / cfg["vtable"]
+    sh(f"ln -sf {vtab} Vtable", cwd=WPS_DIR)
+    print(f"  Vtable -> {vtab}  ({n} GRIB linked)")
+    sh("./ungrib.exe", cwd=WPS_DIR)
+
+
+def main():
+    global DRY
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--date", required=True, help="YYYY-MM-DD")
+    ap.add_argument("--mode", choices=list(MODE_CFG), default="forecast")
+    ap.add_argument("--start-hour", type=int, default=0, help="run start hour UTC (default 00)")
+    ap.add_argument("--run-hours", type=int, default=36, help="forecast length (default 36)")
+    ap.add_argument("--grib-dir", help="dir of staged driver GRIB (GFS or ERA5)")
+    ap.add_argument("--fetch-gfs", action="store_true", help="download GFS 0.25 from NOMADS (forecast)")
+    ap.add_argument("--gfs-cycle", type=int, default=0, help="GFS cycle hour for --fetch-gfs (default 00z)")
+    ap.add_argument("--anchor", action="store_true", help="pass --anchor to build_coldest_sst")
+    ap.add_argument("--skip-geogrid", action="store_true", help="reuse cached geo_em (static domains)")
+    ap.add_argument("--dry", action="store_true", help="render namelists + print steps, run nothing external")
+    args = ap.parse_args()
+    DRY = args.dry
+
+    print(f"=== gom-seabreeze: {args.date}  mode={args.mode}  {args.run_hours}h ===")
+    render_namelists(args.date, args.mode, args.start_hour, args.run_hours)
+
+    geo_ok = (WPS_DIR / "geo_em.d01.nc").exists()
+    if args.skip_geogrid or geo_ok:
+        print(f"  geogrid: {'skipped (--skip-geogrid)' if args.skip_geogrid else 'cached geo_em present'}")
+    else:
+        sh("./geogrid.exe", cwd=WPS_DIR)
+
+    stage_driver(args.date, args.mode, args.grib_dir, args.fetch_gfs, args.run_hours, args.gfs_cycle)
+    sh("./metgrid.exe", cwd=WPS_DIR)
+
+    # SST lower boundary (coldest-pixel composite) + injection into met_em
+    a = " --anchor" if args.anchor else ""
+    sh(f"{PY} {ROOT}/sst/build_coldest_sst.py --date {args.date} --outdir {SST_DIR}{a} --plot")
+    sh(f"{PY} {ROOT}/sst/patch_met_em_sst.py --met-dir {WPS_DIR} --composite {SST_DIR} --domains 1 2 3 --plot")
+
+    # real + wrf (real must see the patched SST in met_em)
+    sh("cp namelist.input real_namelist.bak 2>/dev/null; true", cwd=WRF_RUN)
+    sh("./real.exe", cwd=WRF_RUN)
+    sh(f"{MPIRUN} ./wrf.exe", cwd=WRF_RUN)
+    print(f"=== done: wrfout_d03 in {WRF_RUN} ===")
+
+
+if __name__ == "__main__":
+    main()
