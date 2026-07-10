@@ -210,11 +210,14 @@ def main():
     ap.add_argument("--anchor", action="store_true", help="pass --anchor to build_coldest_sst")
     ap.add_argument("--skip-geogrid", action="store_true", help="reuse cached geo_em (static domains)")
     ap.add_argument("--dry", action="store_true", help="render namelists + print steps, run nothing external")
+    ap.add_argument("--render-only", action="store_true", help="render namelists into WPS/WRF dirs then exit (for the AWS container runner)")
     args = ap.parse_args()
     DRY = args.dry
 
     print(f"=== gom-seabreeze: {args.date}  mode={args.mode}  {args.run_hours}h ===")
     render_namelists(args.date, args.mode, args.start_hour, args.run_hours)
+    if args.render_only:
+        return
 
     geo_ok = (WPS_DIR / "geo_em.d01.nc").exists()
     if args.skip_geogrid or geo_ok:
