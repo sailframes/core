@@ -36,20 +36,21 @@ AWS_PROFILE=sailframes ./launch.sh 2024-07-31 forecast
 - **Later runs ~$1–3** each (geog pull from S3 ~5–10 min + WRF ~1–2 h).
 - S3: ~30 GB geog cache (~$0.7/mo) + wrfout per day (a few GB at 15-min d03 output).
 
-## First run is a SHAKEDOWN — verify these live (unrunnable off-AWS)
-1. **`set_env.ksh` vars** — `run_case.sh` sets `WPS_VERSION/WRF_VERSION/input_data/
-   case_name/num_procs`. Reconcile against the DTC tutorial's `set_env.ksh`; add any
-   other vars `run_wps.ksh`/`run_wrf.ksh` reference.
-2. **met_em hand-off** — confirm `run_wrf.ksh` links `met_em` from `/home/wpsprd`
-   (bind-mounted, so the host SST patch is visible). If it expects them in `wrfprd`,
-   add a link step between WPS and WRF.
-3. **geog fields** — `geog_data_res='30s'` needs the 30 s MODIS landuse + topo in the
-   mandatory geog; if geogrid errors on a missing field, pull the specific
-   `geog_<field>` tarball.
-4. **GFS levels** — namelist `num_metgrid_levels=34` must match the GFS pgrb2 0p25
-   level count metgrid reports; adjust if metgrid complains.
-5. **Nest placement** — `plotgrids`/first geo_em: confirm d03 covers Salem Sound →
-   Cape Cod Bay before trusting a run.
+## VALIDATED end-to-end 2026-07-10 (2024-07-31 forecast)
+Full chain ran on a c7a.8xlarge Spot in ~4 h (~$3, incl. one-time geog + shakedown):
+provision → container → geog → GFS(archive) → WPS → real → wrf (32 ranks, no CFL) →
+145 `wrfout_d03` 15-min frames → `s3://…/gom/2024-07-31/forecast/wrfout/`. The 9 shakedown
+fixes are baked into `run_case.sh` + `wrf/namelist.input`; a rerun should reproduce it.
 
-Once the shakedown passes, wrap `launch.sh` in a loop over dates for the hindcast
-climatology (or move to AWS Batch + Spot if you run hundreds of days).
+## Two remaining items — SCIENCE, not harness (this run used raw driver SST)
+1. **Coldest-pixel SST** — `build_coldest_sst.py` pulls ACSPO from the **NRT** ERDDAP
+   dataset, which lacks historical dates (2024 → zero-size). Find an archived /
+   science-quality ACSPO L3S dataset id for hindcast/old dates. Until then `run_case.sh`
+   runs on raw driver SST (SST step is non-fatal).
+2. **`sst_update` block** — WRF 4.3's registry rejects an auxinput4 var, so `run_case.sh`
+   strips the `sst_update`/auxinput4 block (static SST). Identify the offending var to
+   restore time-varying SST. (Coldest-pixel injection into the static met_em still works
+   once #1 is fixed — that's independent of `sst_update`.)
+
+Once #1 is fixed, wrap `launch.sh` in a loop over dates for the hindcast climatology
+(or move to AWS Batch + Spot for hundreds of days).

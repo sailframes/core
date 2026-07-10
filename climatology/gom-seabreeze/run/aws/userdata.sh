@@ -24,12 +24,15 @@ python3.11 -m venv "$VENV"
 echo "### WPS_GEOG: reuse the S3 cache if present, else fetch from UCAR + cache it"
 mkdir -p "$GEOG"
 if aws s3 ls "$S3/geog/WPS_GEOG.tar.gz" >/dev/null 2>&1; then
-  aws s3 cp "$S3/geog/WPS_GEOG.tar.gz" - | tar xz -C "$GEOG" --strip-components=1
+  aws s3 cp "$S3/geog/WPS_GEOG.tar.gz" - | tar xz -C "$GEOG"
 else
-  # mandatory + high-res 30s fields (~30-60 GB extracted; one-time, then cached to S3)
-  curl -SL https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_high_res_mandatory.tar.gz | tar xz -C "$GEOG" --strip-components=1
-  tar czf /mnt/WPS_GEOG.tar.gz -C "$GEOG" . && aws s3 cp /mnt/WPS_GEOG.tar.gz "$S3/geog/WPS_GEOG.tar.gz"
+  # WPS high-res mandatory geog (~2.8 GB gz -> ~10 GB); one-time, then cached to S3.
+  curl -SL https://www2.mmm.ucar.edu/wrf/src/wps_files/geog_high_res_mandatory.tar.gz | tar xz -C "$GEOG"
+  tar cz -C "$GEOG" . | aws s3 cp - "$S3/geog/WPS_GEOG.tar.gz"
 fi
+# geog fields may sit in a subdir (e.g. $GEOG/WPS_GEOG). If geogrid can't find them,
+# the shakedown adjusts geog_data_path (mount stays /data/geog).
+ls "$GEOG" | head
 
 echo "### docker image (WRF/WPS 4.3)"
 docker pull dtcenter/wps_wrf:latest

@@ -18,7 +18,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 
 echo "### upload the gom-seabreeze code so the instance can pull it (no git auth needed)"
 tar czf /tmp/gom-seabreeze.tar.gz -C "$(dirname "$ROOT")" "$(basename "$ROOT")"
-aws s3 cp /tmp/gom-seabreeze.tar.gz "${S3#s3://}" >/dev/null 2>&1 || true
 aws s3 cp /tmp/gom-seabreeze.tar.gz "$S3/code/gom-seabreeze.tar.gz"
 
 echo "### latest AL2023 x86_64 AMI"
