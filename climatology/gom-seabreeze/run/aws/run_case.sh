@@ -125,6 +125,38 @@ if [ "$GEOG_DETAIL" = nlcd ]; then
   echo "  NLCD support confirmed in image tables"
 fi
 
+echo "### 4c. patch VEGPARM.TBL NLCD40 LCZ block (WRF 4.3 bug fix, nlcd only)"
+# WRF 4.3 ships the NLCD40 section with only LCZ_1..LCZ_3 (values 24/26/99) while the
+# Noah reader expects LCZ_1..LCZ_11 (like every other section) -> it reads past LCZ_3
+# into the next section's "Vegetation Parameters" header -> Fortran "Bad integer for
+# item 1 in list input" (module_sf_noahdrv.f90). Fixed upstream in WRF master by
+# extending the NLCD40 LCZ block to 11 entries (51..61). Apply that here at runtime
+# (no recompile): pull the container's table, extend ONLY the NLCD40 LCZ block, copy back.
+if [ "$GEOG_DETAIL" = nlcd ] && [ "$GEOGRID_ONLY" != 1 ]; then
+  VEG=/comsoftware/wrf/WRF-4.3/run/VEGPARM.TBL
+  n11=$(docker exec gomwrf grep -c '^LCZ_11' "$VEG" || echo 0)
+  if [ "${n11:-0}" -lt 3 ]; then          # <3 => NLCD40 section is the truncated one
+    docker exec gomwrf cat "$VEG" > "$WORK/VEGPARM.TBL.orig"
+    awk '
+      /^NLCD40/ { innlcd=1 }
+      innlcd && /^Vegetation Parameters/ { innlcd=0 }
+      innlcd && $0=="LCZ_1" && !done {
+        printf "LCZ_1\n51\nLCZ_2\n52\nLCZ_3\n53\nLCZ_4\n54\nLCZ_5\n55\nLCZ_6\n56\nLCZ_7\n57\nLCZ_8\n58\nLCZ_9\n59\nLCZ_10\n60\nLCZ_11\n61\n"
+        done=1; for (i=0;i<5;i++) getline; next    # drop old 24, LCZ_2, 26, LCZ_3, 99
+      }
+      { print }
+    ' "$WORK/VEGPARM.TBL.orig" > "$WORK/VEGPARM.TBL.fixed"
+    if [ "$(grep -c '^LCZ_11' "$WORK/VEGPARM.TBL.fixed")" -eq 3 ]; then
+      docker cp "$WORK/VEGPARM.TBL.fixed" gomwrf:"$VEG"
+      echo "  VEGPARM.TBL NLCD40 LCZ block extended 3 -> 11 entries"
+    else
+      echo "  WARN: VEGPARM.TBL patch produced unexpected LCZ_11 count -> left original (wrf.exe may still FATAL)"
+    fi
+  else
+    echo "  VEGPARM.TBL NLCD40 already has full LCZ block -> no patch needed"
+  fi
+fi
+
 echo "### 5. WPS (geogrid/ungrib/metgrid) -> met_em in wpsprd"
 # run_wps links only *.exe into wpsprd; geogrid/metgrid look for GEOGRID.TBL /
 # METGRID.TBL under ./geogrid ./metgrid -> symlink those table dirs in first
