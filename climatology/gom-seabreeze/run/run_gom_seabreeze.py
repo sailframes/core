@@ -69,10 +69,18 @@ MODE_CFG = {
 # NLCD is applied to every domain (d01 offshore/Canada falls back to MODIS-default,
 # remapped into NLCD40 space). Requires nlcd2011_ll_9s in WPS_GEOG + an NLCD40
 # section in the image's VEGPARM.TBL (run_case.sh checks both before the full run).
+# LSM COUPLING: WRF hard-forbids NLCD40 land use with RUC LSM (sf_surface_physics=3,
+# the RU-WRF default) -- real.exe FATALs "NLCD40 data may not be used with RUCLSMSCHEME"
+# (verified 2026-07-12 via rsl.error.0000). NLCD40 is only allowed with SLAB/Noah(2)/
+# Pleim-Xiu(7) (Noah-MP=4 is also forbidden). So the nlcd path also switches RUC->Noah
+# (sf_surface_physics=2, num_soil_layers 9->4; Noah is lower-friction with GFS's 4 soil
+# levels and pairs fine with the MYNN sfclay/PBL). modis keeps the validated RUC recipe.
 GEOG_CFG = {
-    "modis": dict(geog_data_res="'30s', '30s', '30s',", num_land_cat=21),
+    "modis": dict(geog_data_res="'30s', '30s', '30s',", num_land_cat=21,
+                  sf_surface_physics="3, 3, 3,", num_soil_layers=9),   # RUC (RU-WRF)
     "nlcd":  dict(geog_data_res="'nlcd2011_9s+default', 'nlcd2011_9s+default', 'nlcd2011_9s+default',",
-                  num_land_cat=40),
+                  num_land_cat=40,
+                  sf_surface_physics="2, 2, 2,", num_soil_layers=4),   # Noah (NLCD40-compatible)
 }
 DRY = False
 
@@ -138,6 +146,8 @@ def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis"):
     inp = set_nml(inp, "interval_seconds", f"{cfg['interval_seconds']},")
     inp = set_nml(inp, "num_metgrid_levels", f"{cfg['num_metgrid_levels']},")
     inp = set_nml(inp, "num_land_cat", f"{gcfg['num_land_cat']},")
+    inp = set_nml(inp, "sf_surface_physics", gcfg["sf_surface_physics"])
+    inp = set_nml(inp, "num_soil_layers", f"{gcfg['num_soil_layers']},")
     inp = set_nml(inp, "auxinput4_end_h", f"{run_hours},")
     if cfg["fdda"]:
         inp = set_nml(inp, "grid_fdda", "1, 0, 0,")
