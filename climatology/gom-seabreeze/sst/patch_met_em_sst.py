@@ -124,13 +124,13 @@ def regrid_and_fill(clat, clon, carr, xlat, xlong, landmask, orig_sst):
     return new_sst, water, n_resid
 
 
-def sanity(new_sst, water, domain, n_resid):
+def sanity(new_sst, water, domain, n_resid, varname="SST"):
     w = new_sst[water]
     lo, hi, mean = np.nanmin(w), np.nanmax(w), np.nanmean(w)
     n_nan = int(np.isnan(w).sum())
     flag = "" if (lo >= SST_MIN_K and hi <= SST_MAX_K and n_nan == 0) else "  <-- CHECK"
-    print(f"  d{domain}: water cells={w.size:>7d}  "
-          f"SST[K] min={lo:6.2f} max={hi:6.2f} mean={mean:6.2f}  "
+    print(f"  d{domain} {varname}: water cells={w.size:>7d}  "
+          f"[K] min={lo:6.2f} max={hi:6.2f} mean={mean:6.2f}  "
           f"NaN={n_nan}  filled_from_driver={n_resid}{flag}")
     if n_nan:
         print(f"  d{domain}: ERROR {n_nan} NaN over water AFTER fill -- WRF will crash. "
@@ -156,7 +156,7 @@ def quicklook(path_png, xlat, xlong, new_sst, landmask):
     print(f"  wrote {path_png}")
 
 
-def process_file(fpath, domain, date_str, comp_path, do_plot, backup, sst_var):
+def process_file(fpath, domain, date_str, comp_path, do_plot, backup, sst_vars):
     comp_file = composite_for_date(comp_path, date_str)
     if comp_file is None:
         print(f"  d{domain} {date_str}: no composite found -- skipped")
@@ -169,21 +169,37 @@ def process_file(fpath, domain, date_str, comp_path, do_plot, backup, sst_var):
             shutil.copy2(fpath, bak)
 
     with nc.Dataset(fpath, "r+") as ncf:
+        # GFS-driven met_em carries the water surface temperature as SKINTEMP, not a
+        # standalone SST field (that only exists for some drivers). With sst_update=0,
+        # real.exe holds the water TSK from SKINTEMP -> patch every present candidate
+        # over water so the composite reaches the model regardless of driver naming.
+        present = [v for v in sst_vars if v in ncf.variables]
+        if not present:
+            have = list(ncf.variables)
+            print(f"  d{domain} {date_str}: none of {sst_vars} in met_em "
+                  f"(has {', '.join(v for v in have if 'TEMP' in v.upper() or v in ('SST','TSK'))} "
+                  f"among {len(have)} vars) -- SKIPPED, no injection")
+            return
         xlat = np.asarray(ncf.variables["XLAT_M"][0], dtype=float)
         xlong = np.asarray(ncf.variables["XLONG_M"][0], dtype=float)
         landmask = np.asarray(ncf.variables["LANDMASK"][0], dtype=float)
-        sstv = ncf.variables[sst_var]
-        orig_sst = np.asarray(sstv[0], dtype=float)
 
-        new_sst, water, n_resid = regrid_and_fill(
-            clat, clon, carr, xlat, xlong, landmask, orig_sst)
+        wrote, new_sst = [], None
+        for v in present:
+            sstv = ncf.variables[v]
+            orig = np.asarray(sstv[0], dtype=float)
+            new_sst, water, n_resid = regrid_and_fill(
+                clat, clon, carr, xlat, xlong, landmask, orig)
+            if not sanity(new_sst, water, domain, n_resid, v):
+                continue  # leave this var untouched
+            sstv[0, :, :] = new_sst
+            wrote.append(v)
+        if not wrote:
+            print(f"  d{domain}: composite failed sanity for all of {present} -- nothing written")
+            return
+        print(f"  d{domain}: injected coldest-pixel SST into {wrote} over water")
 
-        if not sanity(new_sst, water, domain, n_resid):
-            return  # leave file untouched
-
-        sstv[0, :, :] = new_sst
-
-    if do_plot:
+    if do_plot and new_sst is not None:
         quicklook(fpath.replace(".nc", "") + f"_SST.png",
                   xlat, xlong, new_sst, landmask)
 
@@ -195,7 +211,9 @@ def main():
     ap.add_argument("--composite", required=True,
                     help="composite .nc file OR dir of sst_YYYY-MM-DD.nc")
     ap.add_argument("--domains", nargs="+", type=int, default=[1, 2, 3])
-    ap.add_argument("--sst-var", default="SST", help="SST var name in met_em (default SST)")
+    ap.add_argument("--sst-vars", nargs="+", default=["SST", "SKINTEMP"],
+                    help="met_em water-temp var(s) to overwrite over water; all present ones "
+                         "are patched (default: SST SKINTEMP -- GFS met_em only has SKINTEMP)")
     ap.add_argument("--plot", action="store_true", help="save a PNG per file")
     ap.add_argument("--no-backup", action="store_true", help="do NOT write .bak backups")
     args = ap.parse_args()
@@ -214,7 +232,7 @@ def main():
                 continue
             date_str = m.group(2)
             process_file(f, d, date_str, args.composite,
-                         args.plot, not args.no_backup, args.sst_var)
+                         args.plot, not args.no_backup, args.sst_vars)
             total += 1
     print(f"done: processed {total} file(s).")
     if total == 0:
