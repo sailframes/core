@@ -7,10 +7,16 @@
 !   * start_date/end_date
 !   * VERIFY nest placement with plotgrids.exe; nudge i_/j_parent_start
 !     so d03 covers Salem Sound + Mass Bay + Cape Ann -> Cape Cod Bay.
-!   * geog_data_res: install & point at the highest-res land use + topo
-!     you can (30s or finer). The land-WATER mask matters more than the
-!     land-use class for sea breeze -- optionally inject a custom NLCD /
-!     GSHHG coastline mask on d03 after geogrid (see SST spec, "coastline").
+!   * geog_data_res: the land-WATER mask is the #1 geography lever for the
+!     sea breeze (topo is secondary here -- Cape Ann/Marblehead relief <30 m).
+!     The driver RENDERS this line from --geog-detail:
+!       modis (default) -> '30s' everywhere (MODIS 21-cat, the validated run)
+!       nlcd            -> 'nlcd2011_9s+default' on all 3 domains (9s ~250 m,
+!                          NLCD40, sharp coastline + Boston urban class).
+!     nlcd needs nlcd2011_ll_9s in WPS_GEOG + an NLCD40 section in the image's
+!     VEGPARM.TBL (run/aws/run_case.sh fetches the data + checks the tables).
+!     Fallback if the image can't do NLCD: post-geogrid LANDMASK/LU_INDEX
+!     surgery on d03 from GSHHG (see SST spec "coastline" + wrf/README).
 ! =====================================================================
 &share
  wrf_core         = 'ARW',

@@ -14,6 +14,8 @@ RUN_HOURS="${GOM_RUN_HOURS:-36}"
 S3="${GOM_S3:-s3://sailframes-data-prod/gom}"
 PROFILE_NAME="${GOM_INSTANCE_PROFILE:-gom-seabreeze-ec2}"
 TERMINATE="${GOM_TERMINATE:-1}"
+GEOG_DETAIL="${GOM_GEOG_DETAIL:-modis}"     # modis (30s) | nlcd (9s ~250m land-water mask + urban)
+GEOGRID_ONLY="${GOM_GEOGRID_ONLY:-0}"       # 1 = cheap geogrid+landmask-QC pass, no GFS/real/wrf
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 
 echo "### upload the gom-seabreeze code so the instance can pull it (no git auth needed)"
@@ -28,7 +30,9 @@ echo "  AMI=$AMI  type=$ITYPE"
 
 echo "### render userdata"
 UD=$(sed -e "s|@@DATE@@|$DATE|g" -e "s|@@MODE@@|$MODE|g" -e "s|@@RUN_HOURS@@|$RUN_HOURS|g" \
-        -e "s|@@S3@@|$S3|g" -e "s|@@TERMINATE@@|$TERMINATE|g" "$HERE/userdata.sh" | base64)
+        -e "s|@@S3@@|$S3|g" -e "s|@@TERMINATE@@|$TERMINATE|g" \
+        -e "s|@@GEOG_DETAIL@@|$GEOG_DETAIL|g" -e "s|@@GEOGRID_ONLY@@|$GEOGRID_ONLY|g" \
+        "$HERE/userdata.sh" | base64)
 
 echo "### launch (Spot, terminate-on-shutdown, 150 GB gp3 for geog+work)"
 IID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type "$ITYPE" \
@@ -39,6 +43,10 @@ IID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type
   --user-data "$UD" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=gom-$DATE-$MODE}]" \
   --query 'Instances[0].InstanceId' --output text)
-echo "launched $IID"
+echo "launched $IID  (geog=$GEOG_DETAIL  geogrid_only=$GEOGRID_ONLY)"
 echo "watch:  aws ssm start-session --target $IID     # then: tail -f /var/log/gom-userdata.log"
-echo "output: $S3/$DATE/$MODE/   (wrfout_d03*, userdata.log, exit_code.txt)"
+if [ "$GEOGRID_ONLY" = 1 ]; then
+  echo "output: $S3/$DATE/geoqc/$GEOG_DETAIL/   (geo_em.d0*.nc + LANDMASK/LU_INDEX PNGs)"
+else
+  echo "output: $S3/$DATE/$MODE/   (wrfout_d03*, userdata.log, exit_code.txt)"
+fi

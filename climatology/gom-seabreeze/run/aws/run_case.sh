@@ -24,16 +24,32 @@ GEOG="${GOM_GEOG:-$HOME/WPS_GEOG}"
 VENV="${GOM_VENV:-$HOME/gom-venv}"
 S3="${GOM_S3:-s3://sailframes-data-prod/gom}"
 NPROCS="${GOM_NPROCS:-$(nproc)}"; [ "$NPROCS" -gt 32 ] && NPROCS=32
+GEOG_DETAIL="${GOM_GEOG_DETAIL:-modis}"       # modis (30s) | nlcd (9s ~250m + urban)
+GEOGRID_ONLY="${GOM_GEOGRID_ONLY:-0}"         # 1 = geogrid + landmask QC plot only, then exit (cheap)
+NLCD_URL="${GOM_NLCD_URL:-https://www2.mmm.ucar.edu/wrf/src/wps_files/nlcd2011_ll_9s.tar.bz2}"
 CASE=gom
 DTC_RAW="https://raw.githubusercontent.com/NCAR/container-dtc-nwp/main/components/scripts/common"
 
-mkdir -p "$WORK"/scripts/{case,common} "$WORK"/{model_data/$CASE,wpsprd,wrfprd,sst}
+mkdir -p "$WORK"/scripts/{case,common} "$WORK"/{model_data/$CASE,wpsprd,wrfprd,sst,geoqc}
 
-echo "### 1. render namelists (geog_data_path -> container mount)"
-GEOGROOT=/data/geog; [ -d "$GEOG/WPS_GEOG" ] && GEOGROOT=/data/geog/WPS_GEOG
+echo "### 1. render namelists (geog_data_path -> container mount, geog_detail=$GEOG_DETAIL)"
+GEOGROOT=/data/geog; GEOGROOT_HOST="$GEOG"
+[ -d "$GEOG/WPS_GEOG" ] && { GEOGROOT=/data/geog/WPS_GEOG; GEOGROOT_HOST="$GEOG/WPS_GEOG"; }
 GOM_WPS="$WORK/scripts/case" GOM_WRFRUN="$WORK/scripts/case" GOM_WPSGEOG="$GEOGROOT" \
   "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
-  --run-hours "$RUN_HOURS" --render-only
+  --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" --render-only
+
+echo "### 1b. NLCD static geog (9s land-use / land-water mask), only when detail=nlcd"
+if [ "$GEOG_DETAIL" = nlcd ] && [ ! -d "$GEOGROOT_HOST/nlcd2011_ll_9s" ]; then
+  if aws s3 ls "$S3/geog/nlcd2011_ll_9s.tar.gz" >/dev/null 2>&1; then
+    echo "  NLCD: from S3 cache"; aws s3 cp "$S3/geog/nlcd2011_ll_9s.tar.gz" - | tar xz -C "$GEOGROOT_HOST"
+  else
+    echo "  NLCD: fetch from UCAR + cache to S3 (~1 GB)"
+    curl -SL "$NLCD_URL" | tar xj -C "$GEOGROOT_HOST"
+    tar cz -C "$GEOGROOT_HOST" nlcd2011_ll_9s | aws s3 cp - "$S3/geog/nlcd2011_ll_9s.tar.gz"
+  fi
+  [ -d "$GEOGROOT_HOST/nlcd2011_ll_9s" ] || { echo "  FATAL: NLCD extract produced no nlcd2011_ll_9s/ dir"; exit 3; }
+fi
 
 echo "### 2. set_env.ksh + DTC run scripts"
 cat > "$WORK/scripts/case/set_env.ksh" <<EOF
@@ -59,7 +75,9 @@ done
 sed -i -e '/sst_update/d' -e '/io_form_auxinput4/d' -e '/auxinput4_/d' "$WORK/scripts/case/namelist.input"
 
 echo "### 3. stage GFS 0.25 from the AWS Open Data archive (public, in-region)"
-if [ "$MODE" = forecast ]; then
+if [ "$GEOGRID_ONLY" = 1 ]; then
+  echo "  geogrid-only: skipping driver GRIB (geogrid needs no meteorology)"
+elif [ "$MODE" = forecast ]; then
   ymd=${DATE//-/}
   for fh in $(seq 0 3 "$RUN_HOURS"); do
     fh3=$(printf '%03d' "$fh"); dest="$WORK/model_data/$CASE/gfs.t00z.f${fh3}.grib2"
@@ -80,10 +98,64 @@ docker run -d --name gomwrf \
   -v "$WORK/wrfprd":/home/wrfprd \
   "$IMAGE" sleep infinity
 
+echo "### 4b. discriminator: image must support NLCD before we lean on it"
+if [ "$GEOG_DETAIL" = nlcd ]; then
+  # geogrid needs the nlcd2011_9s resolution entry in GEOGRID.TBL...
+  docker exec gomwrf bash -lc 'grep -qs nlcd2011_9s /comsoftware/wrf/WPS-4.3/geogrid/GEOGRID.TBL*' \
+    || { echo "FATAL: GEOGRID.TBL has no nlcd2011_9s entry in this image -> use GOM_GEOG_DETAIL=modis, or add the entry + LANDMASK-surgery fallback"; exit 3; }
+  # ...and real/wrf (RUC LSM) needs an NLCD40 section in VEGPARM.TBL (skip check for geogrid-only)
+  if [ "$GEOGRID_ONLY" != 1 ]; then
+    docker exec gomwrf bash -lc 'grep -qsi "^NLCD40" /comsoftware/wrf/WRF-4.3/run/VEGPARM.TBL' \
+      || { echo "FATAL: VEGPARM.TBL has no NLCD40 section -> real.exe/RUC would abort. Use GOM_GEOG_DETAIL=modis or the post-geogrid LANDMASK-surgery fallback (see wrf/README geography)"; exit 3; }
+  fi
+  echo "  NLCD support confirmed in image tables"
+fi
+
 echo "### 5. WPS (geogrid/ungrib/metgrid) -> met_em in wpsprd"
 # run_wps links only *.exe into wpsprd; geogrid/metgrid look for GEOGRID.TBL /
 # METGRID.TBL under ./geogrid ./metgrid -> symlink those table dirs in first
 docker exec gomwrf bash -lc 'cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-4.3/geogrid . && ln -sf /comsoftware/wrf/WPS-4.3/metgrid .'
+
+if [ "$GEOGRID_ONLY" = 1 ]; then
+  echo "### 5-only. geogrid.exe -> geo_em + landmask QC (no GFS/real/wrf)"
+  # render a detail's namelist.wps into scripts/<sub>, geogrid into wpsprd/<sub>.
+  # geogrid.exe reads namelist.wps from cwd + writes geo_em there.
+  geogrid_detail() {  # $1=detail  $2=subdir
+    local det="$1" sub="$2"
+    mkdir -p "$WORK/scripts/$sub" "$WORK/wpsprd/$sub"
+    GOM_WPS="$WORK/scripts/$sub" GOM_WRFRUN="$WORK/scripts/$sub" GOM_WPSGEOG="$GEOGROOT" \
+      "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
+      --run-hours "$RUN_HOURS" --geog-detail "$det" --render-only
+    sed -i -e 's/!.*//' -e '/^[[:space:]]*$/d' "$WORK/scripts/$sub/namelist.wps"
+    docker exec gomwrf bash -lc "cd /home/wpsprd/$sub && ln -sf /comsoftware/wrf/WPS-4.3/geogrid.exe . && ln -sf /comsoftware/wrf/WPS-4.3/geogrid . && cp /home/scripts/$sub/namelist.wps . && ./geogrid.exe"
+    ls "$WORK/wpsprd/$sub/"geo_em.d0*.nc
+  }
+  geogrid_detail "$GEOG_DETAIL" primary
+  # A/B against the MODIS baseline -- the compare IS the "more detailed geography" proof
+  CMP=""
+  if [ "$GEOG_DETAIL" = nlcd ]; then geogrid_detail modis baseline; CMP="--compare $WORK/wpsprd/baseline"; fi
+  # d03 = race area (default extent); d01/d02 = full domain (confirm the Gulf of Maine
+  # stays WATER -- the risky part of the all-domains NLCD '+default' ocean remap)
+  for dom in 1 2 3; do
+    ext=""; [ "$dom" != 3 ] && ext="--full-extent"
+    for fld in LANDMASK LU_INDEX; do
+      "$VENV/bin/python" "$REPO/validation/plot_geo_landmask.py" --geo-dir "$WORK/wpsprd/primary" \
+        $CMP --domain "$dom" --field "$fld" $ext -o "$WORK/geoqc/geo_d0${dom}_${fld}.png" || true
+    done
+  done
+  # geogrid leaves broken symlinks (geogrid.exe / geogrid -> container paths) in the
+  # work dirs; `aws s3 cp --recursive` returns exit 2 skipping them, which under set -e
+  # would abort BEFORE the PNGs upload. Remove them, PNGs first (the deliverable), and
+  # make the copies non-fatal.
+  find "$WORK/wpsprd" -maxdepth 2 -xtype l -delete 2>/dev/null || true
+  aws s3 cp "$WORK/geoqc/" "$S3/$DATE/geoqc/$GEOG_DETAIL/" --recursive --exclude "*" --include "*.png" || true
+  aws s3 cp "$WORK/wpsprd/primary/"  "$S3/$DATE/geoqc/$GEOG_DETAIL/"      --recursive --exclude "*" --include "geo_em.d0*.nc" || true
+  [ -d "$WORK/wpsprd/baseline" ] && aws s3 cp "$WORK/wpsprd/baseline/" "$S3/$DATE/geoqc/modis/" --recursive --exclude "*" --include "geo_em.d0*.nc" || true
+  echo "=== geogrid-only done: $S3/$DATE/geoqc/$GEOG_DETAIL/ (geo_em + d01/d02/d03 PNGs) ==="
+  echo "    CHECK: d01/d02 LANDMASK ocean still water; d03 coast sharper than MODIS baseline"
+  exit 0
+fi
+
 docker exec gomwrf /home/scripts/common/run_wps.ksh
 ls "$WORK/wpsprd/"met_em.d0*.nc
 

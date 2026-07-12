@@ -58,6 +58,22 @@ MODE_CFG = {
     "forecast": dict(num_metgrid_levels=34, interval_seconds=10800, fdda=False, vtable="Vtable.GFS"),
     "hindcast": dict(num_metgrid_levels=38, interval_seconds=3600,  fdda=True,  vtable="Vtable.ERA5"),
 }
+
+# Static-geography detail (land-use / land-WATER mask). The mask sets WHERE the
+# coast sits at grid scale -- the #1 geography lever for the sea breeze (topo is
+# secondary: Cape Ann/Marblehead relief is <30 m). See wrf/README.md "geography".
+#   modis  default 30s MODIS (21 cats) -- byte-identical to the validated 2024 run.
+#   nlcd   NLCD 2011 9s (~250 m, 40 cats) on ALL domains via '+default' fallback
+#          for a sharp Salem Sound / harbor-island coastline + Boston urban class.
+# num_land_cat is a single global -> MMINLU must be consistent across the nest, so
+# NLCD is applied to every domain (d01 offshore/Canada falls back to MODIS-default,
+# remapped into NLCD40 space). Requires nlcd2011_ll_9s in WPS_GEOG + an NLCD40
+# section in the image's VEGPARM.TBL (run_case.sh checks both before the full run).
+GEOG_CFG = {
+    "modis": dict(geog_data_res="'30s', '30s', '30s',", num_land_cat=21),
+    "nlcd":  dict(geog_data_res="'nlcd2011_9s+default', 'nlcd2011_9s+default', 'nlcd2011_9s+default',",
+                  num_land_cat=40),
+}
 DRY = False
 
 
@@ -90,8 +106,9 @@ def uncomment_keys(text, keys):
     return text
 
 
-def render_namelists(date, mode, start_hour, run_hours):
+def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis"):
     cfg = MODE_CFG[mode]
+    gcfg = GEOG_CFG[geog_detail]
     y, m, d = map(int, date.split("-"))
     start = dt.datetime(y, m, d, start_hour)
     end = start + dt.timedelta(hours=run_hours)
@@ -102,6 +119,7 @@ def render_namelists(date, mode, start_hour, run_hours):
     wps = set_nml(wps, "start_date", triple(f"'{start:%Y-%m-%d_%H:%M:%S}'"))
     wps = set_nml(wps, "end_date",   triple(f"'{end:%Y-%m-%d_%H:%M:%S}'"))
     wps = set_nml(wps, "interval_seconds", f"{cfg['interval_seconds']},")
+    wps = set_nml(wps, "geog_data_res", gcfg["geog_data_res"])
     wps = set_nml(wps, "geog_data_path", f"'{WPSGEOG}'")
     WPS_DIR.mkdir(parents=True, exist_ok=True)
     (WPS_DIR / "namelist.wps").write_text(wps)
@@ -119,6 +137,7 @@ def render_namelists(date, mode, start_hour, run_hours):
     inp = set_nml(inp, "end_hour", triple(f"{end:%H}"))
     inp = set_nml(inp, "interval_seconds", f"{cfg['interval_seconds']},")
     inp = set_nml(inp, "num_metgrid_levels", f"{cfg['num_metgrid_levels']},")
+    inp = set_nml(inp, "num_land_cat", f"{gcfg['num_land_cat']},")
     inp = set_nml(inp, "auxinput4_end_h", f"{run_hours},")
     if cfg["fdda"]:
         inp = set_nml(inp, "grid_fdda", "1, 0, 0,")
@@ -132,7 +151,8 @@ def render_namelists(date, mode, start_hour, run_hours):
     WRF_RUN.mkdir(parents=True, exist_ok=True)
     (WRF_RUN / "namelist.input").write_text(inp)
     print(f"  rendered namelists: {start:%Y-%m-%d_%H} +{run_hours}h  "
-          f"levels={cfg['num_metgrid_levels']}  fdda={'on' if cfg['fdda'] else 'off'}")
+          f"levels={cfg['num_metgrid_levels']}  fdda={'on' if cfg['fdda'] else 'off'}  "
+          f"geog={geog_detail}(num_land_cat={gcfg['num_land_cat']})")
 
 
 # ---- driver staging (ungrib) ---------------------------------------------------
@@ -202,6 +222,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--date", required=True, help="YYYY-MM-DD")
     ap.add_argument("--mode", choices=list(MODE_CFG), default="forecast")
+    ap.add_argument("--geog-detail", choices=list(GEOG_CFG), default="modis",
+                    help="static land-use/coastline detail: modis (30s, default) or nlcd (9s ~250m + urban)")
     ap.add_argument("--start-hour", type=int, default=0, help="run start hour UTC (default 00)")
     ap.add_argument("--run-hours", type=int, default=36, help="forecast length (default 36)")
     ap.add_argument("--grib-dir", help="dir of staged driver GRIB (GFS or ERA5)")
@@ -215,7 +237,7 @@ def main():
     DRY = args.dry
 
     print(f"=== gom-seabreeze: {args.date}  mode={args.mode}  {args.run_hours}h ===")
-    render_namelists(args.date, args.mode, args.start_hour, args.run_hours)
+    render_namelists(args.date, args.mode, args.start_hour, args.run_hours, args.geog_detail)
     if args.render_only:
         return
 

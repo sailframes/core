@@ -6,6 +6,7 @@ set -xeuo pipefail
 exec > >(tee -a /var/log/gom-userdata.log) 2>&1
 
 DATE="@@DATE@@"; MODE="@@MODE@@"; RUN_HOURS="@@RUN_HOURS@@"; S3="@@S3@@"; TERMINATE="@@TERMINATE@@"
+GEOG_DETAIL="@@GEOG_DETAIL@@"; GEOGRID_ONLY="@@GEOGRID_ONLY@@"
 export HOME=/root
 GEOG=/mnt/WPS_GEOG; VENV=/root/gom-venv; CODE=/root/gom-seabreeze
 
@@ -37,8 +38,12 @@ ls "$GEOG" | head
 echo "### docker image (WRF/WPS 4.3)"
 docker pull dtcenter/wps_wrf:latest
 
+echo "### docker image tar bzip2 for optional NLCD geog"
+dnf install -y bzip2 >/dev/null 2>&1 || true
+
 echo "### run the case"
 export GOM_REPO="$CODE" GOM_GEOG="$GEOG" GOM_VENV="$VENV" GOM_S3="$S3" GOM_RUN_HOURS="$RUN_HOURS"
+export GOM_GEOG_DETAIL="$GEOG_DETAIL" GOM_GEOGRID_ONLY="$GEOGRID_ONLY"
 set +e
 bash "$CODE/run/aws/run_case.sh" "$DATE" "$MODE"; RC=$?
 set -e
