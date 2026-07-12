@@ -39,6 +39,20 @@ GOM_WPS="$WORK/scripts/case" GOM_WRFRUN="$WORK/scripts/case" GOM_WPSGEOG="$GEOGR
   "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
   --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" --render-only
 
+# WRF needs each decomposed patch >= 10 cells; the SMALLEST nest binds. WRF's auto
+# decomposition of an awkward rank count (32 -> 4x8) can drop d03's y-patch below 10
+# (race-focused d03 is only 76 cells N-S). Force a PERFECT-SQUARE rank count k*k with
+# k <= (min d03 dim - 1)/10 so WRF picks k x k and every patch stays >= 10 cells.
+d3we=$(grep -E '^\s*e_we\s*=' "$WORK/scripts/case/namelist.input" | grep -oE '[0-9]+' | sed -n '3p')
+d3sn=$(grep -E '^\s*e_sn\s*=' "$WORK/scripts/case/namelist.input" | grep -oE '[0-9]+' | sed -n '3p')
+if [ -n "$d3we" ] && [ -n "$d3sn" ]; then
+  d3min=$(( d3we < d3sn ? d3we : d3sn )); kmax=$(( (d3min - 1) / 10 )); k=1
+  for kk in $(seq 1 "$kmax"); do [ $((kk*kk)) -le "$NPROCS" ] && k=$kk; done
+  new=$(( k * k )); [ "$new" -lt 1 ] && new=1
+  [ "$new" -ne "$NPROCS" ] && echo "  MPI ranks $NPROCS -> $new (${k}x${k}) for d03 ${d3we}x${d3sn} (patch>=10)"
+  NPROCS=$new
+fi
+
 echo "### 1b. NLCD static geog (9s land-use / land-water mask), only when detail=nlcd"
 if [ "$GEOG_DETAIL" = nlcd ] && [ ! -d "$GEOGROOT_HOST/nlcd2011_ll_9s" ]; then
   if aws s3 ls "$S3/geog/nlcd2011_ll_9s.tar.gz" >/dev/null 2>&1; then
