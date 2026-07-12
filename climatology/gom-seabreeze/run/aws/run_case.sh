@@ -169,14 +169,24 @@ else
   echo "  WARN: SST composite failed -> proceeding with raw driver SST in met_em"
 fi
 
+# On real/wrf failure the real diagnosis is in rsl.error.0000 (+ run_*.log), which
+# run_*.ksh only echoes the MPI_ABORT wrapper of -> capture them to S3 before the
+# box self-terminates. Without this a failure is undiagnosable post-mortem.
+push_debug() {  # $1 = stage label
+  echo "  $1 FAILED -> uploading rsl.* + logs to $S3/$DATE/$MODE/debug/ for diagnosis"
+  aws s3 cp "$WORK/wrfprd/" "$S3/$DATE/$MODE/debug/" --recursive --exclude "*" \
+    --include "rsl.error.*" --include "rsl.out.0000" --include "run_real.log" \
+    --include "run_wrf.log" --include "namelist.input" || true
+}
+
 echo "### 7. real.exe (links patched wpsprd/met_em -> wrfinput/wrfbdy)"
-docker exec gomwrf /home/scripts/common/run_real.ksh
+if ! docker exec gomwrf /home/scripts/common/run_real.ksh; then push_debug "real.exe"; exit 44; fi
 ls "$WORK/wrfprd/"wrfinput_d01 "$WORK/wrfprd/"wrfbdy_d01
 
 echo "### 8. wrf.exe (mpirun -np $NPROCS) -> wrfout_d03"
 # container execs as root -> OpenMPI needs the run-as-root override
-docker exec -e OMPI_ALLOW_RUN_AS_ROOT=1 -e OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
-  gomwrf /home/scripts/common/run_wrf.ksh -np "$NPROCS"
+if ! docker exec -e OMPI_ALLOW_RUN_AS_ROOT=1 -e OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
+     gomwrf /home/scripts/common/run_wrf.ksh -np "$NPROCS"; then push_debug "wrf.exe"; exit 45; fi
 
 echo "### 9. push wrfout -> S3"
 aws s3 cp --quiet "$WORK/wrfprd/" "$S3/$DATE/$MODE/" --recursive --exclude "*" --include "wrfout_d0*"
