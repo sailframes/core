@@ -42,6 +42,7 @@
  io_form_restart          = 2,
  io_form_input            = 2,
  io_form_boundary         = 2,
+ nwp_diagnostics          = 1,    ! adds WSPD10MAX (max 10m wind per history interval) = gust proxy to wrfout
  ! --- time-varying SST (coldest-pixel composite) ---
  sst_update               = 1,
  io_form_auxinput4        = 2,
