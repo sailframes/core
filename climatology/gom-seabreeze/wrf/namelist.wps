@@ -24,10 +24,10 @@
 &geogrid
  parent_id         =   1,   1,   2,
  parent_grid_ratio =   1,   3,   3,
- i_parent_start    =   1,  28,  52,   ! <-- VERIFY with plotgrids.exe
- j_parent_start    =   1,  30,  50,   ! <-- VERIFY with plotgrids.exe
- e_we              = 100, 136, 121,
- e_sn              = 100, 136, 121,
+ i_parent_start    =   1,  28,  55,   ! d03 race-focused (Mark1->Mark2 corridor)
+ j_parent_start    =   1,  30,  37,   ! d03 SW; verify with plotgrids.exe
+ e_we              = 100, 136,  82,   ! d03 = 81 km E-W  (1 km)
+ e_sn              = 100, 136,  76,   ! d03 = 75 km N-S  (1 km)
  geog_data_res     = '30s', '30s', '30s',
  dx                = 9000,
  dy                = 9000,
@@ -57,8 +57,11 @@
 !               the offshore SST field that sets the cold side of the dTdT.
 !   d02  3 km  136 x 136  ~= 405 x 405 km : New England coast, Cape Cod
 !               to southern Maine.
-!   d03  1 km  121 x 121  ~= 120 x 120 km : Mass Bay / Salem Sound /
-!               Cape Ann -> Cape Cod Bay  (the race area + its geometry).
+!   d03  1 km   82 x  76  ~=  81 x  75 km : Massachusetts Bay, focused on the
+!               race corridor Mark1 (42.482N,-70.814W, off Boston/Nahant) ->
+!               Mark2 (42.034N,-70.161W, off Provincetown/Stellwagen), with a
+!               ~13 km buffer so the marks clear the nest relaxation zone.
+!               Covers lat 41.91-42.60, lon -70.97 to -70.00.
 ! One-way nesting (feedback=0 in namelist.input) to avoid feedback noise
 ! at 1 km, per AEOLUS-RIO practice.
 ! ---------------------------------------------------------------------
