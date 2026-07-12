@@ -29,15 +29,35 @@ from scipy.ndimage import median_filter, gaussian_filter
 import xarray as xr
 
 # --------------------------- CONFIG ---------------------------------------
-ERDDAP = "https://coastwatch.noaa.gov/erddap/griddap"
+# ACSPO L3S lives on the NOAA CoastWatch central ERDDAP; MUR L4 (jplMURSST41)
+# lives on the ERD/PFEG node -- different hosts, so each pull names its base.
+ERDDAP     = "https://coastwatch.noaa.gov/erddap/griddap"
+MUR_ERDDAP = "https://coastwatch.pfeg.noaa.gov/erddap/griddap"
 
 # Primary SST: ACSPO L3S-LEO super-collated (VIIRS+AVHRR, multi-platform),
-# ~0.02 deg (~2 km), daily, near-real-time. NESDIS has already collated the
-# best-quality clear-sky pixels across sensors, which is why we can composite
-# daily grids directly. AM/day shown; add the PM/night dataset for a cooler,
-# diurnally-cleaner baseline (night is preferable for the coldest field).
-SST_DATASET = "noaacwLEOACSPOSSTL3SnrtAMDay"   # id: ACSPO-L3S-LEO-AM
+# ~0.02 deg (~2 km), daily. NESDIS already collates the best-quality clear-sky
+# pixels across sensors, so we can composite daily grids directly.
+#
+# TWO streams, because coverage differs (verified against the CoastWatch ERDDAP
+# catalog 2026-07-12):
+#   ARCHIVE  noaacwLEOACSPOSSTL3SCDaily  -- science-quality REANALYSIS, day+night
+#            super-collated, 2012 -> ~2-month latency (e.g. ended 2026-05-08).
+#            Use for HINDCAST / climatology and any date older than ~2 months.
+#   NRT      noaacwLEOACSPOSSTL3SnrtPMNight -- near-real-time, only a ~16-day
+#            rolling window (e.g. 2026-06-26..07-11). PM/Night = coldest-friendly.
+#            Use for FORECAST (race-morning) dates inside that window.
+# NOTE the reprocessing GAP between the two (~2 mo ago .. ~16 days ago) is covered
+# by neither; a date there can't build a composite. Both carry `quality_level`.
+# The old default (nrtAMDay) silently returned ZERO pixels for 2024 dates -- its
+# ~16-day window doesn't reach historical dates. That is the bug this fixes.
+SST_DATASET_ARCHIVE = "noaacwLEOACSPOSSTL3SCDaily"
+SST_DATASET_NRT     = "noaacwLEOACSPOSSTL3SnrtPMNight"
+SST_DATASET = SST_DATASET_ARCHIVE              # default; override via --sst-source / --dataset
 SST_VAR     = "sea_surface_temperature"
+# Composite is only worth its cost if it carries REAL ACSPO cold structure, not
+# MUR L4 gap-fill (== the coarse global SST we exist to beat). Warn below this
+# fraction of ACSPO-derived cells over water.
+MIN_ACSPO_FRAC_WARN = 0.20
 # Optional single-sensor L3U (0.75 km, per-granule quality_level) is higher-res
 # but far more work/volume; use L3S above unless you need the resolution.
 
@@ -78,11 +98,11 @@ def _coord(ds, names):
     raise KeyError(f"none of {names} in dataset (have {list(ds.coords)})")
 
 
-def open_and_subset(dataset, var, t0, t1):
+def open_and_subset(dataset, var, t0, t1, erddap=ERDDAP):
     """Open an ERDDAP griddap dataset over OPeNDAP and subset to the GoM box
     and [t0,t1]. Returns an xarray.DataArray with dims (time, lat, lon) and
     ascending lat/lon, or None on failure."""
-    url = f"{ERDDAP}/{dataset}"
+    url = f"{erddap}/{dataset}"
     try:
         ds = xr.open_dataset(url)
     except Exception as e:
@@ -188,16 +208,18 @@ def fetch_buoy_wtmp(bid):
     return None
 
 
-def build(end_date, tlat, tlon, clim_path, anchor):
+def build(end_date, tlat, tlon, clim_path, anchor, dataset=SST_DATASET):
     t1 = datetime.strptime(end_date, "%Y-%m-%d")
     t0 = t1 - timedelta(days=WINDOW_DAYS - 1)
     print(f"window: {t0:%Y-%m-%d} .. {t1:%Y-%m-%d}  (coldest of {WINDOW_DAYS} days)")
+    print(f"ACSPO dataset: {dataset}")
 
-    res = open_and_subset(SST_DATASET, SST_VAR,
+    res = open_and_subset(dataset, SST_VAR,
                           t0.strftime("%Y-%m-%d"),
                           (t1 + timedelta(days=1)).strftime("%Y-%m-%d"))
     if res is None:
-        print("FATAL: no SST pulled. Check dataset id / connectivity.")
+        print(f"FATAL: no SST pulled from {dataset}. Check dataset id / date coverage "
+              f"(archive ends ~2 months back; NRT is a ~16-day window) / connectivity.")
         sys.exit(2)
     da, ql, ds = res
 
@@ -225,12 +247,16 @@ def build(end_date, tlat, tlon, clim_path, anchor):
 
     with np.errstate(all="ignore"):
         cold = np.nanmin(stack, axis=0)   # COLDEST clear obs per cell
-    print(f"coldest-clear composite: {np.isfinite(cold).sum()} / {cold.size} cells filled")
+    acspo_mask = np.isfinite(cold)        # cells with a REAL ACSPO clear-sky obs
+    n_acspo = int(acspo_mask.sum())
+    print(f"coldest-clear composite: {n_acspo} / {cold.size} cells from ACSPO obs")
 
     # ---- gap-fill with MUR L4 ----
+    mgrid = None
     mres = open_and_subset(MUR_DATASET, MUR_VAR,
                            t1.strftime("%Y-%m-%d"),
-                           (t1 + timedelta(days=1)).strftime("%Y-%m-%d"))
+                           (t1 + timedelta(days=1)).strftime("%Y-%m-%d"),
+                           erddap=MUR_ERDDAP)
     if mres is not None:
         mda, _, mds = mres
         m = mda.isel(time=0) if "time" in mda.dims else mda
@@ -252,7 +278,28 @@ def build(end_date, tlat, tlon, clim_path, anchor):
         print("  ! MUR gap-fill unavailable; leaving gaps as NaN "
               "(patch_met_em_sst.py will fall back to driver SST there)")
 
+    # ---- PROVENANCE: is this a real coldest-pixel field or mostly MUR L4? ----
+    # A gap-free composite can still be ~100% MUR (coarse global SST = the thing we
+    # exist to beat). Report the ACSPO-derived fraction over the *valid* domain.
+    n_valid = int(np.isfinite(cold).sum())
+    acspo_frac = (n_acspo / n_valid) if n_valid else 0.0
+    print(f"PROVENANCE: {acspo_frac*100:.1f}% of valid cells are ACSPO coldest-pixel "
+          f"({n_acspo}), the rest MUR L4 gap-fill ({n_valid - n_acspo})")
+    if acspo_frac < MIN_ACSPO_FRAC_WARN:
+        print(f"  !! WARNING acspo_frac<{MIN_ACSPO_FRAC_WARN:.2f}: composite is mostly MUR "
+              f"L4 background -- little real coldest-pixel structure. The 3-day window was "
+              f"likely cloud-covered; try a clearer date, a longer WINDOW_DAYS, or the "
+              f"night product. Injecting this ~= driver SST.")
+
     # ---- buoy anchor (domain-mean offset) ----
+    if anchor:
+        # fetch_buoy_wtmp pulls NDBC realtime2 (~45-day window, latest value). For a
+        # date older than that it anchors to TODAY's temp, not the date's -> wrong.
+        if (datetime.utcnow() - t1).days > 40:
+            print("  ! --anchor SKIPPED: date is >40 days old; NDBC realtime2 only holds "
+                  "~45 days and would anchor to today's SST. Use the NDBC stdmet archive "
+                  "for hindcast anchoring (not yet wired).")
+            anchor = False
     if anchor:
         offs = []
         for bid, (blat, blon) in BUOYS.items():
@@ -272,10 +319,11 @@ def build(end_date, tlat, tlon, clim_path, anchor):
             print(f"  applied buoy offset {off:+.2f} K (median of {len(offs)})")
 
     ds.close()
-    return cold
+    return cold, dict(acspo_mask=acspo_mask, acspo_frac=acspo_frac,
+                      mur=mgrid, dataset=dataset)
 
 
-def write_out(cold, tlat, tlon, end_date, outdir, do_plot):
+def write_out(cold, tlat, tlon, end_date, outdir, do_plot, diag=None):
     import os
     os.makedirs(outdir, exist_ok=True)
     out = xr.Dataset(
@@ -286,7 +334,9 @@ def write_out(cold, tlat, tlon, end_date, outdir, do_plot):
         attrs={"title": "Gulf of Maine coldest-dark-pixel SST composite",
                "method": f"coldest of {WINDOW_DAYS}-day ACSPO L3S, QL>={QL_MIN}, "
                          f"MUR gap-fill, buoy-anchored",
-               "source_sst": SST_DATASET, "source_l4": MUR_DATASET,
+               "source_sst": (diag or {}).get("dataset", SST_DATASET),
+               "source_l4": MUR_DATASET,
+               "acspo_pixel_fraction": round(float((diag or {}).get("acspo_frac", float("nan"))), 4),
                "date": end_date, "created": datetime.utcnow().isoformat()})
     path = os.path.join(outdir, f"sst_{end_date}.nc")
     out.to_netcdf(path)
@@ -295,10 +345,24 @@ def write_out(cold, tlat, tlon, end_date, outdir, do_plot):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        fig, ax = plt.subplots(figsize=(7, 6))
-        pc = ax.pcolormesh(tlon, tlat, cold - 273.15, shading="auto", cmap="turbo")
-        ax.set_title(f"coldest-pixel SST {end_date}")
-        plt.colorbar(pc, ax=ax, label="SST (degC)")
+        mur = (diag or {}).get("mur")
+        # panel 1: the composite; panel 2: composite - MUR (where does the coldest-
+        # pixel field actually differ from the coarse L4 background? that difference
+        # IS the near-shore upwelling/mixing structure we injected).
+        ncol = 2 if mur is not None else 1
+        fig, axes = plt.subplots(1, ncol, figsize=(7 * ncol, 6), squeeze=False)
+        pc = axes[0][0].pcolormesh(tlon, tlat, cold - 273.15, shading="auto", cmap="turbo")
+        af = (diag or {}).get("acspo_frac")
+        sub = f"  (ACSPO {af*100:.0f}%)" if af is not None else ""
+        axes[0][0].set_title(f"coldest-pixel SST {end_date}{sub}")
+        fig.colorbar(pc, ax=axes[0][0], label="SST (degC)")
+        if mur is not None:
+            d = cold - mur
+            vmax = float(np.nanpercentile(np.abs(d), 99)) or 1.0
+            pd = axes[0][1].pcolormesh(tlon, tlat, d, shading="auto", cmap="RdBu_r",
+                                       vmin=-vmax, vmax=vmax)
+            axes[0][1].set_title("composite - MUR L4 (K)  [near-shore cold structure]")
+            fig.colorbar(pd, ax=axes[0][1], label="K")
         fig.tight_layout(); fig.savefig(path.replace(".nc", ".png"), dpi=140)
         print(f"wrote {path.replace('.nc', '.png')}")
 
@@ -311,14 +375,28 @@ def main():
     ap.add_argument("--clim", default=None,
                     help="optional climatology .nc for the cold floor screen")
     ap.add_argument("--anchor", action="store_true", help="anchor to NDBC buoys")
+    ap.add_argument("--sst-source", choices=["auto", "archive", "nrt"], default="auto",
+                    help="auto (default: nrt if date within ~18 days else archive), "
+                         "archive (SCDaily reanalysis, hindcast/old dates), or "
+                         "nrt (PMNight, recent ~16-day window / forecast)")
+    ap.add_argument("--dataset", default=None,
+                    help="raw ERDDAP dataset id override (beats --sst-source)")
     ap.add_argument("--plot", action="store_true")
     args = ap.parse_args()
+
+    source = args.sst_source
+    if source == "auto":
+        age = (datetime.utcnow() - datetime.strptime(args.date, "%Y-%m-%d")).days
+        source = "nrt" if 0 <= age <= 18 else "archive"
+        print(f"sst-source auto -> {source} (date is {age} days old)")
+    dataset = args.dataset or (SST_DATASET_NRT if source == "nrt"
+                               else SST_DATASET_ARCHIVE)
 
     tlat = np.arange(LAT_MIN, LAT_MAX + TARGET_RES_DEG, TARGET_RES_DEG)
     tlon = np.arange(LON_MIN, LON_MAX + TARGET_RES_DEG, TARGET_RES_DEG)
 
-    cold = build(args.date, tlat, tlon, args.clim, args.anchor)
-    write_out(cold, tlat, tlon, args.date, args.outdir, args.plot)
+    cold, diag = build(args.date, tlat, tlon, args.clim, args.anchor, dataset)
+    write_out(cold, tlat, tlon, args.date, args.outdir, args.plot, diag)
 
 
 if __name__ == "__main__":
