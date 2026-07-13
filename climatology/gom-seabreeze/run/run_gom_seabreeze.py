@@ -118,7 +118,59 @@ def uncomment_keys(text, keys):
     return text
 
 
-def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis"):
+def inject_before_group_end(text, group, block):
+    """Insert `block` just before the closing '/' of the &group namelist group.
+    Anchor the header at line-start so a comment mentioning '&group' can't false-match."""
+    gm = re.search(rf"^&{group}\b", text, re.M)
+    if not gm:
+        sys.exit(f"namelist group not found: &{group}")
+    m = re.search(r"^\s*/\s*$", text[gm.start():], re.M)
+    if not m:
+        sys.exit(f"no closing / for &{group}")
+    pos = gm.start() + m.start()
+    return text[:pos] + block + text[pos:]
+
+
+# Observation (station) nudging -- injected into &fdda when --obs-nudge is set. OBS_DOMAIN101
+# is produced by obsgrid.exe from little_r (obs/fetch_obs_littler.py) and copied to d02/d03
+# (WRF ignores out-of-domain obs). Params per WRF Obs-Nudging Guide (Reen 2016): dynamic
+# ANALYSIS across the whole run (obs_idynin=0, fdda_end past run end), radius of influence
+# shrinks on the finer nests, surface-obs earth-relative winds rotated by obsgrid.
+FDDA_OBS_BLOCK = """\
+ ! --- observation (station) nudging: buoys 44013/44029 + Castle Is + BOS/BVY/PVC ---
+ obs_nudge_opt            = 1, 1, 1,
+ max_obs                  = 100000,
+ fdda_start               = 0., 0., 0.,
+ fdda_end                 = {end_min}., {end_min}., {end_min}.,
+ obs_nudge_wind           = 1, 1, 1,
+ obs_coef_wind            = 6.e-4, 6.e-4, 6.e-4,
+ obs_nudge_temp           = 1, 1, 1,
+ obs_coef_temp            = 6.e-4, 6.e-4, 6.e-4,
+ obs_nudge_mois           = 1, 1, 1,
+ obs_coef_mois            = 6.e-4, 6.e-4, 6.e-4,
+ obs_nudge_pstr           = 0, 0, 0,
+ obs_rinxy                = 60., 40., 20.,
+ obs_rinsig               = 0.1,
+ obs_twindo               = 0.6666667,
+ obs_npfi                 = 10,
+ obs_ionf                 = 2, 2, 2,
+ obs_idynin               = 0,
+ obs_dtramp               = 40.,
+ obs_prt_freq             = 10, 10, 10,
+ obs_ipf_errob            = .true.,
+ obs_ipf_nudob            = .true.,
+ obs_ipf_in4dob           = .true.,
+ obs_ipf_init             = .true.,
+"""
+# WRF must re-check OBS_DOMAIN each step -> auxinput11_interval=1 (guide warns off the _s form).
+AUX11_BLOCK = """\
+ ! --- obs-nudging input stream (check for OBS_DOMAIN each step) ---
+ auxinput11_interval      = 1, 1, 1,
+ auxinput11_end_h         = {end_h}, {end_h}, {end_h},
+"""
+
+
+def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs_nudge=False):
     cfg = MODE_CFG[mode]
     gcfg = GEOG_CFG[geog_detail]
     y, m, d = map(int, date.split("-"))
@@ -163,10 +215,14 @@ def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis"):
               "(obsgrid/real) + gfdda_interval_m/gfdda_end_h set in the template — verify before running.")
     else:
         inp = set_nml(inp, "grid_fdda", "0, 0, 0,")
+    if obs_nudge:
+        inp = inject_before_group_end(inp, "time_control", AUX11_BLOCK.format(end_h=run_hours))
+        inp = inject_before_group_end(inp, "fdda", FDDA_OBS_BLOCK.format(end_min=run_hours * 60))
     WRF_RUN.mkdir(parents=True, exist_ok=True)
     (WRF_RUN / "namelist.input").write_text(inp)
     print(f"  rendered namelists: {start:%Y-%m-%d_%H} +{run_hours}h  "
           f"levels={cfg['num_metgrid_levels']}  fdda={'on' if cfg['fdda'] else 'off'}  "
+          f"obs_nudge={'on' if obs_nudge else 'off'}  "
           f"geog={geog_detail}(num_land_cat={gcfg['num_land_cat']})")
 
 
@@ -248,11 +304,12 @@ def main():
     ap.add_argument("--skip-geogrid", action="store_true", help="reuse cached geo_em (static domains)")
     ap.add_argument("--dry", action="store_true", help="render namelists + print steps, run nothing external")
     ap.add_argument("--render-only", action="store_true", help="render namelists into WPS/WRF dirs then exit (for the AWS container runner)")
+    ap.add_argument("--obs-nudge", action="store_true", help="enable observation (station) nudging &fdda block (needs OBS_DOMAIN from obsgrid)")
     args = ap.parse_args()
     DRY = args.dry
 
     print(f"=== gom-seabreeze: {args.date}  mode={args.mode}  {args.run_hours}h ===")
-    render_namelists(args.date, args.mode, args.start_hour, args.run_hours, args.geog_detail)
+    render_namelists(args.date, args.mode, args.start_hour, args.run_hours, args.geog_detail, args.obs_nudge)
     if args.render_only:
         return
 
