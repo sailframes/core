@@ -43,8 +43,10 @@ def load(prefix, scratch, label, hours_utc):
         if not lp.exists():
             sh(f"aws s3 cp --quiet {prefix}/{fn} {lp}")
         ds = xr.open_dataset(lp)
-        t = dt.datetime.strptime("".join(ds["Times"].isel(Time=0).values.astype(str)),
-                                 "%Y-%m-%d_%H:%M:%S")
+        raw = ds["Times"].isel(Time=0).values  # WRF char array |S1 or a single bytestring
+        ts = "".join(c.decode() if isinstance(c, bytes) else str(c)
+                     for c in np.atleast_1d(raw).ravel())
+        t = dt.datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S")
         la = ds["XLAT"].isel(Time=0).values; lo = ds["XLONG"].isel(Time=0).values
         ug = ds["U10"].isel(Time=0).values; vg = ds["V10"].isel(Time=0).values
         # U10/V10 are GRID-relative -> rotate to earth-relative (else dir is off by map rotation)
