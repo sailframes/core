@@ -51,16 +51,19 @@ RUN git clone --depth 1 -b v${WPS_VER} https://github.com/wrf-model/WPS.git WPS-
     ./compile > /tmp/wps_compile.log 2>&1; tail -30 /tmp/wps_compile.log && \
     test -x geogrid/src/geogrid.exe && test -x ungrib/src/ungrib.exe && test -x metgrid/src/metgrid.exe
 # OBSGRID (obs-nudging OBS_DOMAIN generator; unmaintained but functional). Option 2 =
-# gfortran (1 is PGI/pgf90, not installed). NON-FATAL: WRF+WPS above are the payload and
-# compile cleanly; OBSGRID is a tiny standalone tool that we iterate on separately (thin
-# follow-up layer, no WRF recompile). The RUN always exits 0 so the :4.8 image pushes with
-# WRF+WPS regardless; the log records whether obsgrid.exe built and, if not, the real error.
+# gfortran (1 is PGI/pgf90, not installed). Two fixes verified via diag_obsgrid.sh:
+#   (a) cpp -C keeps comments; Red Hat gcc 8 auto-includes stdc-predef.h, whose
+#       /* GNU C Library */ block lands in the preprocessed Fortran -> gfortran errors.
+#       Drop -C so the injected C comment is stripped.
+#   (b) build the `obsgrid` target only -> skips the fixed-form plot utils (plot_soundings
+#       etc.) that need NCAR Graphics and that we don't use.
+# obsgrid.exe is deterministic now, so gate the build on it.
 RUN git clone --depth 1 https://github.com/wrf-model/OBSGRID.git OBSGRID && \
     cd OBSGRID && printf '2\n' | ./configure 2>&1 | tee /tmp/obsgrid_conf.log && \
-    (./compile > /tmp/obsgrid_compile.log 2>&1 || true); \
-    echo '=== obsgrid errors (non-ignored) ==='; grep -iE 'error|undefined|obsgrid\.exe' /tmp/obsgrid_compile.log | grep -vi ignored | tail -50; \
-    echo '=== last 30 lines ==='; tail -30 /tmp/obsgrid_compile.log; \
-    if [ -x obsgrid.exe ]; then echo 'OBSGRID_OK'; else echo 'OBSGRID_MISSING (non-fatal)'; fi; true
+    sed -i 's#^CPP\s*=.*#CPP = /usr/bin/cpp -P -traditional#' configure.oa && \
+    (./compile obsgrid > /tmp/obsgrid_compile.log 2>&1 || true); \
+    tail -6 /tmp/obsgrid_compile.log; \
+    test -x obsgrid.exe && echo OBSGRID_OK || { echo OBSGRID_FAILED; grep -iE 'error|undefined' /tmp/obsgrid_compile.log | grep -vi ignored | head -20; exit 1; }
 DOCKER
 set +e
 docker build -t @@ECR@@:@@TAG@@ /build; BRC=$?
