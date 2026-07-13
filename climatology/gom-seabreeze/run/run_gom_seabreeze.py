@@ -216,6 +216,34 @@ def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs
               f"d04@{les_d04_hour:02d}Z d05@{les_d05_hour:02d}Z  levels={cfg['num_metgrid_levels']}  "
               f"5 domains (9/3/1km/333m/111m)")
         return
+    if mode == "hrrr":
+        # HRRR-DRIVEN 2-domain (namelist.*.hrrr): d01 3km + d02 1km, sized to fit inside the
+        # HRRR CONUS grid (the 9km d01 overran HRRR's SE edge). Inherits HRRR's assimilated state.
+        double = lambda v: f"{v}, {v},"
+        wps = (TEMPLATES / "namelist.wps.hrrr").read_text()
+        wps = set_nml(wps, "start_date", double(f"'{start:%Y-%m-%d_%H:%M:%S}'"))
+        wps = set_nml(wps, "end_date", double(f"'{end:%Y-%m-%d_%H:%M:%S}'"))
+        wps = set_nml(wps, "interval_seconds", f"{cfg['interval_seconds']},")
+        wps = set_nml(wps, "geog_data_path", f"'{WPSGEOG}'")
+        WPS_DIR.mkdir(parents=True, exist_ok=True)
+        (WPS_DIR / "namelist.wps").write_text(wps)
+
+        inp = (TEMPLATES / "namelist.input.hrrr").read_text()
+        inp = set_nml(inp, "run_hours", f"{run_hours},")
+        for k, v in (("start_year", f"{start:%Y}"), ("start_month", f"{start:%m}"),
+                     ("start_day", f"{start:%d}"), ("start_hour", f"{start:%H}"),
+                     ("end_year", f"{end:%Y}"), ("end_month", f"{end:%m}"),
+                     ("end_day", f"{end:%d}"), ("end_hour", f"{end:%H}")):
+            inp = set_nml(inp, k, double(v))
+        inp = set_nml(inp, "interval_seconds", f"{cfg['interval_seconds']},")
+        inp = set_nml(inp, "num_metgrid_levels", f"{cfg['num_metgrid_levels']},")
+        inp = set_nml(inp, "num_metgrid_soil_levels", f"{cfg['num_metgrid_soil_levels']},")
+        inp = set_nml(inp, "auxinput4_end_h", f"{run_hours},")
+        WRF_RUN.mkdir(parents=True, exist_ok=True)
+        (WRF_RUN / "namelist.input").write_text(inp)
+        print(f"  rendered HRRR-driven namelists: {start:%Y-%m-%d_%H}Z +{run_hours}h  "
+              f"levels={cfg['num_metgrid_levels']}  2 domains (3km/1km, fits HRRR CONUS)")
+        return
 
     # --- namelist.wps ---
     wps = (TEMPLATES / "namelist.wps").read_text()
