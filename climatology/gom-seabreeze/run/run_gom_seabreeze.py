@@ -138,7 +138,7 @@ def inject_before_group_end(text, group, block):
 # shrinks on the finer nests, surface-obs earth-relative winds rotated by obsgrid.
 FDDA_OBS_BLOCK = """\
  ! --- observation (station) nudging: buoys 44013/44029 + Castle Is + BOS/BVY/PVC ---
- obs_nudge_opt            = 1, 1, 1,
+ obs_nudge_opt            = {doms},
  max_obs                  = 100000,
  fdda_start               = 0., 0., 0.,
  fdda_end                 = {end_min}., {end_min}., {end_min}.,
@@ -174,7 +174,8 @@ AUX11_BLOCK = """\
 """
 
 
-def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs_nudge=False):
+def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs_nudge=False,
+                     obs_nudge_doms="1, 1, 1"):
     cfg = MODE_CFG[mode]
     gcfg = GEOG_CFG[geog_detail]
     y, m, d = map(int, date.split("-"))
@@ -228,7 +229,8 @@ def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs
         inp = set_nml(inp, "bl_pbl_physics", "1, 1, 1,")
         inp = set_nml(inp, "sf_sfclay_physics", "1, 1, 1,")
         inp = inject_before_group_end(inp, "time_control", AUX11_BLOCK.format(end_h=run_hours))
-        inp = inject_before_group_end(inp, "fdda", FDDA_OBS_BLOCK.format(end_min=run_hours * 60))
+        inp = inject_before_group_end(inp, "fdda",
+                                      FDDA_OBS_BLOCK.format(end_min=run_hours * 60, doms=obs_nudge_doms))
     WRF_RUN.mkdir(parents=True, exist_ok=True)
     (WRF_RUN / "namelist.input").write_text(inp)
     print(f"  rendered namelists: {start:%Y-%m-%d_%H} +{run_hours}h  "
@@ -316,11 +318,15 @@ def main():
     ap.add_argument("--dry", action="store_true", help="render namelists + print steps, run nothing external")
     ap.add_argument("--render-only", action="store_true", help="render namelists into WPS/WRF dirs then exit (for the AWS container runner)")
     ap.add_argument("--obs-nudge", action="store_true", help="enable observation (station) nudging &fdda block (needs OBS_DOMAIN from obsgrid)")
+    ap.add_argument("--obs-nudge-doms", default="1, 1, 1",
+                    help="per-domain obs_nudge_opt (default '1, 1, 1'; '1, 1, 0' = d01/d02 only for "
+                         "held-out validation; '0, 0, 0' = YSU physics-matched free baseline)")
     args = ap.parse_args()
     DRY = args.dry
 
     print(f"=== gom-seabreeze: {args.date}  mode={args.mode}  {args.run_hours}h ===")
-    render_namelists(args.date, args.mode, args.start_hour, args.run_hours, args.geog_detail, args.obs_nudge)
+    render_namelists(args.date, args.mode, args.start_hour, args.run_hours, args.geog_detail,
+                     args.obs_nudge, args.obs_nudge_doms)
     if args.render_only:
         return
 

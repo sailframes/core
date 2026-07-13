@@ -35,6 +35,7 @@ GEOGRID_ONLY="${GOM_GEOGRID_ONLY:-0}"         # 1 = geogrid + landmask QC plot o
 OBS_NUDGE="${GOM_OBS_NUDGE:-0}"               # 1 = obs (station) nudging: little_r -> obsgrid -> OBS_DOMAIN -> &fdda
 OBSGRID_ONLY="${GOM_OBSGRID_ONLY:-0}"         # 1 = stop after obsgrid (report obs kept + OBS_DOMAIN), no real/wrf (cheap gate)
 OBS_EXCLUDE="${GOM_OBS_EXCLUDE:-}"            # station ids to hold out of the little_r (e.g. "44013" for validation)
+OBS_NUDGE_DOMS="${GOM_OBS_NUDGE_DOMS:-1,1,1}" # per-domain obs_nudge_opt: 1,1,1 product | 1,1,0 d01/d02-only validation | 0,0,0 YSU free baseline
 NLCD_URL="${GOM_NLCD_URL:-https://www2.mmm.ucar.edu/wrf/src/wps_files/nlcd2011_ll_9s.tar.bz2}"
 CASE=gom
 DTC_RAW="https://raw.githubusercontent.com/NCAR/container-dtc-nwp/main/components/scripts/common"
@@ -44,10 +45,11 @@ mkdir -p "$WORK"/scripts/{case,common} "$WORK"/{model_data/$CASE,wpsprd,wrfprd,s
 echo "### 1. render namelists (geog_data_path -> container mount, geog_detail=$GEOG_DETAIL)"
 GEOGROOT=/data/geog; GEOGROOT_HOST="$GEOG"
 [ -d "$GEOG/WPS_GEOG" ] && { GEOGROOT=/data/geog/WPS_GEOG; GEOGROOT_HOST="$GEOG/WPS_GEOG"; }
-[ "$OBS_NUDGE" = 1 ] && OBS_NUDGE_FLAG=--obs-nudge || OBS_NUDGE_FLAG=
+render_flags=()
+[ "$OBS_NUDGE" = 1 ] && render_flags+=(--obs-nudge --obs-nudge-doms "$OBS_NUDGE_DOMS")
 GOM_WPS="$WORK/scripts/case" GOM_WRFRUN="$WORK/scripts/case" GOM_WPSGEOG="$GEOGROOT" \
   "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
-  --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" $OBS_NUDGE_FLAG --render-only
+  --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" "${render_flags[@]}" --render-only
 
 # WRF needs each decomposed patch >= 10 cells; the SMALLEST nest binds. WRF's auto
 # decomposition of an awkward rank count (32 -> 4x8) can drop d03's y-patch below 10

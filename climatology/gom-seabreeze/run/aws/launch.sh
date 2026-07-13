@@ -24,6 +24,7 @@ WRF_VER="${GOM_WRF_VER:-4.3}"; WPS_VER="${GOM_WPS_VER:-4.3}"
 OBS_NUDGE="${GOM_OBS_NUDGE:-0}"             # 1 = obs (station) nudging (needs :4.8 image w/ obsgrid.exe)
 OBSGRID_ONLY="${GOM_OBSGRID_ONLY:-0}"       # 1 = stop after obsgrid (cheap obs-nudging gate)
 OBS_EXCLUDE="${GOM_OBS_EXCLUDE:-}"          # station ids to hold out (e.g. 44013 for validation)
+OBS_NUDGE_DOMS="${GOM_OBS_NUDGE_DOMS:-1,1,1}"  # 1,1,1 product | 1,1,0 d01/d02-only validation | 0,0,0 YSU free baseline
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 
 echo "### upload the gom-seabreeze code so the instance can pull it (no git auth needed)"
@@ -42,6 +43,7 @@ UD=$(sed -e "s|@@DATE@@|$DATE|g" -e "s|@@MODE@@|$MODE|g" -e "s|@@RUN_HOURS@@|$RU
         -e "s|@@GEOG_DETAIL@@|$GEOG_DETAIL|g" -e "s|@@GEOGRID_ONLY@@|$GEOGRID_ONLY|g" \
         -e "s|@@IMAGE@@|$IMAGE|g" -e "s|@@WRF_VER@@|$WRF_VER|g" -e "s|@@WPS_VER@@|$WPS_VER|g" \
         -e "s|@@OBS_NUDGE@@|$OBS_NUDGE|g" -e "s|@@OBSGRID_ONLY@@|$OBSGRID_ONLY|g" -e "s|@@OBS_EXCLUDE@@|$OBS_EXCLUDE|g" \
+        -e "s|@@OBS_NUDGE_DOMS@@|$OBS_NUDGE_DOMS|g" \
         "$HERE/userdata.sh" | base64)
 
 echo "### launch (Spot, terminate-on-shutdown, 150 GB gp3 for geog+work)"
