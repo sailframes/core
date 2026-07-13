@@ -320,17 +320,29 @@ if [ "$OBS_NUDGE" = 1 ]; then
 OANML
   docker cp "$WORK/namelist.oa" gomwrf:$OAWORK/namelist.oa
   docker exec gomwrf bash -lc "cd $OAWORK && ./obsgrid.exe > obsgrid.log 2>&1" || true
-  echo "  --- obsgrid.log tail ---"
-  docker exec gomwrf bash -lc "cd $OAWORK && tail -25 obsgrid.log; echo; ls -l OBS_DOMAIN* 2>/dev/null || echo '(no OBS_DOMAIN produced)'"
-  # gate: OBS_DOMAIN101 must exist and be non-empty, else nudging is a silent no-op
-  if ! docker exec gomwrf bash -lc "test -s $OAWORK/OBS_DOMAIN101"; then
-    echo "FATAL: obsgrid produced no OBS_DOMAIN101 -> obs-nudging would silently do nothing"
+  echo "  --- obsgrid.log tail + OBS_DOMAIN files produced ---"
+  docker exec gomwrf bash -lc "cd $OAWORK && tail -6 obsgrid.log; echo; ls -l OBS_DOMAIN1* 2>/dev/null || echo '(no OBS_DOMAIN produced)'"
+  # obsgrid writes ONE OBS_DOMAIN per analysis TIME (OBS_DOMAIN101,102,...); WRF reads a single
+  # OBS_DOMAINX01 per DOMAIN, so concatenate all time files CHRONOLOGICALLY (guide Appendix A:
+  # "must be concatenated... in chronological order") into wrfprd/OBS_DOMAIN101 (+ d02/d03 copies;
+  # WRF drops out-of-domain obs). Lexical sort of the zero-padded names = chronological.
+  OAFILES=$(docker exec gomwrf bash -lc "cd $OAWORK && ls OBS_DOMAIN1* 2>/dev/null | sort | tr '\n' ' '")
+  echo "  obsgrid produced: ${OAFILES:-<none>}"
+  docker exec gomwrf bash -lc "cd $OAWORK && ls OBS_DOMAIN1* >/dev/null 2>&1 && \
+    cat \$(ls OBS_DOMAIN1* | sort) > /home/wrfprd/OBS_DOMAIN101 && \
+    cp /home/wrfprd/OBS_DOMAIN101 /home/wrfprd/OBS_DOMAIN201 && \
+    cp /home/wrfprd/OBS_DOMAIN101 /home/wrfprd/OBS_DOMAIN301" || true
+  # gate: concatenated OBS_DOMAIN101 must be non-empty AND span >1 obs time, else silent no-op
+  nt=$(docker exec gomwrf bash -lc "grep -cE '^ *[0-9]{14}' /home/wrfprd/OBS_DOMAIN101 2>/dev/null" | tr -d '\r' || echo 0)
+  ntimes=$(docker exec gomwrf bash -lc "grep -oE '^ *[0-9]{14}' /home/wrfprd/OBS_DOMAIN101 2>/dev/null | sort -u | wc -l" | tr -d '\r' || echo 0)
+  echo "  concatenated OBS_DOMAIN101: ${nt:-0} obs records across ${ntimes:-0} distinct times"
+  if [ "${nt:-0}" -lt 10 ] || [ "${ntimes:-0}" -lt 5 ]; then
+    echo "FATAL: OBS_DOMAIN101 too sparse (nt=$nt times=$ntimes) -> obs-nudging would barely act"
     aws s3 cp "$WORK/wpsprd/" "$S3/$DATE/$MODE/debug/" --recursive --exclude "*" --include "obs:*" || true
     docker exec gomwrf cat "$OAWORK/obsgrid.log" | aws s3 cp - "$S3/$DATE/$MODE/debug/obsgrid.log" || true
+    docker exec gomwrf cat /home/wrfprd/OBS_DOMAIN101 2>/dev/null | aws s3 cp - "$S3/$DATE/$MODE/debug/OBS_DOMAIN101" || true
     exit 47
   fi
-  # WRF reads OBS_DOMAINX01 per domain; identical file works (WRF drops out-of-domain obs)
-  docker exec gomwrf bash -lc "cd $OAWORK && for D in 1 2 3; do cp OBS_DOMAIN101 /home/wrfprd/OBS_DOMAIN\${D}01; done"
   echo "  OBS_DOMAIN101 -> wrfprd/OBS_DOMAIN{1,2,3}01"
 
   if [ "$OBSGRID_ONLY" = 1 ]; then
