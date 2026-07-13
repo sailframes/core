@@ -76,11 +76,9 @@
  ra_lw_physics            = 4, 4, 4, 4, 4,
  ra_sw_physics            = 4, 4, 4, 4, 4,
  radt                     = 10, 10, 10, 10, 10,
- sf_sfclay_physics        = 5, 5, 5, 1, 1,        ! parents MYNN; LES nests MM5-MOST (LES surface layer)
+ sf_sfclay_physics        = 1, 1, 1, 1, 1,        ! MM5-MOST uniform (WRF requires equal across domains; LES-compatible)
  sf_surface_physics       = 3, 3, 3, 3, 3,        ! LSM unchanged (render sets per geog: RUC 3 / Noah 2)
- bl_pbl_physics           = 5, 5, 5, 0, 0,        ! PBL OFF on LES (turbulence resolved)
- bl_mynn_tkeadvect        = .true.,
- bl_mynn_edmf             = 1, 1, 1, 0, 0,
+ bl_pbl_physics           = 1, 1, 1, 0, 0,        ! YSU parents (pairs w/ MM5-MOST, no scalar comps); PBL OFF on LES
  bldt                     = 0, 0, 0, 0, 0,
  cu_physics               = 3, 0, 0, 0, 0,
  cudt                     = 0,
@@ -89,7 +87,6 @@
  sf_urban_physics         = 0, 0, 0, 0, 0,
  usemonalb                = .true.,
  fractional_seaice        = 1,
- icloud_bl                = 1,
  sst_skin                 = 1,
  isfflx                   = 1,                    ! scalar: use sfclay/LSM surface fluxes (LES needs them)
  bucket_mm                = -1,
