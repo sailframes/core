@@ -69,7 +69,7 @@ echo "### 2. set_env.ksh + DTC run scripts"
 cat > "$WORK/scripts/case/set_env.ksh" <<EOF
 export WPS_VERSION=4.3
 export WRF_VERSION=4.3
-export input_data=$( [ "$MODE" = hindcast ] && echo ERA5 || echo GFS )
+export input_data=$(case "$MODE" in hindcast) echo ERA5;; hrrr) echo raphrrr;; *) echo GFS;; esac)
 export case_name=$CASE
 export file_date=${DATE}_00
 export num_procs=$NPROCS
@@ -91,6 +91,15 @@ sed -i -e '/sst_update/d' -e '/io_form_auxinput4/d' -e '/auxinput4_/d' "$WORK/sc
 echo "### 3. stage GFS 0.25 from the AWS Open Data archive (public, in-region)"
 if [ "$GEOGRID_ONLY" = 1 ]; then
   echo "  geogrid-only: skipping driver GRIB (geogrid needs no meteorology)"
+elif [ "$MODE" = hrrr ]; then
+  # HRRR-driven: hourly F00 ANALYSES (obs-assimilated each hour) as ICs/LBCs.
+  # valid time = DATE 00Z + hh; pull hrrr.t<HH>z.wrfprsf00 from that day's dir.
+  for hh in $(seq 0 "$RUN_HOURS"); do
+    vt=$(date -u -d "$DATE 00:00 UTC +${hh} hours" +%Y%m%d_%H)
+    vymd=${vt%_*}; vhh=${vt#*_}; dest="$WORK/model_data/$CASE/hrrr.${vt}.f00.grib2"
+    [ -s "$dest" ] || { echo "  HRRR analysis +${hh}h (${vymd} t${vhh}z)"; aws s3 cp --no-sign-request --quiet \
+      "s3://noaa-hrrr-bdp-pds/hrrr.${vymd}/conus/hrrr.t${vhh}z.wrfprsf00.grib2" "$dest"; }
+  done
 elif [ "$MODE" = forecast ]; then
   ymd=${DATE//-/}
   for fh in $(seq 0 3 "$RUN_HOURS"); do

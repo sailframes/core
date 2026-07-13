@@ -55,8 +55,12 @@ PY = os.environ.get("GOM_PYTHON", sys.executable)
 #   correct table -- Vtable.ERA-interim.pl substitutes but its soil/land entries
 #   differ. GFS 0.25 = 34 levels, Vtable.GFS.
 MODE_CFG = {
-    "forecast": dict(num_metgrid_levels=34, interval_seconds=10800, fdda=False, vtable="Vtable.GFS"),
-    "hindcast": dict(num_metgrid_levels=38, interval_seconds=3600,  fdda=True,  vtable="Vtable.ERA5"),
+    "forecast": dict(num_metgrid_levels=34, num_metgrid_soil_levels=4, interval_seconds=10800, fdda=False, vtable="Vtable.GFS"),
+    "hindcast": dict(num_metgrid_levels=38, num_metgrid_soil_levels=4, interval_seconds=3600,  fdda=True,  vtable="Vtable.ERA5"),
+    # HRRR-driven: obs-anchored mean (HRRR assimilates radar/surface/buoy). 40 isobaric
+    # levels + surface = 41; HRRR carries RUC 9-level soil (real.exe interpolates to Noah's
+    # 4). Hourly F00 analyses (interval 3600). Vtable.raphrrr ships with WPS.
+    "hrrr":     dict(num_metgrid_levels=41, num_metgrid_soil_levels=9, interval_seconds=3600,  fdda=False, vtable="Vtable.raphrrr"),
 }
 
 # Static-geography detail (land-use / land-WATER mask). The mask sets WHERE the
@@ -145,6 +149,7 @@ def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis"):
     inp = set_nml(inp, "end_hour", triple(f"{end:%H}"))
     inp = set_nml(inp, "interval_seconds", f"{cfg['interval_seconds']},")
     inp = set_nml(inp, "num_metgrid_levels", f"{cfg['num_metgrid_levels']},")
+    inp = set_nml(inp, "num_metgrid_soil_levels", f"{cfg['num_metgrid_soil_levels']},")
     inp = set_nml(inp, "num_land_cat", f"{gcfg['num_land_cat']},")
     inp = set_nml(inp, "sf_surface_physics", gcfg["sf_surface_physics"])
     inp = set_nml(inp, "num_soil_layers", f"{gcfg['num_soil_layers']},")
