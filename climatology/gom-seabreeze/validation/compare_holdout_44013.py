@@ -63,10 +63,14 @@ def extract_point_series(prefix, scratch, label):
             dist2 = (la - LAT44013) ** 2 + (lo - LON44013) ** 2
             jj, ii = np.unravel_index(np.argmin(dist2), dist2.shape)
             print(f"  {label}: nearest d03 cell (j={jj},i={ii}) at {la[jj,ii]:.3f},{lo[jj,ii]:.3f}")
-        u = float(ds["U10"].isel(Time=0).values[jj, ii])
-        v = float(ds["V10"].isel(Time=0).values[jj, ii])
-        # wrfout U10/V10 are EARTH-relative (already rotated) -> speed/dir directly
-        ts = "".join(ds["Times"].isel(Time=0).values.astype(str))
+        ug = float(ds["U10"].isel(Time=0).values[jj, ii])
+        vg = float(ds["V10"].isel(Time=0).values[jj, ii])
+        # U10/V10 are GRID-relative -> rotate to earth-relative (SINALPHA/COSALPHA) for direction
+        sa = float(ds["SINALPHA"].isel(Time=0).values[jj, ii])
+        ca = float(ds["COSALPHA"].isel(Time=0).values[jj, ii])
+        u = ug * ca - vg * sa; v = vg * ca + ug * sa
+        raw = ds["Times"].isel(Time=0).values  # char |S1 array or 0-d bytestring
+        ts = "".join(c.decode() if isinstance(c, bytes) else str(c) for c in np.atleast_1d(raw).ravel())
         times.append(dt.datetime.strptime(ts, "%Y-%m-%d_%H:%M:%S"))
         spd.append((u * u + v * v) ** 0.5)
         drc.append((270.0 - np.degrees(np.arctan2(v, u))) % 360.0)  # meteorological dir
