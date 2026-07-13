@@ -8,6 +8,10 @@ DATE="${1:-2026-07-04}"
 REGION="${AWS_REGION:-us-east-1}"
 S3="${GOM_S3:-s3://sailframes-data-prod/gom}"
 PROFILE_NAME="${GOM_INSTANCE_PROFILE:-gom-seabreeze-ec2}"
+HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/.." && pwd)"
+echo "### upload current code (else the box runs a stale tarball)"
+tar czf /tmp/gom-seabreeze.tar.gz -C "$(dirname "$ROOT")" "$(basename "$ROOT")"
+aws s3 cp /tmp/gom-seabreeze.tar.gz "$S3/code/gom-seabreeze.tar.gz"
 AMI=$(aws ssm get-parameter --region "$REGION" \
   --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
   --query Parameter.Value --output text)
