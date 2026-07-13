@@ -18,6 +18,12 @@ DATE="${1:?usage: run_case.sh YYYY-MM-DD [forecast|hindcast]}"
 MODE="${2:-forecast}"
 RUN_HOURS="${GOM_RUN_HOURS:-36}"
 IMAGE="${GOM_IMAGE:-dtcenter/wps_wrf:latest}"
+# In-container WRF/WPS build dir versions. dtcenter/wps_wrf:latest = 4.3/4.3; our
+# sailframes-wrf:4.8 image = WRF-4.8.0 + WPS-4.7.0 (+ obsgrid.exe). The DTC run_*.ksh
+# scripts build paths as WRF-${WRF_VERSION} / WPS-${WPS_VERSION}, so switching images is
+# just: GOM_IMAGE=<ecr>:4.8 GOM_WRF_VER=4.8.0 GOM_WPS_VER=4.7.0.
+WRF_VER="${GOM_WRF_VER:-4.3}"
+WPS_VER="${GOM_WPS_VER:-4.3}"
 REPO="${GOM_REPO:-$HOME/sailframes/climatology/gom-seabreeze}"
 WORK="${GOM_WORK:-$HOME/gom-work/$DATE}"
 GEOG="${GOM_GEOG:-$HOME/WPS_GEOG}"
@@ -67,8 +73,8 @@ fi
 
 echo "### 2. set_env.ksh + DTC run scripts"
 cat > "$WORK/scripts/case/set_env.ksh" <<EOF
-export WPS_VERSION=4.3
-export WRF_VERSION=4.3
+export WPS_VERSION=$WPS_VER
+export WRF_VERSION=$WRF_VER
 export input_data=$(case "$MODE" in hindcast) echo ERA5;; hrrr) echo raphrrr;; *) echo GFS;; esac)
 export case_name=$CASE
 export file_date=${DATE}_00
@@ -124,11 +130,11 @@ docker run -d --name gomwrf \
 echo "### 4b. discriminator: image must support NLCD before we lean on it"
 if [ "$GEOG_DETAIL" = nlcd ]; then
   # geogrid needs the nlcd2011_9s resolution entry in GEOGRID.TBL...
-  docker exec gomwrf bash -lc 'grep -qs nlcd2011_9s /comsoftware/wrf/WPS-4.3/geogrid/GEOGRID.TBL*' \
+  docker exec gomwrf bash -lc "grep -qs nlcd2011_9s /comsoftware/wrf/WPS-${WPS_VER}/geogrid/GEOGRID.TBL*" \
     || { echo "FATAL: GEOGRID.TBL has no nlcd2011_9s entry in this image -> use GOM_GEOG_DETAIL=modis, or add the entry + LANDMASK-surgery fallback"; exit 3; }
   # ...and real/wrf (RUC LSM) needs an NLCD40 section in VEGPARM.TBL (skip check for geogrid-only)
   if [ "$GEOGRID_ONLY" != 1 ]; then
-    docker exec gomwrf bash -lc 'grep -qsi "^NLCD40" /comsoftware/wrf/WRF-4.3/run/VEGPARM.TBL' \
+    docker exec gomwrf bash -lc "grep -qsi '^NLCD40' /comsoftware/wrf/WRF-${WRF_VER}/run/VEGPARM.TBL" \
       || { echo "FATAL: VEGPARM.TBL has no NLCD40 section -> real.exe/RUC would abort. Use GOM_GEOG_DETAIL=modis or the post-geogrid LANDMASK-surgery fallback (see wrf/README geography)"; exit 3; }
   fi
   echo "  NLCD support confirmed in image tables"
@@ -142,7 +148,7 @@ echo "### 4c. patch VEGPARM.TBL NLCD40 LCZ block (WRF 4.3 bug fix, nlcd only)"
 # extending the NLCD40 LCZ block to 11 entries (51..61). Apply that here at runtime
 # (no recompile): pull the container's table, extend ONLY the NLCD40 LCZ block, copy back.
 if [ "$GEOG_DETAIL" = nlcd ] && [ "$GEOGRID_ONLY" != 1 ]; then
-  VEG=/comsoftware/wrf/WRF-4.3/run/VEGPARM.TBL
+  VEG=/comsoftware/wrf/WRF-${WRF_VER}/run/VEGPARM.TBL
   n11=$(docker exec gomwrf grep -c '^LCZ_11' "$VEG" || echo 0)
   if [ "${n11:-0}" -lt 3 ]; then          # <3 => NLCD40 section is the truncated one
     docker exec gomwrf cat "$VEG" > "$WORK/VEGPARM.TBL.orig"
@@ -169,7 +175,7 @@ fi
 echo "### 5. WPS (geogrid/ungrib/metgrid) -> met_em in wpsprd"
 # run_wps links only *.exe into wpsprd; geogrid/metgrid look for GEOGRID.TBL /
 # METGRID.TBL under ./geogrid ./metgrid -> symlink those table dirs in first
-docker exec gomwrf bash -lc 'cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-4.3/geogrid . && ln -sf /comsoftware/wrf/WPS-4.3/metgrid .'
+docker exec gomwrf bash -lc "cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid . && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/metgrid ."
 
 if [ "$GEOGRID_ONLY" = 1 ]; then
   echo "### 5-only. geogrid.exe -> geo_em + landmask QC (no GFS/real/wrf)"
@@ -182,7 +188,7 @@ if [ "$GEOGRID_ONLY" = 1 ]; then
       "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
       --run-hours "$RUN_HOURS" --geog-detail "$det" --render-only
     sed -i -e 's/!.*//' -e '/^[[:space:]]*$/d' "$WORK/scripts/$sub/namelist.wps"
-    docker exec gomwrf bash -lc "cd /home/wpsprd/$sub && ln -sf /comsoftware/wrf/WPS-4.3/geogrid.exe . && ln -sf /comsoftware/wrf/WPS-4.3/geogrid . && cp /home/scripts/$sub/namelist.wps . && ./geogrid.exe"
+    docker exec gomwrf bash -lc "cd /home/wpsprd/$sub && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid.exe . && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid . && cp /home/scripts/$sub/namelist.wps . && ./geogrid.exe"
     ls "$WORK/wpsprd/$sub/"geo_em.d0*.nc
   }
   geogrid_detail "$GEOG_DETAIL" primary
