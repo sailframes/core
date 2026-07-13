@@ -250,5 +250,14 @@ if ! docker exec -e OMPI_ALLOW_RUN_AS_ROOT=1 -e OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
      gomwrf /home/scripts/common/run_wrf.ksh -np "$NPROCS"; then push_debug "wrf.exe"; exit 45; fi
 
 echo "### 9. push wrfout -> S3"
-aws s3 cp --quiet "$WORK/wrfprd/" "$S3/$DATE/$MODE/" --recursive --exclude "*" --include "wrfout_d0*"
+# aws s3 cp --recursive can return 2 on a transient skip even when every file uploaded
+# (seen on the :4.8 validation: rc=2 yet all 219 frames present). Don't let that spurious
+# code kill the run under set -e; gate success on the actual d03 object count instead.
+aws s3 cp --quiet "$WORK/wrfprd/" "$S3/$DATE/$MODE/" --recursive --exclude "*" --include "wrfout_d0*" \
+  || echo "  WARN: aws s3 cp exited non-zero (transient); verifying by count"
+localn=$(ls "$WORK/wrfprd/"wrfout_d03_* 2>/dev/null | wc -l | tr -d ' ')
+s3n=$(aws s3 ls "$S3/$DATE/$MODE/" | grep -c wrfout_d03 || true)
+echo "  wrfout_d03: local=$localn  s3=$s3n"
+{ [ "${localn:-0}" -gt 0 ] && [ "${s3n:-0}" -ge "$localn" ]; } \
+  || { echo "FATAL: wrfout_d03 upload incomplete (s3=$s3n < local=$localn)"; exit 9; }
 echo "=== done: $S3/$DATE/$MODE/ ==="
