@@ -220,6 +220,13 @@ def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs
     else:
         inp = set_nml(inp, "grid_fdda", "0, 0, 0,")
     if obs_nudge:
+        # obs-nudging's compute_VIH needs the MM5 stability 'regime', set ONLY by the revised
+        # MM5 MOST surface layer (sf_sfclay_physics=1) + its paired YSU PBL (bl_pbl_physics=1).
+        # The default MYNN (sfclay=5/pbl=5) never sets it -> "Unknown regime type 0.0" abort.
+        # Swap to YSU+MOST for nudged runs (standard convective/sea-breeze combo); MYNN stays
+        # the default for free runs. NOTE: a free-vs-nudged comparison must use YSU on BOTH.
+        inp = set_nml(inp, "bl_pbl_physics", "1, 1, 1,")
+        inp = set_nml(inp, "sf_sfclay_physics", "1, 1, 1,")
         inp = inject_before_group_end(inp, "time_control", AUX11_BLOCK.format(end_h=run_hours))
         inp = inject_before_group_end(inp, "fdda", FDDA_OBS_BLOCK.format(end_min=run_hours * 60))
     WRF_RUN.mkdir(parents=True, exist_ok=True)
