@@ -23,7 +23,7 @@ exec > >(tee -a /var/log/bf.log) 2>&1
 DATE="@@DATE@@"; S3="@@S3@@"; WEB="@@WEB@@"
 dnf install -y python3.11 python3.11-pip tar gzip >/dev/null
 python3.11 -m venv /root/venv; /root/venv/bin/pip -q install --upgrade pip
-/root/venv/bin/pip -q install numpy scipy xarray netCDF4 pyarrow
+/root/venv/bin/pip -q install numpy scipy xarray netCDF4 pyarrow boto3
 aws s3 cp "$S3/code/gom-seabreeze.tar.gz" /root/gom.tar.gz; tar xzf /root/gom.tar.gz -C /root
 BF=$(find /root -name backfill_wrf.py | head -1)
 set +e; RC=0
