@@ -149,6 +149,10 @@ FDDA_OBS_BLOCK = """\
  obs_nudge_mois           = 1, 1, 1,
  obs_coef_mois            = 6.e-4, 6.e-4, 6.e-4,
  obs_nudge_pstr           = 0, 0, 0,
+ ! surface-obs vertical spreading: 0 = Reen (2013), needed because MYNN sfclay (option 5)
+ ! doesn't set the MM5 stability 'regime' the original scheme (=1, default) requires ->
+ ! else fddaobs_driver compute_VIH aborts "Unknown regime type 0.0"
+ obs_sfc_scheme_vert      = 0,
  obs_rinxy                = 60., 40., 20.,
  obs_rinsig               = 0.1,
  obs_twindo               = 0.6666667,
