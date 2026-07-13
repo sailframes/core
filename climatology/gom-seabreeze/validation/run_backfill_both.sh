@@ -10,8 +10,10 @@ PROFILE_NAME="${GOM_INSTANCE_PROFILE:-gom-seabreeze-ec2}"
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/.." && pwd)"
 AMI=$(aws ssm get-parameter --region "$REGION" --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 --query Parameter.Value --output text)
 
-echo "### upload current code (has backfill_wrf.py)"
+echo "### upload current code (backfill_wrf.py lives in climatology/, copy it into the tarball dir)"
+cp "$ROOT/../backfill_wrf.py" "$ROOT/backfill_wrf.py"
 tar czf /tmp/gom-seabreeze.tar.gz -C "$(dirname "$ROOT")" "$(basename "$ROOT")"
+rm -f "$ROOT/backfill_wrf.py"
 aws s3 cp /tmp/gom-seabreeze.tar.gz "$S3/code/gom-seabreeze.tar.gz"
 
 UD=$(sed -e "s|@@DATE@@|$DATE|g" -e "s|@@S3@@|$S3|g" -e "s|@@WEB@@|$WEB|g" -e "s|@@REGION@@|$REGION|g" <<'USERDATA' | base64
