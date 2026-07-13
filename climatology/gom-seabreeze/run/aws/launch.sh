@@ -16,6 +16,11 @@ PROFILE_NAME="${GOM_INSTANCE_PROFILE:-gom-seabreeze-ec2}"
 TERMINATE="${GOM_TERMINATE:-1}"
 GEOG_DETAIL="${GOM_GEOG_DETAIL:-modis}"     # modis (30s) | nlcd (9s ~250m land-water mask + urban)
 GEOGRID_ONLY="${GOM_GEOGRID_ONLY:-0}"       # 1 = cheap geogrid+landmask-QC pass, no GFS/real/wrf
+# Container image + in-container WRF/WPS build-dir versions. Defaults = DTC 4.3 image.
+# Modern WRF: GOM_IMAGE=<acct>.dkr.ecr.us-east-1.amazonaws.com/sailframes-wrf:4.8
+#            GOM_WRF_VER=4.8.0 GOM_WPS_VER=4.7.0  (ECR refs get an auto docker-login)
+IMAGE="${GOM_IMAGE:-dtcenter/wps_wrf:latest}"
+WRF_VER="${GOM_WRF_VER:-4.3}"; WPS_VER="${GOM_WPS_VER:-4.3}"
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 
 echo "### upload the gom-seabreeze code so the instance can pull it (no git auth needed)"
@@ -32,6 +37,7 @@ echo "### render userdata"
 UD=$(sed -e "s|@@DATE@@|$DATE|g" -e "s|@@MODE@@|$MODE|g" -e "s|@@RUN_HOURS@@|$RUN_HOURS|g" \
         -e "s|@@S3@@|$S3|g" -e "s|@@TERMINATE@@|$TERMINATE|g" \
         -e "s|@@GEOG_DETAIL@@|$GEOG_DETAIL|g" -e "s|@@GEOGRID_ONLY@@|$GEOGRID_ONLY|g" \
+        -e "s|@@IMAGE@@|$IMAGE|g" -e "s|@@WRF_VER@@|$WRF_VER|g" -e "s|@@WPS_VER@@|$WPS_VER|g" \
         "$HERE/userdata.sh" | base64)
 
 echo "### launch (Spot, terminate-on-shutdown, 150 GB gp3 for geog+work)"
@@ -43,7 +49,7 @@ IID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type
   --user-data "$UD" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=gom-$DATE-$MODE}]" \
   --query 'Instances[0].InstanceId' --output text)
-echo "launched $IID  (geog=$GEOG_DETAIL  geogrid_only=$GEOGRID_ONLY)"
+echo "launched $IID  (image=$IMAGE  wrf=$WRF_VER/wps=$WPS_VER  geog=$GEOG_DETAIL  geogrid_only=$GEOGRID_ONLY)"
 echo "watch:  aws ssm start-session --target $IID     # then: tail -f /var/log/gom-userdata.log"
 if [ "$GEOGRID_ONLY" = 1 ]; then
   echo "output: $S3/$DATE/geoqc/$GEOG_DETAIL/   (geo_em.d0*.nc + LANDMASK/LU_INDEX PNGs)"
