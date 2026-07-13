@@ -8,6 +8,7 @@ exec > >(tee -a /var/log/gom-userdata.log) 2>&1
 DATE="@@DATE@@"; MODE="@@MODE@@"; RUN_HOURS="@@RUN_HOURS@@"; S3="@@S3@@"; TERMINATE="@@TERMINATE@@"
 GEOG_DETAIL="@@GEOG_DETAIL@@"; GEOGRID_ONLY="@@GEOGRID_ONLY@@"
 IMAGE="@@IMAGE@@"; WRF_VER="@@WRF_VER@@"; WPS_VER="@@WPS_VER@@"
+OBS_NUDGE="@@OBS_NUDGE@@"; OBSGRID_ONLY="@@OBSGRID_ONLY@@"; OBS_EXCLUDE="@@OBS_EXCLUDE@@"
 export HOME=/root
 GEOG=/mnt/WPS_GEOG; VENV=/root/gom-venv; CODE=/root/gom-seabreeze
 
@@ -52,6 +53,7 @@ echo "### run the case"
 export GOM_REPO="$CODE" GOM_GEOG="$GEOG" GOM_VENV="$VENV" GOM_S3="$S3" GOM_RUN_HOURS="$RUN_HOURS"
 export GOM_GEOG_DETAIL="$GEOG_DETAIL" GOM_GEOGRID_ONLY="$GEOGRID_ONLY"
 export GOM_IMAGE="$IMAGE" GOM_WRF_VER="$WRF_VER" GOM_WPS_VER="$WPS_VER"
+export GOM_OBS_NUDGE="$OBS_NUDGE" GOM_OBSGRID_ONLY="$OBSGRID_ONLY" GOM_OBS_EXCLUDE="$OBS_EXCLUDE"
 set +e
 bash "$CODE/run/aws/run_case.sh" "$DATE" "$MODE"; RC=$?
 set -e

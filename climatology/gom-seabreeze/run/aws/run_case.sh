@@ -32,6 +32,9 @@ S3="${GOM_S3:-s3://sailframes-data-prod/gom}"
 NPROCS="${GOM_NPROCS:-$(nproc)}"; [ "$NPROCS" -gt 32 ] && NPROCS=32
 GEOG_DETAIL="${GOM_GEOG_DETAIL:-modis}"       # modis (30s) | nlcd (9s ~250m + urban)
 GEOGRID_ONLY="${GOM_GEOGRID_ONLY:-0}"         # 1 = geogrid + landmask QC plot only, then exit (cheap)
+OBS_NUDGE="${GOM_OBS_NUDGE:-0}"               # 1 = obs (station) nudging: little_r -> obsgrid -> OBS_DOMAIN -> &fdda
+OBSGRID_ONLY="${GOM_OBSGRID_ONLY:-0}"         # 1 = stop after obsgrid (report obs kept + OBS_DOMAIN), no real/wrf (cheap gate)
+OBS_EXCLUDE="${GOM_OBS_EXCLUDE:-}"            # station ids to hold out of the little_r (e.g. "44013" for validation)
 NLCD_URL="${GOM_NLCD_URL:-https://www2.mmm.ucar.edu/wrf/src/wps_files/nlcd2011_ll_9s.tar.bz2}"
 CASE=gom
 DTC_RAW="https://raw.githubusercontent.com/NCAR/container-dtc-nwp/main/components/scripts/common"
@@ -41,9 +44,10 @@ mkdir -p "$WORK"/scripts/{case,common} "$WORK"/{model_data/$CASE,wpsprd,wrfprd,s
 echo "### 1. render namelists (geog_data_path -> container mount, geog_detail=$GEOG_DETAIL)"
 GEOGROOT=/data/geog; GEOGROOT_HOST="$GEOG"
 [ -d "$GEOG/WPS_GEOG" ] && { GEOGROOT=/data/geog/WPS_GEOG; GEOGROOT_HOST="$GEOG/WPS_GEOG"; }
+[ "$OBS_NUDGE" = 1 ] && OBS_NUDGE_FLAG=--obs-nudge || OBS_NUDGE_FLAG=
 GOM_WPS="$WORK/scripts/case" GOM_WRFRUN="$WORK/scripts/case" GOM_WPSGEOG="$GEOGROOT" \
   "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
-  --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" --render-only
+  --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" $OBS_NUDGE_FLAG --render-only
 
 # WRF needs each decomposed patch >= 10 cells; the SMALLEST nest binds. WRF's auto
 # decomposition of an awkward rank count (32 -> 4x8) can drop d03's y-patch below 10
@@ -228,6 +232,105 @@ if "$VENV/bin/python" "$REPO/sst/build_coldest_sst.py" --date "$DATE" --outdir "
   echo "  coldest-pixel SST injected"
 else
   echo "  WARN: SST composite failed -> proceeding with raw driver SST in met_em"
+fi
+
+if [ "$OBS_NUDGE" = 1 ]; then
+  echo "### 6b. obs-nudging: race-zone little_r -> obsgrid.exe -> OBS_DOMAIN101 (copied to d02/d03)"
+  ex=""; [ -n "$OBS_EXCLUDE" ] && ex="--exclude $OBS_EXCLUDE"
+  # little_r on the HOST venv (needs internet); lands in wpsprd (bind-mounted to /home/wpsprd)
+  "$VENV/bin/python" "$REPO/obs/fetch_obs_littler.py" --date "$DATE" --run-hours "$RUN_HOURS" \
+    --out "$WORK/wpsprd/obs.littler" $ex || { echo "FATAL: obs fetch failed"; exit 46; }
+
+  # obsgrid reads met_em.d01.* (first guess) + the little_r, writes OBS_DOMAIN101. Run in its
+  # OWN dir with met_em symlinked so it cannot overwrite the SST-patched wpsprd met_em.
+  OAWORK=/home/oaprd
+  docker exec gomwrf bash -lc "rm -rf $OAWORK && mkdir -p $OAWORK && cd $OAWORK && \
+    ln -sf /home/wpsprd/met_em.d01.*.nc . && ln -sf /home/wpsprd/obs.littler ./obs && \
+    ln -sf /comsoftware/wrf/OBSGRID/obsgrid.exe ."
+
+  case "$MODE" in hindcast|hrrr) OA_INT=3600;; *) OA_INT=10800;; esac
+  read eY eM eD eH <<<"$(date -u -d "$DATE 00:00 UTC +${RUN_HOURS} hours" +'%Y %m %d %H')"
+  sY=${DATE%%-*}; sM=$(echo "$DATE" | cut -d- -f2); sD=$(echo "$DATE" | cut -d- -f3)
+  # QC: buddy + unverified OFF -- a ~6-station network has no buddies and 'unverified' would
+  # drop nearly everything -> empty OBS_DOMAIN + a silently-unchanged forecast (keep gross error_max)
+  cat > "$WORK/namelist.oa" <<OANML
+&record1
+ start_year = $sY
+ start_month = $sM
+ start_day = $sD
+ start_hour = 00
+ end_year = $eY
+ end_month = $eM
+ end_day = $eD
+ end_hour = $eH
+ interval = $OA_INT
+/
+&record2
+ grid_id = 1
+ obs_filename = 'obs'
+ remove_data_above_qc_flag = 32768
+ remove_unverified_data = .FALSE.
+/
+&record3
+ max_number_of_obs = 100000
+ fatal_if_exceed_max_obs = .TRUE.
+/
+&record4
+ qc_test_error_max = .TRUE.
+ qc_test_buddy = .FALSE.
+ qc_test_vert_consistency = .FALSE.
+ qc_test_convective_adj = .FALSE.
+ max_error_t = 10
+ max_error_uv = 13
+ max_error_z = 8
+ max_error_rh = 50
+ max_error_p = 600
+/
+&record5
+ print_obs_files = .TRUE.
+ print_found_obs = .TRUE.
+ print_error_max = .TRUE.
+/
+&record7
+ use_first_guess = .TRUE.
+ f4d = .TRUE.
+ intf4d = $OA_INT
+ lagtem = .FALSE.
+/
+&record8
+ smooth_type = 1
+ smooth_sfc_wind = 0
+ smooth_sfc_temp = 0
+ smooth_sfc_rh = 0
+ smooth_sfc_slp = 0
+ smooth_upper_wind = 0
+ smooth_upper_temp = 0
+ smooth_upper_rh = 0
+/
+OANML
+  docker cp "$WORK/namelist.oa" gomwrf:$OAWORK/namelist.oa
+  docker exec gomwrf bash -lc "cd $OAWORK && ./obsgrid.exe > obsgrid.log 2>&1" || true
+  echo "  --- obsgrid.log tail ---"
+  docker exec gomwrf bash -lc "cd $OAWORK && tail -25 obsgrid.log; echo; ls -l OBS_DOMAIN* 2>/dev/null || echo '(no OBS_DOMAIN produced)'"
+  # gate: OBS_DOMAIN101 must exist and be non-empty, else nudging is a silent no-op
+  if ! docker exec gomwrf bash -lc "test -s $OAWORK/OBS_DOMAIN101"; then
+    echo "FATAL: obsgrid produced no OBS_DOMAIN101 -> obs-nudging would silently do nothing"
+    aws s3 cp "$WORK/wpsprd/obs.littler" "$S3/$DATE/$MODE/debug/obs.littler" || true
+    docker exec gomwrf cat "$OAWORK/obsgrid.log" | aws s3 cp - "$S3/$DATE/$MODE/debug/obsgrid.log" || true
+    exit 47
+  fi
+  # WRF reads OBS_DOMAINX01 per domain; identical file works (WRF drops out-of-domain obs)
+  docker exec gomwrf bash -lc "cd $OAWORK && for D in 1 2 3; do cp OBS_DOMAIN101 /home/wrfprd/OBS_DOMAIN\${D}01; done"
+  echo "  OBS_DOMAIN101 -> wrfprd/OBS_DOMAIN{1,2,3}01"
+
+  if [ "$OBSGRID_ONLY" = 1 ]; then
+    echo "### obsgrid-only: uploading OBS_DOMAIN + logs, skipping real/wrf (cheap gate)"
+    docker exec gomwrf cat "$OAWORK/obsgrid.log" | aws s3 cp - "$S3/$DATE/$MODE/obsgrid/obsgrid.log" || true
+    aws s3 cp "$WORK/wpsprd/obs.littler" "$S3/$DATE/$MODE/obsgrid/obs.littler" || true
+    aws s3 cp "$WORK/wrfprd/OBS_DOMAIN101" "$S3/$DATE/$MODE/obsgrid/OBS_DOMAIN101" || true
+    echo "=== obsgrid-only done: $S3/$DATE/$MODE/obsgrid/ (check obsgrid.log for obs kept after QC) ==="
+    exit 0
+  fi
 fi
 
 # On real/wrf failure the real diagnosis is in rsl.error.0000 (+ run_*.log), which
