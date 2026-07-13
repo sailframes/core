@@ -214,7 +214,10 @@ def main():
     ap.add_argument("--date", required=True, help="YYYY-MM-DD (run init at 00Z)")
     ap.add_argument("--run-hours", type=int, default=36)
     ap.add_argument("--pre-hours", type=int, default=2, help="include obs this many h before init (obs_twindo)")
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out", required=True, help="output path; with --split-interval this is the PREFIX (obsgrid reads <prefix>:<date>)")
+    ap.add_argument("--split-interval", type=int, default=0,
+                    help="seconds; if set, write one little_r per analysis period named <out>:YYYY-MM-DD_HH "
+                         "(obsgrid opens <obs_filename>:<date> per 3D analysis time)")
     ap.add_argument("--exclude", nargs="*", default=[], help="station ids to hold out (e.g. 44013)")
     a = ap.parse_args()
 
@@ -236,12 +239,30 @@ def main():
         records.extend(obs)
         summary.append(f"  {sid:8s} {len(obs):5d} reports  ({meta[3]})")
 
-    n = write_littler(records, a.out)
     print(f"little_r window {t0:%Y-%m-%d %H}Z .. {t1:%Y-%m-%d %H}Z, exclude={a.exclude or 'none'}")
     print("\n".join(summary))
-    print(f"WROTE {n} reports -> {a.out}")
-    if n == 0:
+    if not records:
         print("FATAL: no obs written", file=sys.stderr); sys.exit(2)
+
+    if a.split_interval:
+        # obsgrid opens <prefix>:<date> for each 3D analysis time -> bin each report to its
+        # NEAREST period (obs keep their real timestamps inside the file; missing periods are
+        # treated as empty by obsgrid). Periods run d0 .. d0+run_hours every split_interval.
+        step = dt.timedelta(seconds=a.split_interval)
+        nper = int(a.run_hours * 3600 / a.split_interval)
+        periods = [d0 + i * step for i in range(nper + 1)]
+        bins = {}
+        for r in records:
+            p = min(periods, key=lambda pp: abs((r["t"] - pp).total_seconds()))
+            bins.setdefault(p, []).append(r)
+        total = 0
+        for p, recs in sorted(bins.items()):
+            path = f"{a.out}:{p:%Y-%m-%d_%H}"
+            total += write_littler(recs, path)
+        print(f"WROTE {total} reports across {len(bins)} period files -> {a.out}:<date>")
+    else:
+        n = write_littler(records, a.out)
+        print(f"WROTE {n} reports -> {a.out}")
 
 
 if __name__ == "__main__":

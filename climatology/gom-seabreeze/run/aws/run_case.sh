@@ -237,18 +237,20 @@ fi
 if [ "$OBS_NUDGE" = 1 ]; then
   echo "### 6b. obs-nudging: race-zone little_r -> obsgrid.exe -> OBS_DOMAIN101 (copied to d02/d03)"
   ex=""; [ -n "$OBS_EXCLUDE" ] && ex="--exclude $OBS_EXCLUDE"
-  # little_r on the HOST venv (needs internet); lands in wpsprd (bind-mounted to /home/wpsprd)
+  case "$MODE" in hindcast|hrrr) OA_INT=3600;; *) OA_INT=10800;; esac
+  # per-period little_r on the HOST venv (needs internet) -> wpsprd (bind-mounted /home/wpsprd).
+  # obsgrid opens obs:<date> for each analysis time, so write one file per period (--split-interval).
   "$VENV/bin/python" "$REPO/obs/fetch_obs_littler.py" --date "$DATE" --run-hours "$RUN_HOURS" \
-    --out "$WORK/wpsprd/obs.littler" $ex || { echo "FATAL: obs fetch failed"; exit 46; }
+    --out "$WORK/wpsprd/obs" --split-interval "$OA_INT" $ex || { echo "FATAL: obs fetch failed"; exit 46; }
 
-  # obsgrid reads met_em.d01.* (first guess) + the little_r, writes OBS_DOMAIN101. Run in its
-  # OWN dir with met_em symlinked so it cannot overwrite the SST-patched wpsprd met_em.
+  # obsgrid reads met_em.d01.* (first guess) + obs:<date>, writes OBS_DOMAIN101. Run in its OWN
+  # dir with met_em + the per-period obs files symlinked so it can't overwrite the SST-patched met_em.
   OAWORK=/home/oaprd
   docker exec gomwrf bash -lc "rm -rf $OAWORK && mkdir -p $OAWORK && cd $OAWORK && \
-    ln -sf /home/wpsprd/met_em.d01.*.nc . && ln -sf /home/wpsprd/obs.littler ./obs && \
+    ln -sf /home/wpsprd/met_em.d01.*.nc . && \
+    for f in /home/wpsprd/obs:*; do ln -sf \"\$f\" .; done && \
     ln -sf /comsoftware/wrf/OBSGRID/obsgrid.exe ."
 
-  case "$MODE" in hindcast|hrrr) OA_INT=3600;; *) OA_INT=10800;; esac
   read eY eM eD eH <<<"$(date -u -d "$DATE 00:00 UTC +${RUN_HOURS} hours" +'%Y %m %d %H')"
   sY=${DATE%%-*}; sM=$(echo "$DATE" | cut -d- -f2); sD=$(echo "$DATE" | cut -d- -f3)
   # QC: buddy + unverified OFF -- a ~6-station network has no buddies and 'unverified' would
@@ -323,7 +325,7 @@ OANML
   # gate: OBS_DOMAIN101 must exist and be non-empty, else nudging is a silent no-op
   if ! docker exec gomwrf bash -lc "test -s $OAWORK/OBS_DOMAIN101"; then
     echo "FATAL: obsgrid produced no OBS_DOMAIN101 -> obs-nudging would silently do nothing"
-    aws s3 cp "$WORK/wpsprd/obs.littler" "$S3/$DATE/$MODE/debug/obs.littler" || true
+    aws s3 cp "$WORK/wpsprd/" "$S3/$DATE/$MODE/debug/" --recursive --exclude "*" --include "obs:*" || true
     docker exec gomwrf cat "$OAWORK/obsgrid.log" | aws s3 cp - "$S3/$DATE/$MODE/debug/obsgrid.log" || true
     exit 47
   fi
@@ -334,7 +336,7 @@ OANML
   if [ "$OBSGRID_ONLY" = 1 ]; then
     echo "### obsgrid-only: uploading OBS_DOMAIN + logs, skipping real/wrf (cheap gate)"
     docker exec gomwrf cat "$OAWORK/obsgrid.log" | aws s3 cp - "$S3/$DATE/$MODE/obsgrid/obsgrid.log" || true
-    aws s3 cp "$WORK/wpsprd/obs.littler" "$S3/$DATE/$MODE/obsgrid/obs.littler" || true
+    aws s3 cp "$WORK/wpsprd/" "$S3/$DATE/$MODE/obsgrid/" --recursive --exclude "*" --include "obs:*" || true
     aws s3 cp "$WORK/wrfprd/OBS_DOMAIN101" "$S3/$DATE/$MODE/obsgrid/OBS_DOMAIN101" || true
     echo "=== obsgrid-only done: $S3/$DATE/$MODE/obsgrid/ (check obsgrid.log for obs kept after QC) ==="
     exit 0
