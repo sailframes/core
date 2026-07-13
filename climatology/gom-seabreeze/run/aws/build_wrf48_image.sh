@@ -50,10 +50,12 @@ RUN git clone --depth 1 -b v${WPS_VER} https://github.com/wrf-model/WPS.git WPS-
     cd WPS-${WPS_VER} && printf '1\n' | ./configure 2>&1 | tee /tmp/wps_conf.log && \
     ./compile > /tmp/wps_compile.log 2>&1; tail -30 /tmp/wps_compile.log && \
     test -x geogrid/src/geogrid.exe && test -x ungrib/src/ungrib.exe && test -x metgrid/src/metgrid.exe
-# OBSGRID (obs-nudging OBS_DOMAIN generator; unmaintained but functional).
+# OBSGRID (obs-nudging OBS_DOMAIN generator; unmaintained but functional). Option 2 =
+# gfortran (1 is PGI/pgf90, not installed). The plot utils need NCAR Graphics (-lncarg)
+# and fail-but-ignored -- we only need obsgrid.exe, so guard on it, not compile's rc.
 RUN git clone --depth 1 https://github.com/wrf-model/OBSGRID.git OBSGRID && \
-    cd OBSGRID && printf '1\n' | ./configure 2>&1 | tee /tmp/obsgrid_conf.log && \
-    ./compile > /tmp/obsgrid_compile.log 2>&1; tail -20 /tmp/obsgrid_compile.log && \
+    cd OBSGRID && printf '2\n' | ./configure 2>&1 | tee /tmp/obsgrid_conf.log && \
+    (./compile > /tmp/obsgrid_compile.log 2>&1 || true); tail -20 /tmp/obsgrid_compile.log && \
     test -x obsgrid.exe
 DOCKER
 set +e
