@@ -58,8 +58,8 @@
  dy                       = 9000, 3000, 1000, 333.33333, 111.11111,
  grid_id                  = 1, 2, 3, 4, 5,
  parent_id                = 1, 1, 2, 3, 4,
- i_parent_start           = 1, 28, 55, 7, 8,      ! VERIFY d04/d05 via geogrid placement pass
- j_parent_start           = 1, 30, 37, 34, 60,
+ i_parent_start           = 1, 28, 55, 7, 15,      ! VERIFY d04/d05 via geogrid placement pass
+ j_parent_start           = 1, 30, 37, 33, 60,
  parent_grid_ratio        = 1, 3, 3, 3, 3,
  parent_time_step_ratio   = 1, 3, 3, 3, 5,        ! d05 = 5 (not 3) for CFL at 111 m
  feedback                 = 0,
