@@ -175,13 +175,47 @@ AUX11_BLOCK = """\
 
 
 def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs_nudge=False,
-                     obs_nudge_doms="1, 1, 1"):
+                     obs_nudge_doms="1, 1, 1", les=False, les_d04_hour=14, les_d05_hour=15):
     cfg = MODE_CFG[mode]
     gcfg = GEOG_CFG[geog_detail]
     y, m, d = map(int, date.split("-"))
     start = dt.datetime(y, m, d, start_hour)
     end = start + dt.timedelta(hours=run_hours)
     triple = lambda v: f"{v}, {v}, {v},"
+    if les:
+        # 5-domain LES render (namelist.*.les): parents run [start,end]; LES nests d04/d05
+        # start later (staggered late-start) and end with the parents. Uses the template's
+        # RUC/modis physics defaults (30s geog); nlcd on 5 LES domains is a later refinement.
+        quint = lambda v: f"{v}, {v}, {v}, {v}, {v},"
+        wps = (TEMPLATES / "namelist.wps.les").read_text()
+        wps = set_nml(wps, "start_date", quint(f"'{start:%Y-%m-%d_%H:%M:%S}'"))
+        wps = set_nml(wps, "end_date", quint(f"'{end:%Y-%m-%d_%H:%M:%S}'"))
+        wps = set_nml(wps, "interval_seconds", f"{cfg['interval_seconds']},")
+        wps = set_nml(wps, "geog_data_path", f"'{WPSGEOG}'")
+        WPS_DIR.mkdir(parents=True, exist_ok=True)
+        (WPS_DIR / "namelist.wps").write_text(wps)
+
+        inp = (TEMPLATES / "namelist.input.les").read_text()
+        inp = set_nml(inp, "run_hours", f"{run_hours},")
+        inp = set_nml(inp, "start_year", quint(f"{start:%Y}"))
+        inp = set_nml(inp, "start_month", quint(f"{start:%m}"))
+        inp = set_nml(inp, "start_day", quint(f"{start:%d}"))
+        inp = set_nml(inp, "start_hour",
+                      f"{start:%H}, {start:%H}, {start:%H}, {les_d04_hour:02d}, {les_d05_hour:02d},")
+        inp = set_nml(inp, "end_year", quint(f"{end:%Y}"))
+        inp = set_nml(inp, "end_month", quint(f"{end:%m}"))
+        inp = set_nml(inp, "end_day", quint(f"{end:%d}"))
+        inp = set_nml(inp, "end_hour", quint(f"{end:%H}"))
+        inp = set_nml(inp, "interval_seconds", f"{cfg['interval_seconds']},")
+        inp = set_nml(inp, "num_metgrid_levels", f"{cfg['num_metgrid_levels']},")
+        inp = set_nml(inp, "num_metgrid_soil_levels", f"{cfg['num_metgrid_soil_levels']},")
+        inp = set_nml(inp, "auxinput4_end_h", f"{run_hours},")
+        WRF_RUN.mkdir(parents=True, exist_ok=True)
+        (WRF_RUN / "namelist.input").write_text(inp)
+        print(f"  rendered LES namelists: {start:%Y-%m-%d_%H}Z +{run_hours}h  "
+              f"d04@{les_d04_hour:02d}Z d05@{les_d05_hour:02d}Z  levels={cfg['num_metgrid_levels']}  "
+              f"5 domains (9/3/1km/333m/111m)")
+        return
 
     # --- namelist.wps ---
     wps = (TEMPLATES / "namelist.wps").read_text()
@@ -321,12 +355,16 @@ def main():
     ap.add_argument("--obs-nudge-doms", default="1, 1, 1",
                     help="per-domain obs_nudge_opt (default '1, 1, 1'; '1, 1, 0' = d01/d02 only for "
                          "held-out validation; '0, 0, 0' = YSU physics-matched free baseline)")
+    ap.add_argument("--les", action="store_true",
+                    help="5-domain LES mode: add d04 333m + d05 111m nests (namelist.*.les) for gusts")
+    ap.add_argument("--les-d04-hour", type=int, default=14, help="LES d04 start hour UTC (default 14)")
+    ap.add_argument("--les-d05-hour", type=int, default=15, help="LES d05 start hour UTC (default 15)")
     args = ap.parse_args()
     DRY = args.dry
 
-    print(f"=== gom-seabreeze: {args.date}  mode={args.mode}  {args.run_hours}h ===")
+    print(f"=== gom-seabreeze: {args.date}  mode={args.mode}  {args.run_hours}h{' LES' if args.les else ''} ===")
     render_namelists(args.date, args.mode, args.start_hour, args.run_hours, args.geog_detail,
-                     args.obs_nudge, args.obs_nudge_doms)
+                     args.obs_nudge, args.obs_nudge_doms, args.les, args.les_d04_hour, args.les_d05_hour)
     if args.render_only:
         return
 
