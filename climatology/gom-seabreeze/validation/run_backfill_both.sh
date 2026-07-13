@@ -5,7 +5,8 @@
 #   AWS_PROFILE=sailframes ./run_backfill_both.sh [YYYY-MM-DD]
 set -euo pipefail
 DATE="${1:-2026-07-04}"; REGION="${AWS_REGION:-us-east-1}"
-S3="${GOM_S3:-s3://sailframes-data-prod/gom}"; WEB="s3://sailframes-data-prod/climatology"
+S3="${GOM_S3:-s3://sailframes-data-prod/gom}"
+WEB="$S3/$DATE/web"   # gom-seabreeze-ec2 role can write gom/* but NOT climatology/*; a local step copies web/ -> climatology/
 PROFILE_NAME="${GOM_INSTANCE_PROFILE:-gom-seabreeze-ec2}"
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/.." && pwd)"
 AMI=$(aws ssm get-parameter --region "$REGION" --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 --query Parameter.Value --output text)
