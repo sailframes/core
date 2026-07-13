@@ -22,8 +22,8 @@ python3.11 -m venv /root/venv
 /root/venv/bin/pip -q install --upgrade pip
 /root/venv/bin/pip -q install numpy xarray netCDF4 matplotlib
 aws s3 cp "$S3/code/gom-seabreeze.tar.gz" /root/gom.tar.gz
-mkdir -p /root/code && tar xzf /root/gom.tar.gz -C /root
-SCRIPT=$(find /root/code -name compare_holdout_44013.py | head -1)
+tar xzf /root/gom.tar.gz -C /root
+SCRIPT=$(find /root -name compare_holdout_44013.py | head -1)
 set +e
 /root/venv/bin/python "$SCRIPT" --date "$DATE" \
   --run "freerun-ysu=$S3/$DATE/freerun-ysu" \

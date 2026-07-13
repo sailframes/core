@@ -20,8 +20,8 @@ DATE="@@DATE@@"; S3="@@S3@@"
 dnf install -y python3.11 python3.11-pip tar gzip >/dev/null
 python3.11 -m venv /root/venv; /root/venv/bin/pip -q install --upgrade pip
 /root/venv/bin/pip -q install numpy xarray netCDF4 matplotlib
-aws s3 cp "$S3/code/gom-seabreeze.tar.gz" /root/gom.tar.gz; mkdir -p /root/code; tar xzf /root/gom.tar.gz -C /root
-SC=$(find /root/code -name yellow_zone_eval.py | head -1)
+aws s3 cp "$S3/code/gom-seabreeze.tar.gz" /root/gom.tar.gz; tar xzf /root/gom.tar.gz -C /root
+SC=$(find /root -name yellow_zone_eval.py | head -1)
 set +e
 /root/venv/bin/python "$SC" \
   --run "nudged=$S3/$DATE/nudged" --run "free-YSU=$S3/$DATE/freerun-ysu" \
