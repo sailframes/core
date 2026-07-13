@@ -374,6 +374,14 @@ echo "### 8. wrf.exe (mpirun -np $NPROCS) -> wrfout_d03"
 if ! docker exec -e OMPI_ALLOW_RUN_AS_ROOT=1 -e OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
      gomwrf /home/scripts/common/run_wrf.ksh -np "$NPROCS"; then push_debug "wrf.exe"; exit 45; fi
 
+if [ "$OBS_NUDGE" = 1 ]; then
+  # advisor gate: confirm FDDA actually engaged (else nudging is a silent no-op -- e.g. if
+  # em_real was built without FDDA). rsl.out.0000 logs obs-nudging activity; capture it.
+  echo "### 8b. verify obs-nudging engaged (rsl.out 'nudging')"
+  docker exec gomwrf bash -lc "grep -iE 'nudg|obs_nudge|fdda|OBS_DOMAIN' /home/wrfprd/rsl.out.0000 | head -20" || true
+  aws s3 cp "$WORK/wrfprd/rsl.out.0000" "$S3/$DATE/$MODE/rsl.out.0000" || true
+fi
+
 echo "### 9. push wrfout -> S3"
 # aws s3 cp --recursive can return 2 on a transient skip even when every file uploaded
 # (seen on the :4.8 validation: rc=2 yet all 219 frames present). Don't let that spurious
