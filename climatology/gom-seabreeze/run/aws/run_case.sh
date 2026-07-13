@@ -307,6 +307,14 @@ if [ "$OBS_NUDGE" = 1 ]; then
  smooth_upper_temp = 0
  smooth_upper_rh = 0
 /
+&record9
+ oa_type = 'Cressman'
+ radius_influence = 0,
+ mqd_minimum_num_obs = 30
+ mqd_maximum_num_obs = 1000
+ oa_min_switch = .TRUE.
+ oa_max_switch = .TRUE.
+/
 OANML
   docker cp "$WORK/namelist.oa" gomwrf:$OAWORK/namelist.oa
   docker exec gomwrf bash -lc "cd $OAWORK && ./obsgrid.exe > obsgrid.log 2>&1" || true

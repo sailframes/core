@@ -84,8 +84,10 @@ def fetch_ndbc(sid, t0, t1):
             continue
         def val(i, conv=float):
             return None if c[i] == "MM" else conv(c[i])
-        wdir = val(5); wspd = val(6)          # degT, m/s
-        pres = val(13); atmp = val(14); dewp = val(16)  # hPa, degC, degC
+        # cols: 0-4 YY MM DD hh mm | 5 WDIR 6 WSPD 7 GST 8 WVHT 9 DPD 10 APD 11 MWD |
+        #       12 PRES 13 ATMP 14 WTMP 15 DEWP 16 VIS ...
+        wdir = val(5); wspd = val(6)                    # degT, m/s
+        pres = val(12); atmp = val(13); dewp = val(15)  # hPa, degC (air), degC
         obs.append(dict(t=t, wspd=wspd, wdir=wdir,
                         tempK=(atmp + 273.15) if atmp is not None else None,
                         dewK=(dewp + 273.15) if dewp is not None else None,
