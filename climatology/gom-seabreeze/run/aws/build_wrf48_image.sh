@@ -51,19 +51,16 @@ RUN git clone --depth 1 -b v${WPS_VER} https://github.com/wrf-model/WPS.git WPS-
     ./compile > /tmp/wps_compile.log 2>&1; tail -30 /tmp/wps_compile.log && \
     test -x geogrid/src/geogrid.exe && test -x ungrib/src/ungrib.exe && test -x metgrid/src/metgrid.exe
 # OBSGRID (obs-nudging OBS_DOMAIN generator; unmaintained but functional). Option 2 =
-# gfortran (1 is PGI/pgf90, not installed). Its configure.oa FFLAGS omit
-# -fallow-argument-mismatch, which gfortran 10+ requires for this 2016 code (WRF/WPS
-# configure add it automatically; OBSGRID's doesn't) -- inject it. The plot utils also
-# need NCAR Graphics (-lncarg) and fail-but-ignored; we only need obsgrid.exe, so guard
-# on it. On failure, surface the real obsgrid.exe errors (not just the plot-util tail).
+# gfortran (1 is PGI/pgf90, not installed). NON-FATAL: WRF+WPS above are the payload and
+# compile cleanly; OBSGRID is a tiny standalone tool that we iterate on separately (thin
+# follow-up layer, no WRF recompile). The RUN always exits 0 so the :4.8 image pushes with
+# WRF+WPS regardless; the log records whether obsgrid.exe built and, if not, the real error.
 RUN git clone --depth 1 https://github.com/wrf-model/OBSGRID.git OBSGRID && \
     cd OBSGRID && printf '2\n' | ./configure 2>&1 | tee /tmp/obsgrid_conf.log && \
-    sed -i -E 's/^(FFLAGS[[:space:]]*=.*)/\1 -fallow-argument-mismatch -fallow-invalid-boz/; s/^(F77FLAGS[[:space:]]*=.*)/\1 -fallow-argument-mismatch -fallow-invalid-boz/' configure.oa && \
-    grep -E '^(FFLAGS|F77FLAGS)' configure.oa && \
     (./compile > /tmp/obsgrid_compile.log 2>&1 || true); \
-    echo '=== obsgrid errors (non-ignored) ==='; grep -iE 'error|obsgrid\.exe' /tmp/obsgrid_compile.log | grep -vi ignored | tail -40; \
-    echo '=== last 30 lines ==='; tail -30 /tmp/obsgrid_compile.log && \
-    test -x obsgrid.exe
+    echo '=== obsgrid errors (non-ignored) ==='; grep -iE 'error|undefined|obsgrid\.exe' /tmp/obsgrid_compile.log | grep -vi ignored | tail -50; \
+    echo '=== last 30 lines ==='; tail -30 /tmp/obsgrid_compile.log; \
+    if [ -x obsgrid.exe ]; then echo 'OBSGRID_OK'; else echo 'OBSGRID_MISSING (non-fatal)'; fi; true
 DOCKER
 set +e
 docker build -t @@ECR@@:@@TAG@@ /build; BRC=$?
