@@ -25,6 +25,7 @@ OBS_NUDGE="${GOM_OBS_NUDGE:-0}"             # 1 = obs (station) nudging (needs :
 OBSGRID_ONLY="${GOM_OBSGRID_ONLY:-0}"       # 1 = stop after obsgrid (cheap obs-nudging gate)
 OBS_EXCLUDE="${GOM_OBS_EXCLUDE:-}"          # station ids to hold out (e.g. 44013 for validation)
 OBS_NUDGE_DOMS="${GOM_OBS_NUDGE_DOMS:-1,1,1}"  # 1,1,1 product | 1,1,0 d01/d02-only validation | 0,0,0 YSU free baseline
+LES="${GOM_LES:-0}"; LES_D04_HOUR="${GOM_LES_D04_HOUR:-12}"; LES_D05_HOUR="${GOM_LES_D05_HOUR:-13}"  # 5-domain LES (gusts)
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
 
 echo "### upload the gom-seabreeze code so the instance can pull it (no git auth needed)"
@@ -44,6 +45,7 @@ UD=$(sed -e "s|@@DATE@@|$DATE|g" -e "s|@@MODE@@|$MODE|g" -e "s|@@RUN_HOURS@@|$RU
         -e "s|@@IMAGE@@|$IMAGE|g" -e "s|@@WRF_VER@@|$WRF_VER|g" -e "s|@@WPS_VER@@|$WPS_VER|g" \
         -e "s|@@OBS_NUDGE@@|$OBS_NUDGE|g" -e "s|@@OBSGRID_ONLY@@|$OBSGRID_ONLY|g" -e "s|@@OBS_EXCLUDE@@|$OBS_EXCLUDE|g" \
         -e "s|@@OBS_NUDGE_DOMS@@|$OBS_NUDGE_DOMS|g" \
+        -e "s|@@LES@@|$LES|g" -e "s|@@LES_D04_HOUR@@|$LES_D04_HOUR|g" -e "s|@@LES_D05_HOUR@@|$LES_D05_HOUR|g" \
         "$HERE/userdata.sh" | base64)
 
 echo "### launch (Spot, terminate-on-shutdown, 150 GB gp3 for geog+work)"

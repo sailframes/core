@@ -36,6 +36,9 @@ OBS_NUDGE="${GOM_OBS_NUDGE:-0}"               # 1 = obs (station) nudging: littl
 OBSGRID_ONLY="${GOM_OBSGRID_ONLY:-0}"         # 1 = stop after obsgrid (report obs kept + OBS_DOMAIN), no real/wrf (cheap gate)
 OBS_EXCLUDE="${GOM_OBS_EXCLUDE:-}"            # station ids to hold out of the little_r (e.g. "44013" for validation)
 OBS_NUDGE_DOMS="${GOM_OBS_NUDGE_DOMS:-1,1,1}" # per-domain obs_nudge_opt: 1,1,1 product | 1,1,0 d01/d02-only validation | 0,0,0 YSU free baseline
+LES="${GOM_LES:-0}"                           # 1 = 5-domain LES (d04 333m + d05 111m) for gusts (needs :4.8)
+LES_D04_HOUR="${GOM_LES_D04_HOUR:-12}"        # LES d04 start hour UTC (default 12 = 08 ET, spin-up before the race)
+LES_D05_HOUR="${GOM_LES_D05_HOUR:-13}"        # LES d05 start hour UTC (default 13)
 NLCD_URL="${GOM_NLCD_URL:-https://www2.mmm.ucar.edu/wrf/src/wps_files/nlcd2011_ll_9s.tar.bz2}"
 CASE=gom
 DTC_RAW="https://raw.githubusercontent.com/NCAR/container-dtc-nwp/main/components/scripts/common"
@@ -47,6 +50,7 @@ GEOGROOT=/data/geog; GEOGROOT_HOST="$GEOG"
 [ -d "$GEOG/WPS_GEOG" ] && { GEOGROOT=/data/geog/WPS_GEOG; GEOGROOT_HOST="$GEOG/WPS_GEOG"; }
 render_flags=()
 [ "$OBS_NUDGE" = 1 ] && render_flags+=(--obs-nudge --obs-nudge-doms "$OBS_NUDGE_DOMS")
+[ "$LES" = 1 ] && render_flags+=(--les --les-d04-hour "$LES_D04_HOUR" --les-d05-hour "$LES_D05_HOUR")
 GOM_WPS="$WORK/scripts/case" GOM_WRFRUN="$WORK/scripts/case" GOM_WPSGEOG="$GEOGROOT" \
   "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
   --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" "${render_flags[@]}" --render-only
@@ -182,6 +186,20 @@ echo "### 5. WPS (geogrid/ungrib/metgrid) -> met_em in wpsprd"
 # run_wps links only *.exe into wpsprd; geogrid/metgrid look for GEOGRID.TBL /
 # METGRID.TBL under ./geogrid ./metgrid -> symlink those table dirs in first
 docker exec gomwrf bash -lc "cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid . && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/metgrid ."
+
+if [ "$LES" = 1 ] && [ "$GEOGRID_ONLY" = 1 ]; then
+  echo "### 5-LES. geogrid.exe (5 domains) -> geo_em.d01-05 + verify d04/d05 placement (cheap gate)"
+  docker exec gomwrf bash -lc "cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid.exe . && cp /home/scripts/case/namelist.wps . && ./geogrid.exe" || { echo "FATAL: geogrid (5-dom) failed"; docker exec gomwrf tail -30 /home/wpsprd/geogrid.log 2>/dev/null; exit 5; }
+  echo "  --- geo_em produced ---"; docker exec gomwrf bash -lc "ls -la /home/wpsprd/geo_em.d0*.nc"
+  echo "  --- d04/d05 placement (CEN_LAT/LON should put d05 on 42.46,-70.77; corners show extent/fetch) ---"
+  for dm in 03 04 05; do
+    echo "  geo_em.d${dm}:"
+    docker exec gomwrf bash -lc "ncdump -h /home/wpsprd/geo_em.d${dm}.nc 2>/dev/null | grep -E ':CEN_LAT|:CEN_LON|:corner_lats|:corner_lons' | sed 's/^[[:space:]]*/    /'"
+  done
+  aws s3 cp "$WORK/wpsprd/" "$S3/$DATE/les/geoqc/" --recursive --exclude "*" --include "geo_em.d0*.nc" || true
+  echo "=== LES geogrid gate done: d05 CEN ~42.46,-70.77? d04 extends SE (upwind)? both clear relax zones? ==="
+  exit 0
+fi
 
 if [ "$GEOGRID_ONLY" = 1 ]; then
   echo "### 5-only. geogrid.exe -> geo_em + landmask QC (no GFS/real/wrf)"
