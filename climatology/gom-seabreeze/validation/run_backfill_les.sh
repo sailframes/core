@@ -23,7 +23,8 @@ python3.11 -m venv /root/venv; /root/venv/bin/pip -q install --upgrade pip
 aws s3 cp "$S3/code/gom-seabreeze.tar.gz" /root/gom.tar.gz; tar xzf /root/gom.tar.gz -C /root
 BF=$(find /root -name backfill_wrf.py | head -1)
 set +e; RC=0
-/root/venv/bin/python "$BF" --date "$DATE" --s3 "$S3/$DATE/forecast" --domain d05 --out-dir /mnt/wrf-les || RC=$?
+mkdir -p /mnt/wrfdl   # stage on the root/EBS fs, NOT /tmp (tmpfs on AL2023 -> "No space")
+/root/venv/bin/python "$BF" --date "$DATE" --s3 "$S3/$DATE/forecast" --src /mnt/wrfdl --domain d05 --out-dir /mnt/wrf-les || RC=$?
 aws s3 cp "/mnt/wrf-les/" "$S3/$DATE/web/wrf-les/" --recursive || RC=$?
 set -e
 echo "PUBLISHED d05 -> $S3/$DATE/web/wrf-les/"

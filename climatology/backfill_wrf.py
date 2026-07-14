@@ -141,8 +141,9 @@ def main():
     ap.add_argument("--no-grid", action="store_true", help="skip rewriting grid.json (static)")
     ap.add_argument("--domain", default="d03", help="wrf domain: d03 (1km race, default) or d05 (LES 111m gusts)")
     a = ap.parse_args()
-    global DOMAIN
+    global DOMAIN, FRAME_RE
     DOMAIN = a.domain
+    FRAME_RE = re.compile(r"wrfout_" + DOMAIN + r"_(\d{4}-\d{2}-\d{2}_\d{2}:\d{2}:\d{2})")
 
     src = a.src
     if a.s3:
