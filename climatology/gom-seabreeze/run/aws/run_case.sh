@@ -108,14 +108,27 @@ echo "### 3. stage GFS 0.25 from the AWS Open Data archive (public, in-region)"
 if [ "$GEOGRID_ONLY" = 1 ]; then
   echo "  geogrid-only: skipping driver GRIB (geogrid needs no meteorology)"
 elif [ "$MODE" = hrrr ]; then
-  # HRRR-driven: hourly F00 ANALYSES (obs-assimilated each hour) as ICs/LBCs.
-  # valid time = DATE 00Z + hh; pull hrrr.t<HH>z.wrfprsf00 from that day's dir.
-  for hh in $(seq 0 "$RUN_HOURS"); do
-    vt=$(date -u -d "$DATE 00:00 UTC +${hh} hours" +%Y%m%d_%H)
-    vymd=${vt%_*}; vhh=${vt#*_}; dest="$WORK/model_data/$CASE/hrrr.${vt}.f00.grib2"
-    [ -s "$dest" ] || { echo "  HRRR analysis +${hh}h (${vymd} t${vhh}z)"; aws s3 cp --no-sign-request --quiet \
-      "s3://noaa-hrrr-bdp-pds/hrrr.${vymd}/conus/hrrr.t${vhh}z.wrfprsf00.grib2" "$dest"; }
-  done
+  # HRRR-driven. Use NATIVE wrfnat (not isobaric wrfprs): Vtable.raphrrr maps HRRR's native
+  # hybrid levels (grib level type 109), NOT isobaric (100) -> wrfprs ungribs to 1 level (met_em
+  # BOTTOM-TOP=1, real FATAL). GOM_HRRR_CYCLE set = FORECAST (F00..FNN of ONE cycle, for day-of
+  # ops); unset = analysis stitch (F00 of each valid hour, for hindcast/validation).
+  ymd=${DATE//-/}
+  if [ -n "${GOM_HRRR_CYCLE:-}" ]; then
+    cyc=$(printf '%02d' "$GOM_HRRR_CYCLE")
+    echo "  HRRR FORECAST from ${ymd} t${cyc}z, F00..F${RUN_HOURS}"
+    for fh in $(seq 0 "$RUN_HOURS"); do
+      fh2=$(printf '%02d' "$fh"); dest="$WORK/model_data/$CASE/hrrr.${ymd}_${cyc}.f${fh2}.grib2"
+      [ -s "$dest" ] || aws s3 cp --no-sign-request --quiet \
+        "s3://noaa-hrrr-bdp-pds/hrrr.${ymd}/conus/hrrr.t${cyc}z.wrfnatf${fh2}.grib2" "$dest"
+    done
+  else
+    for hh in $(seq 0 "$RUN_HOURS"); do
+      vt=$(date -u -d "$DATE 00:00 UTC +${hh} hours" +%Y%m%d_%H)
+      vymd=${vt%_*}; vhh=${vt#*_}; dest="$WORK/model_data/$CASE/hrrr.${vt}.f00.grib2"
+      [ -s "$dest" ] || { echo "  HRRR analysis +${hh}h (${vymd} t${vhh}z)"; aws s3 cp --no-sign-request --quiet \
+        "s3://noaa-hrrr-bdp-pds/hrrr.${vymd}/conus/hrrr.t${vhh}z.wrfnatf00.grib2" "$dest"; }
+    done
+  fi
 elif [ "$MODE" = forecast ]; then
   ymd=${DATE//-/}
   for fh in $(seq 0 3 "$RUN_HOURS"); do

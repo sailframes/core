@@ -60,7 +60,7 @@ MODE_CFG = {
     # HRRR-driven: obs-anchored mean (HRRR assimilates radar/surface/buoy). 40 isobaric
     # levels + surface = 41; HRRR carries RUC 9-level soil (real.exe interpolates to Noah's
     # 4). Hourly F00 analyses (interval 3600). Vtable.raphrrr ships with WPS.
-    "hrrr":     dict(num_metgrid_levels=41, num_metgrid_soil_levels=9, interval_seconds=3600,  fdda=False, vtable="Vtable.raphrrr"),
+    "hrrr":     dict(num_metgrid_levels=51, num_metgrid_soil_levels=9, interval_seconds=3600,  fdda=False, vtable="Vtable.raphrrr"),
 }
 
 # Static-geography detail (land-use / land-WATER mask). The mask sets WHERE the
