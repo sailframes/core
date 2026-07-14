@@ -139,7 +139,10 @@ def main():
     ap.add_argument("--s3", help="s3://bucket/prefix holding wrfout_d03_* (downloaded first)")
     ap.add_argument("--out-dir", default="climatology/_local/wrf")
     ap.add_argument("--no-grid", action="store_true", help="skip rewriting grid.json (static)")
+    ap.add_argument("--domain", default="d03", help="wrf domain: d03 (1km race, default) or d05 (LES 111m gusts)")
     a = ap.parse_args()
+    global DOMAIN
+    DOMAIN = a.domain
 
     src = a.src
     if a.s3:
