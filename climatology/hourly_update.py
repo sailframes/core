@@ -201,7 +201,9 @@ def main():
     try:
         import subprocess as _sp, sys as _sys
         _here = os.path.dirname(os.path.abspath(__file__))
-        _ds = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"; _bo = os.path.join(WORK, "breeze")
+        # ABSOLUTE out-dir: breeze_day runs with cwd=climatology, hourly_update with cwd=repo root,
+        # so a relative --out-dir resolves to two different places (upload then can't find the file).
+        _ds = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"; _bo = os.path.abspath(os.path.join(WORK, "breeze"))
         _sp.run([_sys.executable, "breeze_day.py", "--date", _ds, "--forecast-cycle", cyc,
                  "--fields-key", f"{PFX}/today/latest.parquet", "--out-dir", _bo],
                 check=True, timeout=220, cwd=_here)
