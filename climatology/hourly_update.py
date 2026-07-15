@@ -195,6 +195,22 @@ def main():
                    ExtraArgs={"ContentType": "application/octet-stream", "CacheControl": "max-age=120"})
     log(f"today/latest.parquet: F00-F{nlead} ({merged.num_rows} rows) from {base:%Y-%m-%dT%H}Z")
 
+    # day-of Bernot sea-breeze FORECAST -> breeze/<date>.json, so /tactics' breeze walkthrough
+    # forecasts the race day (not just replays past days). Extra fields (CAPE/VIS/925/850/HPBL)
+    # come from THIS cycle's F1..F18 cube; core wind/T/cloud from today/latest.parquet. Non-fatal.
+    try:
+        import subprocess as _sp, sys as _sys
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _ds = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"; _bo = os.path.join(WORK, "breeze")
+        _sp.run([_sys.executable, "breeze_day.py", "--date", _ds, "--forecast-cycle", cyc,
+                 "--fields-key", f"{PFX}/today/latest.parquet", "--out-dir", _bo],
+                check=True, timeout=220, cwd=_here)
+        s3.upload_file(os.path.join(_bo, f"{_ds}.json"), BUCKET, f"{PFX}/breeze/{_ds}.json",
+                       ExtraArgs={"ContentType": "application/json", "CacheControl": "max-age=300"})
+        log(f"breeze/{_ds}.json day-of FORECAST from {cyc}")
+    except Exception as _e:
+        log(f"WARN breeze day-of forecast failed ({_e}); breeze view stays replay-only")
+
     # briefing feature vector for the analog finder
     s3.download_file(BUCKET, f"{PFX}/grid.json", os.path.join(WORK, "grid.json"))
     grid = json.load(open(os.path.join(WORK, "grid.json")))
