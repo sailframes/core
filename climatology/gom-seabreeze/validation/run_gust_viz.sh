@@ -77,4 +77,6 @@ IID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type
   --instance-initiated-shutdown-behavior terminate --user-data "$UD" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=gom-gust-viz}]" \
   --query 'Instances[0].InstanceId' --output text)
-echo "launched (on-demand) $IID -> $S3/$DATE/gust/ (pressure_movie + gustiness + point_trace + step5; done.txt)"
+echo "launched (on-demand) $IID -> $S3/$DATE/gust${SUFFIX}/ (pressure_movie + gustiness + point_trace + step5 + obs_check; done.txt)"
+echo "IMPORTANT: the EC2 role writes gom/ only. To publish to the dashboard, run when done:"
+echo "  AWS_PROFILE=sailframes $HERE/promote_gust.sh $DATE \"$SUFFIX\" --wait"
