@@ -30,7 +30,43 @@
   border-bottom: 1px solid #e5eaef;
 }
 .sf-sr-title { font-size: 15px; }
-.sf-sr-race-name { color: #51606d; font-size: 13px; flex: 1; }
+.sf-sr-race-name { color: #51606d; font-size: 13px; }
+
+/* Class-start picker chips in the header. Hidden for single-start races. */
+.sf-sr-class-picker {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+  justify-content: flex-end;
+  padding-right: 8px;
+  flex-wrap: wrap;
+}
+.sf-sr-class-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #1f2d3d;
+  background: #fff;
+  border: 1px solid #c9d2da;
+  border-radius: 14px;
+  cursor: pointer;
+}
+.sf-sr-class-chip:hover {
+  border-color: #5b8def;
+}
+.sf-sr-class-chip-selected {
+  background: #1f2d3d;
+  color: #fff;
+  border-color: #1f2d3d;
+}
+.sf-sr-class-chip-time {
+  font-family: monospace;
+  opacity: 0.75;
+  font-size: 11px;
+}
 .sf-sr-close {
   width: 30px; height: 30px;
   border: 1px solid transparent; background: transparent;

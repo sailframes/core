@@ -101,6 +101,28 @@
                         <input type="date" id="regatta-end-date">
                     </div>
                 </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="regatta-rating-system">Rating System</label>
+                        <select id="regatta-rating-system">
+                            <option value="ORR-EZ">ORR-EZ</option>
+                            <option value="PHRF">PHRF</option>
+                            <option value="One-Design">One-Design</option>
+                            <option value="ORR">ORR</option>
+                            <option value="IRC">IRC</option>
+                            <option value="Other">Other</option>
+                        </select>
+                        <div class="form-hint">Default scoring. Per-race classes can override.</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="regatta-start-sequence">Start Sequence</label>
+                        <select id="regatta-start-sequence">
+                            <option value="5">5-minute (RRS 26 — keelboat)</option>
+                            <option value="3">3-minute (Appendix S — dinghy)</option>
+                        </select>
+                        <div class="form-hint">Warning-to-gun timing for the start review.</div>
+                    </div>
+                </div>
                 <div class="form-group">
                     <label for="regatta-nor-url">Notice of Race (URL)</label>
                     <input type="url" id="regatta-nor-url" placeholder="https://…">

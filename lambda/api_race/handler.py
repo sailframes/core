@@ -318,6 +318,11 @@ def create_regatta(body):
         'nor_url': body.get('nor_url'),
         'si_url': body.get('si_url'),
         'website_url': body.get('website_url'),
+        # Visibility gate. 'admin' = hidden from non-admins in the events
+        # browser + race.html regatta picker and site-wide auto-load. This
+        # is frontend-only obscurity (the API itself stays open — a direct
+        # regatta/race id is still fetchable). Anything else / absent = public.
+        'visibility': body.get('visibility') or 'public',
         'race_ids': [],
         'created_at': now,
         'updated_at': now,
@@ -342,7 +347,7 @@ def update_regatta(regatta_id, body):
             for key in ['name', 'venue', 'boat_class', 'rating_system',
                         'start_sequence_minutes',
                         'start_date', 'end_date',
-                        'nor_url', 'si_url', 'website_url']:
+                        'nor_url', 'si_url', 'website_url', 'visibility']:
                 if key in body:
                     regatta[key] = body[key]
             regatta['updated_at'] = now_iso()

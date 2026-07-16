@@ -69,3 +69,31 @@ edge-e/firmware/e1_sd_card/config.txt
 
 # Archive files (hardware backups)
 edge-e/hardware/*.zip
+
+# Firmware build outputs + standalone test sketches + release dumps
+edge-e/firmware/**/build/
+edge-e/firmware/**/build_*/
+edge-e/firmware/*_test/
+edge-e/firmware/e6_sd_card_june2nd_2026/
+e1-firmware-*/
+
+# Lambda build artifacts
+lambda/**/lambda.zip
+
+# Hardware fab / backup / temp artifacts
+*.bak*
+*.rpt
+edge-b/hardware/*.zip
+edge-b/hardware/fab2/
+edge-b/hardware/jlcpcb/
+edge-b/hardware/*.dsn
+edge-b/hardware/.history_trim/
+
+# Local data staging (served from S3, not tracked in git)
+_work/
+web/climatology/
+climatology/files.zip
+
+# Wind-sensor scope captures
+wind_sensor/**/*.png
+wind_sensor/*.png

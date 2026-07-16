@@ -51,7 +51,7 @@ S3 `s3:ObjectCreated:*` event on `raw/{device_id}/**/*.rtcm3` (E1) or `raw/{devi
 - Raw GNSS: `.rtcm3` (E1) or `.ubx` (S1)
 - Parsed NMEA: `_nav.csv` (E1) or `gps/track_*.csv` (S1)
 - IMU: `_imu.csv` (E1) or `imu/imu_*.csv` (S1)
-- Wind (S1 only): `wind/wind_*.csv`
+- Wind (E1 only): `wind/wind_*.csv`
 - NOAA CORS RINEX (nearest station to Boston Harbor, typically MAMI) for the session time window ±1 hour
 
 **Steps:**

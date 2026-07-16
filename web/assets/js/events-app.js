@@ -48,6 +48,11 @@ async function loadRegattas() {
         const resp = await fetch(`${API_BASE}/api/regattas`);
         const data = await resp.json();
         regattas = data.regattas || [];
+        // Hide admin-only regattas from non-admins. Frontend obscurity that
+        // mirrors the create-button gating above — the API stays open.
+        if (!IS_ADMIN) {
+            regattas = regattas.filter(r => (r.visibility || 'public') !== 'admin');
+        }
         renderRegattas();
     } catch (err) {
         list.innerHTML = '<div class="column-empty">Failed to load</div>';
@@ -315,6 +320,8 @@ function openRegattaModal(regatta = null) {
     document.getElementById('regatta-modal-title').textContent = regatta ? 'Edit Regatta' : 'New Regatta';
     document.getElementById('regatta-name').value = regatta?.name || '';
     document.getElementById('regatta-venue').value = regatta?.venue || '';
+    document.getElementById('regatta-rating-system').value = regatta?.rating_system || 'ORR-EZ';
+    document.getElementById('regatta-start-sequence').value = String(regatta?.start_sequence_minutes || 5);
     document.getElementById('regatta-start-date').value = regatta?.start_date || '';
     document.getElementById('regatta-end-date').value = regatta?.end_date || '';
     document.getElementById('regatta-nor-url').value = regatta?.nor_url || '';
@@ -345,6 +352,8 @@ async function saveRegatta() {
         name: document.getElementById('regatta-name').value.trim(),
         venue: document.getElementById('regatta-venue').value.trim(),
         boat_class: boatClass,
+        rating_system: document.getElementById('regatta-rating-system').value,
+        start_sequence_minutes: Number(document.getElementById('regatta-start-sequence').value) || 5,
         start_date: document.getElementById('regatta-start-date').value,
         end_date: document.getElementById('regatta-end-date').value,
         nor_url: document.getElementById('regatta-nor-url').value.trim() || null,
