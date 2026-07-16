@@ -78,12 +78,35 @@ def hourly_pick(series):
 
 
 # --------------------------- HRRR field helpers -----------------------------
+# FORECAST MODE (day-of): when FCST is set to a cycle string (e.g. "12z"), the extra
+# fields (CAPE/VIS/925/850/HPBL) are read from that ONE cycle's forecast cube (F1..F18)
+# instead of per-cycle analysis F00 -- so /tactics gets a Bernot breeze forecast, not a
+# retrospective analysis. "cycles" then denote VALID UTC hours (mapped to F-hours).
+FCST = None          # cycle string when forecasting, else None
+_FCUBE = {}          # cache: group -> [nlead, ny_win, nx_win] forecast cube
+
+def _fcst_cube(ymd, cycle, group, window):
+    if group not in _FCUBE:
+        j0, j1, i0, i1 = window
+        _FCUBE[group] = hg.read_fcst_window(hg.store_fcst(ymd, cycle), group, j0, j1, i0, i1, nlead=18)
+    return _FCUBE[group]
+
+
 def read_field_hourly(ymd, group, cycles, window=None):
-    """{cyc: 1d array over window} for a group across given cycles (analysis F00),
-    read in parallel. Pass `window` to skip the per-call bbox lookup."""
+    """{valid_cyc: 1d array over window}. Analysis mode: F00 of each cycle. Forecast mode
+    (FCST set): the F-hour of FCST's forecast cube whose valid time == that hour."""
     from concurrent.futures import ThreadPoolExecutor
     if not cycles:
         return {}, window
+    if FCST:
+        j0, j1, i0, i1 = window or hg.bbox_window(hg.store_anl(ymd, FCST))
+        cube = _fcst_cube(ymd, FCST, group, (j0, j1, i0, i1))       # k -> F(k+1)
+        base_h = int(FCST[:2]); out = {}
+        for c in cycles:
+            fh = (int(c[:2]) - base_h) % 24                          # F-hour to this valid hour
+            if 1 <= fh <= cube.shape[0]:
+                out[c] = cube[fh - 1].ravel()
+        return out, (j0, j1, i0, i1)
     j0, j1, i0, i1 = window or hg.bbox_window(hg.store_anl(ymd, cycles[0]))
 
     def _one(c):
@@ -100,6 +123,8 @@ def read_field_hourly(ymd, group, cycles, window=None):
 
 
 def cycles_for(ymd):
+    if FCST:                                                         # valid UTC hours of F1..F18
+        base_h = int(FCST[:2]); return [f"{(base_h + fh) % 24:02d}z" for fh in range(1, 19)]
     return sorted(hg.list_anl_cycles(ymd))
 
 
@@ -125,8 +150,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", required=True)      # YYYY-MM-DD
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--forecast-cycle", default=None,
+                    help="day-of forecast: HRRR cycle (e.g. 12z) -> extra fields from its F1..F18 cube")
+    ap.add_argument("--fields-key", default=None,
+                    help="override fields parquet key (e.g. climatology/today/latest.parquet forecast table)")
     a = ap.parse_args()
     ymd = a.date.replace("-", "")
+    global FCST
+    if a.forecast_cycle:
+        FCST = a.forecast_cycle if a.forecast_cycle.endswith("z") else f"{int(a.forecast_cycle):02d}z"
+    base_cyc = FCST                               # in forecast mode, static/rotation reads use this cycle
 
     # ---- grid + coast facing -------------------------------------------------
     grid = json.load(io.BytesIO(_s3.get_object(Bucket=BUCKET, Key=f"{PFX}/grid.json")["Body"].read()))
@@ -162,7 +195,7 @@ def main():
     sst_vals = [tw for (h, d, s, tw) in obs["44013"] if 10 <= h <= 14 and tw is not None]
     sst = float(np.mean(sst_vals)) if sst_vals else None
     # Tmax over land from HRRR 2 m T (10-17 LT) — aligned, avoids the missing ASOS file
-    fields = _load(f"{PFX}/fields/year={ymd[:4]}/month={ymd[4:6]}/{ymd[6:8]}.parquet")
+    fields = _load(a.fields_key or f"{PFX}/fields/year={ymd[:4]}/month={ymd[4:6]}/{ymd[6:8]}.parquet")
     tmax = None
     if fields is not None:
         landgi = set(np.where(land.ravel().astype(bool))[0].tolist())
@@ -209,7 +242,7 @@ def main():
     def cyc_lt_hour(c):
         return _lt(dt.datetime(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]), int(c[:2]), tzinfo=UTC)).hour
 
-    win = hg.bbox_window(hg.store_anl(ymd, cyc[0]))
+    win = hg.bbox_window(hg.store_anl(ymd, base_cyc or cyc[0]))
     j0, j1, i0, i1 = win
     midday_cyc = [c for c in cyc if 12 <= cyc_lt_hour(c) <= 16]
     morn_cyc = [c for c in cyc if 8 <= cyc_lt_hour(c) <= 11]
@@ -222,12 +255,12 @@ def main():
     v850_h, _ = read_field_hourly(ymd, "850mb/VGRD", morn_cyc, win)
     # HRRR GRIB winds are grid-relative — rotate 850/925 to earth-relative (true N).
     # (10 m wind comes from the fields parquet, which is stored earth-relative.)
-    _ang = hg.convergence_window(hg.store_anl(ymd, cyc[0]), *win)
+    _ang = hg.convergence_window(hg.store_anl(ymd, base_cyc or cyc[0]), *win)
     for _uh, _vh in ((u925_h, v925_h), (u850_h, v850_h)):
         for _c in list(_uh):
             if _c in _vh:
                 _uh[_c], _vh[_c] = hg.to_earth(_uh[_c], _vh[_c], _ang)
-    hgt = hg.read_window(hg.store_anl(ymd, cyc[len(cyc) // 2]), "surface/HGT", j0, j1, i0, i1).ravel()
+    hgt = hg.read_window(hg.store_anl(ymd, base_cyc or cyc[len(cyc) // 2]), "surface/HGT", j0, j1, i0, i1).ravel()
     landflat = land.ravel().astype(bool)
     waterflat = ~landflat
 
@@ -484,6 +517,8 @@ def main():
 
     out = {
         "date": a.date,
+        "forecast": bool(FCST),                          # True = day-of HRRR forecast, not retrospective analysis
+        "forecast_cycle": FCST,
         "venue": "Massachusetts Bay (Boston → Cape Ann → Cape Cod)",
         "coast_faces_deg": None if cf is None else round(cf, 0),
         "morning_synoptic": {"from_deg": None if SYN_DIR is None else round(SYN_DIR, 0),
