@@ -1,0 +1,46 @@
+name: Marblehead-Provincetown race refresh
+
+# Durable (session-independent) backup for the Friday 2026-07-17 overnight race briefing.
+# Re-pulls the corridor forecast (Open-Meteo HRRR/GFS + NOAA tides + NWS marine zones) on
+# fresh short-lead cycles and commits a readable refresh. Complements the in-session cron
+# jobs (which deliver a messaged update but die if Claude Code is closed). No secrets — the
+# corridor tool hits only public APIs.
+on:
+  schedule:
+    - cron: '7 16 17 7 *'    # Fri 2026-07-17 12:07 EDT (16:07 UTC) — midday refresh
+    - cron: '13 21 17 7 *'   # Fri 2026-07-17 17:13 EDT (21:13 UTC) — pre-start refresh
+  workflow_dispatch:          # manual trigger any time
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ptown-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Refresh corridor forecast
+        run: |
+          python3 climatology/corridor_forecast.py climatology/zones/marblehead_provincetown.json \
+            --out docs/reports/mhd_ptown_brief.json \
+            --md  docs/reports/RACE_BRIEFING_MARBLEHEAD_PTOWN_2026-07-17.auto.md
+      - name: Commit refreshed briefing
+        run: |
+          git config user.name  "sailframes-bot"
+          git config user.email "noreply@sailframes.com"
+          git add docs/reports/mhd_ptown_brief.json \
+                  docs/reports/RACE_BRIEFING_MARBLEHEAD_PTOWN_2026-07-17.auto.md
+          if git diff --cached --quiet; then
+            echo "no forecast change"
+          else
+            git commit -m "race refresh: Marblehead->Provincetown corridor forecast ($(date -u +%FT%TZ))"
+            git push
+          fi

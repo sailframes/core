@@ -47,17 +47,52 @@ def marine(zone):
     except Exception:
         return []
 
+def write_md(brief, Z, path):
+    """Data-driven markdown refresh (auto-generated; the human briefing carries the tactics)."""
+    wps = [w["name"] for w in Z["waypoints"]]
+    # union of times across waypoints, every ~2h for a compact pivot
+    times = sorted({r["t"] for wp in brief["corridor"].values() for r in wp})
+    times = [t for t in times if t[11:13] in ("18", "19", "21", "23", "01", "03", "05")]
+    idx = {wp: {r["t"]: r for r in brief["corridor"][wp]} for wp in wps}
+    L = []
+    L.append(f"# {Z['name']} — auto refresh")
+    L.append(f"\n*Generated {brief['generated_utc']} · window {Z['race']['window_local'][0]}..{Z['race']['window_local'][1]} ET "
+             f"· rhumb {Z.get('rhumb_bearing_deg')}° / {Z.get('distance_nm')} nm.*")
+    L.append("\n**Auto-generated data refresh (Open-Meteo HRRR/GFS + NOAA tides/marine). "
+             "Tactics live in the human briefing `RACE_BRIEFING_MARBLEHEAD_PTOWN_2026-07-17.md`.**\n")
+    L.append("## Corridor wind (dir° / kt, gusts in ())")
+    L.append("| time ET | " + " | ".join(wps) + " |")
+    L.append("|" + "---|" * (len(wps) + 1))
+    for t in times:
+        cells = []
+        for wp in wps:
+            r = idx[wp].get(t)
+            cells.append(f"{r['dir']:03d}/{r['kt']:.0f} ({r['gust']:.0f})" if r else "—")
+        L.append(f"| {t[5:16]} | " + " | ".join(cells) + " |")
+    L.append("")
+    for k, tl in brief["tides"].items():
+        w0 = Z["race"]["window_local"][0][:10]; w1 = Z["race"]["window_local"][1][:10]
+        hi = ", ".join(f"{t[5:16]} {ty} {v:.1f}ft" for (t, ty, v) in tl if w0 <= t[:10] <= w1)
+        L.append(f"**Tide {k}:** {hi}")
+    for k, m in brief["marine"].items():
+        fri = " ".join(x for x in m if "FRI" in x.upper())[:220]
+        L.append(f"\n**Marine {k}:** {fri}")
+    open(path, "w").write("\n".join(L) + "\n")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("zone")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--md", default=None, help="also write a readable markdown briefing to this path")
     a = ap.parse_args()
     Z = json.load(open(a.zone))
     w0, w1 = Z["race"]["window_local"]
     d0, d1 = Z["race"]["date"], (dt.date.fromisoformat(Z["race"]["date"]) + dt.timedelta(days=1)).isoformat()
     inwin = lambda t: w0 <= t <= w1
 
-    brief = {"zone": Z["name"], "race": Z["race"], "generated_local": None, "corridor": {}, "tides": {}, "marine": {}}
+    brief = {"zone": Z["name"], "race": Z["race"],
+             "generated_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+             "corridor": {}, "tides": {}, "marine": {}}
     print(f"# {Z['name']}\n# window {w0} .. {w1} ET   (rhumb {Z.get('rhumb_bearing_deg')}° / {Z.get('distance_nm')} nm)\n")
     for wp in Z["waypoints"]:
         h = om_wind(wp["lat"], wp["lon"], d0, d1)
@@ -85,6 +120,9 @@ def main():
     if a.out:
         json.dump(brief, open(a.out, "w"), indent=1)
         print("\nwrote", a.out)
+    if a.md:
+        write_md(brief, Z, a.md)
+        print("wrote", a.md)
 
 if __name__ == "__main__":
     main()
