@@ -38,3 +38,13 @@ jobs:
           aws-region: us-east-1
       - name: Hourly briefing update
         run: python climatology/hourly_update.py
+      # Publish any fresh LES/HRRR gust render from the EC2-writable gom/ staging area to the
+      # dashboard-served climatology/gust*/ prefix (Rumble II 2026-07-15: a good render sat
+      # unpromoted while the dashboard served a stale one all race). Idempotent; only copies
+      # when the render is newer than what's served. continue-on-error so it never sinks the
+      # briefing. NOTE: needs the sailframes-climatology-ci user to have s3:GetObject on gom/*
+      # + s3:ListBucket (prefix gom/*); until granted, this step no-ops with a warning.
+      - name: Promote fresh gust renders to the dashboard
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: bash climatology/gom-seabreeze/validation/promote_gust.sh auto
