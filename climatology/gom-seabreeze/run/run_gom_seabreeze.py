@@ -182,6 +182,41 @@ def render_namelists(date, mode, start_hour, run_hours, geog_detail="modis", obs
     start = dt.datetime(y, m, d, start_hour)
     end = start + dt.timedelta(hours=run_hours)
     triple = lambda v: f"{v}, {v}, {v},"
+    if les and mode == "hrrr":
+        # HRRR-DRIVEN 4-domain LES (namelist.*.hrrr_les): 3/1/0.333/0.111 km, re-centered on
+        # Boston Harbor (Hospital Shoals). Parents d01/d02 run [start,end] from HRRR; LES nests
+        # d03/d04 start later for spin-up. F-offset init keeps it same-day (les_d0X_hour on the
+        # start day). les_d04_hour -> d03 (333m) start, les_d05_hour -> d04 (111m) start.
+        quad = lambda v: f"{v}, {v}, {v}, {v},"
+        wps = (TEMPLATES / "namelist.wps.hrrr_les").read_text()
+        wps = set_nml(wps, "start_date", quad(f"'{start:%Y-%m-%d_%H:%M:%S}'"))
+        wps = set_nml(wps, "end_date", quad(f"'{end:%Y-%m-%d_%H:%M:%S}'"))
+        wps = set_nml(wps, "interval_seconds", f"{cfg['interval_seconds']},")
+        wps = set_nml(wps, "geog_data_path", f"'{WPSGEOG}'")
+        WPS_DIR.mkdir(parents=True, exist_ok=True)
+        (WPS_DIR / "namelist.wps").write_text(wps)
+
+        inp = (TEMPLATES / "namelist.input.hrrr_les").read_text()
+        inp = set_nml(inp, "run_hours", f"{run_hours},")
+        inp = set_nml(inp, "start_year", quad(f"{start:%Y}"))
+        inp = set_nml(inp, "start_month", quad(f"{start:%m}"))
+        inp = set_nml(inp, "start_day", quad(f"{start:%d}"))
+        inp = set_nml(inp, "start_hour",
+                      f"{start:%H}, {start:%H}, {les_d04_hour:02d}, {les_d05_hour:02d},")
+        inp = set_nml(inp, "end_year", quad(f"{end:%Y}"))
+        inp = set_nml(inp, "end_month", quad(f"{end:%m}"))
+        inp = set_nml(inp, "end_day", quad(f"{end:%d}"))
+        inp = set_nml(inp, "end_hour", quad(f"{end:%H}"))
+        inp = set_nml(inp, "interval_seconds", f"{cfg['interval_seconds']},")
+        inp = set_nml(inp, "num_metgrid_levels", f"{cfg['num_metgrid_levels']},")
+        inp = set_nml(inp, "num_metgrid_soil_levels", f"{cfg['num_metgrid_soil_levels']},")
+        inp = set_nml(inp, "auxinput4_end_h", f"{run_hours},")
+        WRF_RUN.mkdir(parents=True, exist_ok=True)
+        (WRF_RUN / "namelist.input").write_text(inp)
+        print(f"  rendered HRRR-LES namelists: {start:%Y-%m-%d_%H}Z +{run_hours}h  "
+              f"d03@{les_d04_hour:02d}Z d04@{les_d05_hour:02d}Z  levels={cfg['num_metgrid_levels']}  "
+              f"4 domains (3/1km/333m/111m, Boston Harbor)")
+        return
     if les:
         # 5-domain LES render (namelist.*.les): parents run [start,end]; LES nests d04/d05
         # start later (staggered late-start) and end with the parents. Uses the template's

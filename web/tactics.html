@@ -29,6 +29,7 @@
         <button class="tx-tab" data-view="stats">Climatology stats</button>
         <button class="tx-tab" data-view="briefing">Race briefing</button>
         <button class="tx-tab" data-view="breeze">Sea-breeze analysis</button>
+        <button class="tx-tab" data-view="gust">Gusts ⚡</button>
         <span class="tx-status" id="tx-status">loading…</span>
     </nav>
 
@@ -134,9 +135,25 @@
             </div>
             <div id="breeze-body" class="bz-body"><p class="tx-note">Select the tab to load…</p></div>
         </section>
+
+        <!-- ===== Gusts (WRF-SailFrames LES 111 m) — embedded gust dashboard ===== -->
+        <section class="tx-view" id="view-gust" hidden>
+            <div class="tx-toolbar">
+                <span class="tx-sub">Resolved sea-breeze <b>gusts</b> over the race course from the 111 m LES nest — pressure movie, gustiness map, wind trace, LES↔HRRR compare.</span>
+            </div>
+            <iframe id="gust-frame" title="Gust analysis" loading="lazy"
+                    style="width:100%;height:calc(100vh - 150px);min-height:640px;border:0;border-radius:8px;background:#0e1621"></iframe>
+        </section>
     </main>
 
     <script type="module" src="./assets/js/tactics-app.js?v=22"></script>
     <script src="./assets/js/tactics-breeze.js?v=6"></script>
+    <script>
+      // lazy-load the embedded gust dashboard the first time the Gusts tab opens
+      document.querySelector('.tx-tab[data-view="gust"]')?.addEventListener('click', () => {
+        const f = document.getElementById('gust-frame');
+        if (f && !f.src) f.src = './gust.html?embed=1';
+      });
+    </script>
 </body>
 </html>

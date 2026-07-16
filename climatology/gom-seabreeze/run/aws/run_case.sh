@@ -36,9 +36,17 @@ OBS_NUDGE="${GOM_OBS_NUDGE:-0}"               # 1 = obs (station) nudging: littl
 OBSGRID_ONLY="${GOM_OBSGRID_ONLY:-0}"         # 1 = stop after obsgrid (report obs kept + OBS_DOMAIN), no real/wrf (cheap gate)
 OBS_EXCLUDE="${GOM_OBS_EXCLUDE:-}"            # station ids to hold out of the little_r (e.g. "44013" for validation)
 OBS_NUDGE_DOMS="${GOM_OBS_NUDGE_DOMS:-1,1,1}" # per-domain obs_nudge_opt: 1,1,1 product | 1,1,0 d01/d02-only validation | 0,0,0 YSU free baseline
-LES="${GOM_LES:-0}"                           # 1 = 5-domain LES (d04 333m + d05 111m) for gusts (needs :4.8)
+LES="${GOM_LES:-0}"                           # 1 = LES gust nests. GFS -> 5-dom (9/3/1/.333/.111);
+                                              # MODE=hrrr -> 4-dom (3/1/.333/.111, Boston Harbor)
 LES_D04_HOUR="${GOM_LES_D04_HOUR:-12}"        # LES d04 start hour UTC (default 12 = 08 ET, spin-up before the race)
 LES_D05_HOUR="${GOM_LES_D05_HOUR:-13}"        # LES d05 start hour UTC (default 13)
+START_HOUR="${GOM_START_HOUR:-0}"             # run start hour UTC (F-offset init sets this to the valid hour of START_FH)
+# F-OFFSET INIT (HRRR forecast): init the WRF run from HRRR forecast hour START_FH of the cycle
+# CYCLE_DATE tCYCLEz, instead of F00. Lets a SHORT run start ~race-6h off yesterday's cycle and
+# integrate through an evening race, sidestepping a 34h integration + the nest day-boundary.
+# ungrib reads each grib's INTERNAL valid time, so DATE/START_HOUR = valid time of START_FH.
+HRRR_CYCLE_DATE="${GOM_HRRR_CYCLE_DATE:-$DATE}"  # the cycle's date (may be the day before the race)
+HRRR_START_FH="${GOM_HRRR_START_FH:-0}"          # forecast hour to initialize from (0 = F00)
 NLCD_URL="${GOM_NLCD_URL:-https://www2.mmm.ucar.edu/wrf/src/wps_files/nlcd2011_ll_9s.tar.bz2}"
 CASE=gom
 DTC_RAW="https://raw.githubusercontent.com/NCAR/container-dtc-nwp/main/components/scripts/common"
@@ -53,19 +61,22 @@ render_flags=()
 [ "$LES" = 1 ] && render_flags+=(--les --les-d04-hour "$LES_D04_HOUR" --les-d05-hour "$LES_D05_HOUR")
 GOM_WPS="$WORK/scripts/case" GOM_WRFRUN="$WORK/scripts/case" GOM_WPSGEOG="$GEOGROOT" \
   "$VENV/bin/python" "$REPO/run/run_gom_seabreeze.py" --date "$DATE" --mode "$MODE" \
-  --run-hours "$RUN_HOURS" --geog-detail "$GEOG_DETAIL" "${render_flags[@]}" --render-only
+  --run-hours "$RUN_HOURS" --start-hour "$START_HOUR" --geog-detail "$GEOG_DETAIL" "${render_flags[@]}" --render-only
 
 # WRF needs each decomposed patch >= 10 cells; the SMALLEST nest binds. WRF's auto
 # decomposition of an awkward rank count (32 -> 4x8) can drop d03's y-patch below 10
-# (race-focused d03 is only 76 cells N-S). Force a PERFECT-SQUARE rank count k*k with
-# k <= (min d03 dim - 1)/10 so WRF picks k x k and every patch stays >= 10 cells.
-d3we=$(grep -E '^\s*e_we\s*=' "$WORK/scripts/case/namelist.input" | grep -oE '[0-9]+' | sed -n '3p')
-d3sn=$(grep -E '^\s*e_sn\s*=' "$WORK/scripts/case/namelist.input" | grep -oE '[0-9]+' | sed -n '3p')
+# the INNERMOST nest is small (d03=76 cells N-S standard; d02=76 for HRRR 2-dom; d05 for LES).
+# Force a PERFECT-SQUARE rank count k*k with k <= (min innermost dim - 1)/10 so WRF picks k x k
+# and every patch stays >= 10 cells. Key on the LAST domain in e_we/e_sn (mode-agnostic) -- the
+# old hardcoded `sed -n 3p` picked d03 and was SKIPPED entirely for HRRR's 2-domain namelist,
+# leaving NPROCS=32 and d02 (82x76) FATAL on decomposition (patch 76/8=9 < 10).
+d3we=$(grep -E '^\s*e_we\s*=' "$WORK/scripts/case/namelist.input" | grep -oE '[0-9]+' | tail -1)
+d3sn=$(grep -E '^\s*e_sn\s*=' "$WORK/scripts/case/namelist.input" | grep -oE '[0-9]+' | tail -1)
 if [ -n "$d3we" ] && [ -n "$d3sn" ]; then
   d3min=$(( d3we < d3sn ? d3we : d3sn )); kmax=$(( (d3min - 1) / 10 )); k=1
   for kk in $(seq 1 "$kmax"); do [ $((kk*kk)) -le "$NPROCS" ] && k=$kk; done
   new=$(( k * k )); [ "$new" -lt 1 ] && new=1
-  [ "$new" -ne "$NPROCS" ] && echo "  MPI ranks $NPROCS -> $new (${k}x${k}) for d03 ${d3we}x${d3sn} (patch>=10)"
+  [ "$new" -ne "$NPROCS" ] && echo "  MPI ranks $NPROCS -> $new (${k}x${k}) for innermost ${d3we}x${d3sn} (patch>=10)"
   NPROCS=$new
 fi
 
@@ -112,21 +123,38 @@ elif [ "$MODE" = hrrr ]; then
   # hybrid levels (grib level type 109), NOT isobaric (100) -> wrfprs ungribs to 1 level (met_em
   # BOTTOM-TOP=1, real FATAL). GOM_HRRR_CYCLE set = FORECAST (F00..FNN of ONE cycle, for day-of
   # ops); unset = analysis stitch (F00 of each valid hour, for hindcast/validation).
+  # DUAL-SOURCE: wrfnat has the native 51-level ATMOSPHERE (Vtable.raphrrr maps level-type 109)
+  # but NO usable soil (only 2 partial SOILW layers, no TSOIL) -> met_em NUM_METGRID_SOIL_LEVELS=0
+  # -> real.exe FATAL. The 9-level soil profile (TSOIL+SOILW 0->3m) lives in wrfprs. Stage BOTH
+  # into model_data: the single run_wps.ksh ungrib pass reads both and MERGES per valid time --
+  # native atmos from wrfnat (isobaric atmos in wrfprs is level-type 100, unmapped by raphrrr, so
+  # ignored), soil from wrfprs -> met_em gets 51 atmos + 9 soil. (Verified: soil idx wrfprs f00.)
   ymd=${DATE//-/}
   if [ -n "${GOM_HRRR_CYCLE:-}" ]; then
     cyc=$(printf '%02d' "$GOM_HRRR_CYCLE")
-    echo "  HRRR FORECAST from ${ymd} t${cyc}z, F00..F${RUN_HOURS}"
-    for fh in $(seq 0 "$RUN_HOURS"); do
-      fh2=$(printf '%02d' "$fh"); dest="$WORK/model_data/$CASE/hrrr.${ymd}_${cyc}.f${fh2}.grib2"
-      [ -s "$dest" ] || aws s3 cp --no-sign-request --quiet \
-        "s3://noaa-hrrr-bdp-pds/hrrr.${ymd}/conus/hrrr.t${cyc}z.wrfnatf${fh2}.grib2" "$dest"
+    # F-OFFSET: init from cycle CYCLE_DATE tCYCz forecast hour START_FH; stage F{START_FH}..
+    # F{START_FH+RUN_HOURS}. Backward-compatible: START_FH=0 + CYCLE_DATE=DATE == old F00..FN.
+    cymd=${HRRR_CYCLE_DATE//-/}; fh0=$HRRR_START_FH; fhN=$((HRRR_START_FH + RUN_HOURS))
+    echo "  HRRR FORECAST from ${cymd} t${cyc}z, F${fh0}..F${fhN} (valid ${DATE}_${START_HOUR}Z +${RUN_HOURS}h; wrfnat atmos + wrfprs soil)"
+    for fh in $(seq "$fh0" "$fhN"); do
+      fh2=$(printf '%02d' "$fh")
+      nat="$WORK/model_data/$CASE/hrrr.${cymd}_${cyc}.f${fh2}.grib2"
+      prs="$WORK/model_data/$CASE/hrrr.${cymd}_${cyc}.f${fh2}.prs.grib2"
+      [ -s "$nat" ] || aws s3 cp --no-sign-request --quiet \
+        "s3://noaa-hrrr-bdp-pds/hrrr.${cymd}/conus/hrrr.t${cyc}z.wrfnatf${fh2}.grib2" "$nat"
+      [ -s "$prs" ] || aws s3 cp --no-sign-request --quiet \
+        "s3://noaa-hrrr-bdp-pds/hrrr.${cymd}/conus/hrrr.t${cyc}z.wrfprsf${fh2}.grib2" "$prs"
     done
   else
     for hh in $(seq 0 "$RUN_HOURS"); do
       vt=$(date -u -d "$DATE 00:00 UTC +${hh} hours" +%Y%m%d_%H)
-      vymd=${vt%_*}; vhh=${vt#*_}; dest="$WORK/model_data/$CASE/hrrr.${vt}.f00.grib2"
-      [ -s "$dest" ] || { echo "  HRRR analysis +${hh}h (${vymd} t${vhh}z)"; aws s3 cp --no-sign-request --quiet \
-        "s3://noaa-hrrr-bdp-pds/hrrr.${vymd}/conus/hrrr.t${vhh}z.wrfnatf00.grib2" "$dest"; }
+      vymd=${vt%_*}; vhh=${vt#*_}
+      nat="$WORK/model_data/$CASE/hrrr.${vt}.f00.grib2"
+      prs="$WORK/model_data/$CASE/hrrr.${vt}.f00.prs.grib2"
+      [ -s "$nat" ] || { echo "  HRRR analysis +${hh}h (${vymd} t${vhh}z)"; aws s3 cp --no-sign-request --quiet \
+        "s3://noaa-hrrr-bdp-pds/hrrr.${vymd}/conus/hrrr.t${vhh}z.wrfnatf00.grib2" "$nat"; }
+      [ -s "$prs" ] || aws s3 cp --no-sign-request --quiet \
+        "s3://noaa-hrrr-bdp-pds/hrrr.${vymd}/conus/hrrr.t${vhh}z.wrfprsf00.grib2" "$prs"
     done
   fi
 elif [ "$MODE" = forecast ]; then
@@ -201,16 +229,17 @@ echo "### 5. WPS (geogrid/ungrib/metgrid) -> met_em in wpsprd"
 docker exec gomwrf bash -lc "cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid . && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/metgrid ."
 
 if [ "$LES" = 1 ] && [ "$GEOGRID_ONLY" = 1 ]; then
-  echo "### 5-LES. geogrid.exe (5 domains) -> geo_em.d01-05 + verify d04/d05 placement (cheap gate)"
-  docker exec gomwrf bash -lc "cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid.exe . && cp /home/scripts/case/namelist.wps . && ./geogrid.exe" || { echo "FATAL: geogrid (5-dom) failed"; docker exec gomwrf tail -30 /home/wpsprd/geogrid.log 2>/dev/null; exit 5; }
+  # GFS-LES = 5 domains (9/3/1/.333/.111); HRRR-LES (MODE=hrrr) = 4 domains (3/1/.333/.111).
+  echo "### 5-LES. geogrid.exe -> geo_em + verify innermost-nest placement (cheap gate)"
+  docker exec gomwrf bash -lc "cd /home/wpsprd && ln -sf /comsoftware/wrf/WPS-${WPS_VER}/geogrid.exe . && cp /home/scripts/case/namelist.wps . && ./geogrid.exe" || { echo "FATAL: geogrid (LES) failed"; docker exec gomwrf tail -30 /home/wpsprd/geogrid.log 2>/dev/null; exit 5; }
   echo "  --- geo_em produced ---"; docker exec gomwrf bash -lc "ls -la /home/wpsprd/geo_em.d0*.nc"
-  echo "  --- d04/d05 placement (CEN_LAT/LON should put d05 on 42.46,-70.77; corners show extent/fetch) ---"
-  for dm in 03 04 05; do
-    echo "  geo_em.d${dm}:"
-    docker exec gomwrf bash -lc "ncdump -h /home/wpsprd/geo_em.d${dm}.nc 2>/dev/null | grep -E ':CEN_LAT|:CEN_LON|:corner_lats|:corner_lons' | sed 's/^[[:space:]]*/    /'"
+  echo "  --- nest placement (innermost CEN_LAT/LON = course center; corners show extent/fetch) ---"
+  for dm in $(docker exec gomwrf bash -lc "ls /home/wpsprd/geo_em.d0*.nc" | grep -oE 'd0[0-9]' | sort -u); do
+    echo "  geo_em.${dm}:"
+    docker exec gomwrf bash -lc "ncdump -h /home/wpsprd/geo_em.${dm}.nc 2>/dev/null | grep -E ':CEN_LAT|:CEN_LON|:corner_lats|:corner_lons' | sed 's/^[[:space:]]*/    /'"
   done
-  aws s3 cp "$WORK/wpsprd/" "$S3/$DATE/les/geoqc/" --recursive --exclude "*" --include "geo_em.d0*.nc" || true
-  echo "=== LES geogrid gate done: d05 CEN ~42.46,-70.77? d04 extends SE (upwind)? both clear relax zones? ==="
+  aws s3 cp "$WORK/wpsprd/" "$S3/$DATE/${MODE}_les/geoqc/" --recursive --exclude "*" --include "geo_em.d0*.nc" || true
+  echo "=== LES geogrid gate done: innermost CEN on course? nests clear relax zones? ==="
   exit 0
 fi
 
@@ -256,6 +285,9 @@ fi
 
 docker exec gomwrf /home/scripts/common/run_wps.ksh
 ls "$WORK/wpsprd/"met_em.d0*.nc
+# met_em vertical inventory -- num_metgrid_levels must match namelist, and for HRRR the soil-level
+# count is the gate that failed the first confirm (wrfnat had no soil; wrfprs now dual-sourced).
+docker exec gomwrf bash -lc "ncdump -h /home/wpsprd/met_em.d01.*.nc 2>/dev/null | grep -iE 'NUM_METGRID_LEVELS|NUM_METGRID_SOIL_LEVELS|:FLAG_' | sed 's/^[[:space:]]*/  met_em: /'" || true
 
 echo "### 6. SST lower boundary + inject into met_em (HOST venv; wpsprd bind-mounted)"
 # non-fatal: ACSPO NRT ERDDAP lacks historical dates -> if the composite fails, run on
@@ -400,7 +432,16 @@ push_debug() {  # $1 = stage label
 
 echo "### 7. real.exe (links patched wpsprd/met_em -> wrfinput/wrfbdy)"
 if ! docker exec gomwrf /home/scripts/common/run_real.ksh; then push_debug "real.exe"; exit 44; fi
-ls "$WORK/wrfprd/"wrfinput_d01 "$WORK/wrfprd/"wrfbdy_d01
+# GUARD: the DTC run_real.ksh prints "OK real ran fine" even when real.exe MPI_ABORTs, so its exit
+# code can't be trusted. Verify real actually produced the nest input (every input_from_file=.true.
+# domain needs a wrfinput_dNN). Catch a masked abort HERE -- with real's rsl.error intact -- instead
+# of letting wrf.exe overwrite the rsl and die cryptically on "error opening wrfinput_d02".
+if [ ! -s "$WORK/wrfprd/wrfinput_d02" ]; then
+  echo "  FATAL: real.exe produced no wrfinput_d02 (masked MPI_ABORT). real.exe rsl.error.0000:"
+  docker exec gomwrf bash -lc "grep -iE 'error|fatal|mismatch|found|level|bdy|nan|forrtl' /home/wrfprd/rsl.error.0000 | head -25" || true
+  push_debug "real.exe (no wrfinput_d02)"; exit 44
+fi
+ls "$WORK/wrfprd/"wrfinput_d01 "$WORK/wrfprd/"wrfinput_d02 "$WORK/wrfprd/"wrfbdy_d01
 
 echo "### 8. wrf.exe (mpirun -np $NPROCS) -> wrfout_d03"
 # container execs as root -> OpenMPI needs the run-as-root override

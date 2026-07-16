@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SailFrames — Gust Analysis (LES 111 m)</title>
+<style>
+  :root { --bg:#0e1621; --panel:#16222f; --ink:#dce6f0; --mut:#8aa0b4; --acc:#39c; --warn:#e6a23c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:14px 20px; background:#0b1119; border-bottom:1px solid #22303f; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .sf { color:var(--acc); font-weight:700; }
+  select, a.btn { background:var(--panel); color:var(--ink); border:1px solid #2a3a4a; border-radius:6px; padding:6px 10px; font-size:14px; }
+  button.ctl { background:var(--panel); color:var(--ink); border:1px solid #2a3a4a; border-radius:6px; padding:5px 11px; font-size:13px; cursor:pointer; }
+  button.ctl:hover { border-color:var(--acc); }
+  input[type=range].ctl { accent-color:var(--acc); }
+  a.btn { text-decoration:none; }
+  .wrap { max-width:1200px; margin:0 auto; padding:18px 20px 60px; }
+  .lede { color:var(--mut); margin:8px 0 18px; }
+  .caveat { background:#2a2416; border:1px solid #4a3d1e; color:#e8d9b0; border-radius:8px; padding:10px 14px; margin:14px 0; font-size:13.5px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
+  .card { background:var(--panel); border:1px solid #22303f; border-radius:10px; padding:14px; }
+  .card h3 { margin:0 0 8px; font-size:15px; }
+  .card .sub { color:var(--mut); font-size:12.5px; margin-bottom:10px; }
+  .card img { width:100%; border-radius:6px; display:block; background:#0b1119; }
+  .movie { grid-column:1 / -1; }
+  .stats { display:flex; gap:22px; flex-wrap:wrap; margin-top:6px; }
+  .stat b { font-size:26px; display:block; color:#fff; }
+  .stat span { color:var(--mut); font-size:12px; }
+  .verdict { padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
+  .ok { background:#173a24; color:#6de08e; } .no { background:#3a1717; color:#e08e8e; }
+  @media(max-width:820px){ .grid{grid-template-columns:1fr;} }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="sf">SailFrames</span> · Gust Analysis <span style="color:var(--mut);font-weight:400">— WRF LES 111 m</span></h1>
+  <label>Date <select id="date">
+    <option value="2026-07-15">2026-07-15 · Rumble II · Hospital Shoals (FORECAST)</option>
+    <option value="2026-07-04">2026-07-04 · EYC · yellow-zone day (hindcast)</option>
+  </select></label>
+  <label>Model <select id="model">
+    <option value="les">WRF-SailFrames LES 111 m (resolves gusts)</option>
+    <option value="hrrr">HRRR-driven 1 km (standard forecast, smooth)</option>
+  </select></label>
+  <a class="btn" href="./race.html">← Race dashboard</a>
+  <a class="btn" href="./tactics.html">Sea-breeze analysis</a>
+</header>
+<div class="wrap">
+  <div class="lede">Resolved sea-breeze <b>gusts</b> over the race course from the 111 m large-eddy nest (d05, 1-min).
+    This shows the <b>expected gust structure</b> — puff magnitude, cell size, oscillation, and which side is gustier —
+    through the race window.</div>
+
+  <div class="caveat">⚠ <b>Expected structure, not a per-puff clock.</b> LES gives a physically-plausible realization of the
+    turbulence, not the exact timing of any single puff (that's chaotic). Read the <b>character</b> — how big the puffs are,
+    how often, which side — not "a puff at 13:14:32". Real-time "happening now" still needs live obs (radar + on-boat wind).</div>
+
+  <div id="freshness" class="lede" style="font-size:12.5px;margin:0 0 14px">🕑 checking model freshness…</div>
+
+  <div id="statsbar" class="card"><h3>Gust statistics <span id="verdict"></span></h3><div class="stats" id="stats"></div></div>
+
+  <div class="grid" style="margin-top:18px">
+    <div class="card movie">
+      <h3>Pressure movie <span class="sub" style="display:inline">— 10 m wind + flow arrows through the race window</span></h3>
+      <div class="sub">Brighter = more pressure (puffs); arrows = instantaneous flow. Pause &amp; step to read the shifts.</div>
+      <video id="movie" controls loop muted playsinline preload="auto"
+             style="width:100%;border-radius:6px;background:#0b1119;display:block"></video>
+      <img id="movieGif" alt="pressure movie" style="display:none">
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="ctl" id="mprev">⏮ frame</button>
+        <button class="ctl" id="mplay">❚❚ pause</button>
+        <button class="ctl" id="mnext">frame ⏭</button>
+        <input class="ctl" id="mscrub" type="range" min="0" max="1000" value="0" style="flex:1;min-width:140px">
+        <span id="mtime" style="color:var(--mut);font-size:12px;min-width:70px"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Gustiness map</h3>
+      <div class="sub">Gust factor (peak ÷ mean) per cell — where it's puffy vs steady.</div>
+      <img id="gustiness" alt="gustiness">
+    </div>
+    <div class="card">
+      <h3>Course-center wind trace</h3>
+      <div class="sub">Speed + direction at the course center — the puff / oscillation pattern.</div>
+      <img id="trace" alt="point trace">
+    </div>
+  </div>
+
+  <div id="obsSection">
+  <h2 style="margin:30px 0 4px;font-size:17px">Observed sea-breeze front — radar &amp; satellite</h2>
+  <div class="lede" style="margin-top:2px">Independent obs at the <b>event moment</b> (yellow-zone fill, ~13:10 ET).
+    These <b>corroborate</b> the modeled gusts: KBOX shows a clear-air fine line and GOES-19 shows a cumulus
+    line — both crossing the course, with clear/marine air to the SE (the sea-breeze side).</div>
+  <div class="caveat">Note: KBOX is ~64 km away, so its 0.5° beam grazes the top of a shallow front — the fine
+    line is real but <b>marginal/broken</b> at this range (scattered enhanced echo, not a razor line). The
+    time-lapse shows it drifting onshore.</div>
+  <div class="grid">
+    <div class="card">
+      <h3>KBOX radar — low-level reflectivity fine line</h3>
+      <div class="sub">Enhanced clear-air echo = the convergence front. Static = event moment; hover shows the GIF.</div>
+      <img id="radar_ev" alt="radar event">
+      <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--acc)">Time-lapse (13–18 ET)</summary>
+        <img id="radar_gif" style="margin-top:8px" alt="radar timelapse"></details>
+    </div>
+    <div class="card">
+      <h3>GOES-19 C02 — visible cloud / cumulus line</h3>
+      <div class="sub">Bright = cumulus on the seaward-air side; dark = clear/marine slot. The course sits on the line.</div>
+      <img id="goes_ev" alt="goes event">
+      <details style="margin-top:8px"><summary style="cursor:pointer;color:var(--acc)">Time-lapse (13–18 ET)</summary>
+        <img id="goes_gif" style="margin-top:8px" alt="goes timelapse"></details>
+    </div>
+  </div>
+  </div><!-- /obsSection -->
+
+  <section id="cmp" style="margin:34px 0 10px;border-top:1px solid #22303f;padding-top:22px">
+    <h2 style="font-size:16px;font-weight:600;color:var(--acc);margin:0 0 12px">How WRF-SailFrames LES compares to NOAA HRRR 3 km (all aspects)</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;border-bottom:1px solid #2a3a4a;color:var(--mut)">
+        <th style="padding:7px 10px">Aspect</th><th style="padding:7px 10px">WRF-SailFrames LES</th>
+        <th style="padding:7px 10px">NOAA HRRR 3 km</th><th style="padding:7px 10px">What it means for you</th></tr></thead>
+      <tbody id="cmpBody"></tbody>
+    </table>
+    <p class="lede" style="font-size:12px;margin-top:10px">Full write-up: <b>HRRR_vs_WRF_SAILFRAMES.md</b> (repo).</p>
+  </section>
+</div>
+<script>
+  // model freshness. NOTE: this page = the heavy 111 m LES (hours/run, per HRRR cycle — NOT hourly).
+  // The lighter HRRR map + Bernot sea-breeze forecast is what refreshes hourly (other tactics tabs).
+  async function freshness(url) {
+    const el = document.getElementById('freshness');
+    try {
+      const r = await fetch(url + '?fresh=' + Date.now(), { method: 'HEAD' });
+      const lm = r.headers.get('last-modified');
+      const et = d => d.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      const z = d => d.toLocaleString('en-US', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' });
+      const rendered = lm ? new Date(lm) : null;
+      el.innerHTML = (rendered ? `🕑 This 111 m LES rendered <b>${et(rendered)} ET / ${z(rendered)} Z</b>. ` : '🕑 ') +
+        `The LES is a heavy downscale (~4–6 h/run), refreshed <b>per HRRR cycle</b> — <b>not</b> hourly. ` +
+        `The lighter HRRR map + Bernot sea-breeze forecast (Day replay / Sea-breeze tabs) refreshes hourly at :50 (06:50–18:50 EDT).`;
+    } catch (e) { el.textContent = ''; }
+  }
+  // WRF-SailFrames LES vs NOAA HRRR 3 km — [aspect, sailframes, hrrr, meaning]
+  const CMP = [
+    ["Horizontal resolution", "111 m LES nest (1 / 3 km parents)", "3 km", "Resolves harbor-scale features HRRR can't"],
+    ["Effective resolution", "~0.5–0.7 km", "~7 km (5–7 × Δx)", "Sees the actual course, not a blur"],
+    ["Coastline & islands geography", "GSHHG shoreline; land/sea contrast, island wakes & coastal convergence resolved at 111 m", "~900 m land mask (blocky)", "✅ coast-driven wind perturbations ARE captured (your Q5)"],
+    ["Resolved gusts / turbulence", "YES — 3-D LES (1.5-order TKE); resolves puffs & oscillations", "NO — PBL parameterized, mean wind only", "LES shows the gust structure; HRRR is smooth"],
+    ["Vertical levels", "60", "50", ""],
+    ["Data assimilation", "none directly — inherits HRRR's initial state", "hourly GSI hybrid 3-D EnVar", "HRRR anchors reality; LES refines small scales"],
+    ["Aircraft soundings (ACARS/AMDAR)", "INDIRECT — inherited via HRRR; direct MADIS-aircraft ingest drafted, not yet live", "YES — assimilated directly (highest-impact conventional obs)", "✅ aircraft DO feed the forecast, via HRRR (your Q4)"],
+    ["Radar assimilation", "indirect (via HRRR)", "YES — reflectivity + radial velocity", ""],
+    ["Satellite", "indirect (via HRRR)", "YES", ""],
+    ["SST lower boundary", "coldest-pixel hi-res composite (hindcast) / HRRR SST (forecast)", "HRRR analysis SST", "sharper land/sea ΔT drives the sea breeze"],
+    ["Surface-obs nudging", "built + validated (held-out MAE 2.8 vs 3.2 kt)", "in the DA", ""],
+    ["Refresh cadence", "per HRRR cycle (~4–6 h / run, expensive)", "hourly", "⚠ the LES is the deep look; the HOURLY refresh is the HRRR map + Bernot forecast (your Q2)"],
+    ["Lead time", "race-morning short-lead runs", "continuous operational", ""],
+    ["Domain", "Boston Harbor / Mass Bay nests", "CONUS", ""],
+    ["Best use", "gust structure, cross-course gradient, sea-breeze front at the course", "DA-anchored regional forecast", "complementary: HRRR = where, LES = how gusty"],
+  ];
+  (function(){ const b = document.getElementById('cmpBody'); if (!b) return;
+    b.innerHTML = `<tr><td colspan="4" style="padding:10px;color:#dce6f0;background:#12202e;border-bottom:1px solid #2a3a4a">`+
+      `Both are <b>WRF-ARW</b> at the core — the difference is <b>configuration + the assimilation / operational machine</b> around it.</td></tr>` +
+      CMP.map(r => `<tr style="border-bottom:1px solid #1c2836;vertical-align:top">`+
+      `<td style="padding:7px 10px;color:#fff;font-weight:600">${r[0]}</td>`+
+      `<td style="padding:7px 10px">${r[1]}</td><td style="padding:7px 10px;color:var(--mut)">${r[2]}</td>`+
+      `<td style="padding:7px 10px;color:var(--mut)">${r[3]}</td></tr>`).join('');
+  })();
+  async function load(date){
+    const model = document.getElementById('model').value;
+    const BASE = model === 'hrrr' ? '/climatology/gust-hrrr' : '/climatology/gust';
+    const b = `${BASE}/${date}`;
+    const V = 'r8';   // bump on each re-render to bust CloudFront image cache
+    const mov = document.getElementById('movie'), movGif = document.getElementById('movieGif');
+    mov.style.display = 'block'; movGif.style.display = 'none';
+    mov.src = `${b}/pressure_movie.mp4?v=${V}`;
+    mov.onerror = () => {   // no mp4 (ffmpeg missing) -> fall back to the gif
+      mov.style.display = 'none'; movGif.src = `${b}/pressure_movie.gif?v=${V}`; movGif.style.display = 'block';
+    };
+    document.getElementById('gustiness').src = `${b}/gustiness.png?v=${V}`;
+    document.getElementById('trace').src = `${b}/point_trace.png?v=${V}`;
+    freshness(`${b}/gustiness.png`);
+    // Radar + satellite are OBSERVATIONS — only exist for past race days, not a forecast.
+    const hasObs = ['2026-07-04'].includes(date);
+    document.getElementById('obsSection').style.display = hasObs ? '' : 'none';
+    if (hasObs) {
+      document.getElementById('radar_ev').src  = `/climatology/radar/${date}/event_moment.png`;
+      document.getElementById('radar_gif').src = `/climatology/radar/${date}/fine_line.gif`;
+      document.getElementById('goes_ev').src   = `/climatology/goes/${date}/event_moment_C02.png`;
+      document.getElementById('goes_gif').src  = `/climatology/goes/${date}/clouds_C02.gif`;
+    }
+    try {
+      const s = await (await fetch(`${b}/step5_turbulence.json?v=${V}`)).json();
+      const kt = x => (x==null?'—':x.toFixed(1));
+      document.getElementById('stats').innerHTML =
+        `<div class="stat"><b>${kt(s.course_mean_kt)}</b><span>mean (kt)</span></div>`+
+        `<div class="stat"><b>${kt(s.course_peak_kt)}</b><span>peak / gust (kt)</span></div>`+
+        `<div class="stat"><b>${(s.course_gust_factor||0).toFixed(2)}</b><span>gust factor (peak÷mean)</span></div>`+
+        `<div class="stat"><b>${kt(s.spatial_std_kt)}</b><span>spatial spread (kt)</span></div>`;
+      const v = document.getElementById('verdict');
+      if (model === 'hrrr') {
+        v.className = 'verdict no';
+        v.textContent = 'smooth — HRRR-scale does NOT resolve gusts';
+      } else {
+        const resolved = /RESOLVED/.test(s.turbulence||'');
+        v.className = 'verdict ' + (resolved?'ok':'no');
+        v.textContent = resolved ? 'turbulence RESOLVED' : (s.turbulence||'');
+      }
+    } catch(e){ document.getElementById('stats').innerHTML = '<span style="color:var(--mut)">stats unavailable</span>'; }
+  }
+  // embedded in the tactics "Gusts" tab -> hide our own header (tactics provides the chrome)
+  if (new URLSearchParams(location.search).has('embed')) { const h = document.querySelector('header'); if (h) h.style.display = 'none'; }
+  // --- movie playback controls (pause / step frame / scrub) ---
+  const FPS = 8, mov = document.getElementById('movie');
+  const mplay = document.getElementById('mplay'), scrub = document.getElementById('mscrub'), mt = document.getElementById('mtime');
+  mplay.onclick = () => { if (mov.paused) { mov.play(); mplay.textContent = '❚❚ pause'; } else { mov.pause(); mplay.textContent = '▶ play'; } };
+  document.getElementById('mprev').onclick = () => { mov.pause(); mplay.textContent = '▶ play'; mov.currentTime = Math.max(0, mov.currentTime - 1/FPS); };
+  document.getElementById('mnext').onclick = () => { mov.pause(); mplay.textContent = '▶ play'; mov.currentTime = Math.min(mov.duration || 0, mov.currentTime + 1/FPS); };
+  mov.addEventListener('timeupdate', () => { if (mov.duration) { scrub.value = 1000 * mov.currentTime / mov.duration; mt.textContent = `${mov.currentTime.toFixed(1)}s / ${mov.duration.toFixed(1)}s`; } });
+  scrub.addEventListener('input', () => { if (mov.duration) { mov.pause(); mplay.textContent = '▶ play'; mov.currentTime = mov.duration * scrub.value / 1000; } });
+
+  const sel = document.getElementById('date');
+  const mdl = document.getElementById('model');
+  const reload = ()=>load(sel.value);
+  sel.addEventListener('change', reload);
+  mdl.addEventListener('change', reload);   // toggle LES <-> HRRR-scale forecast
+  load(sel.value);
+</script>
+</body>
+</html>

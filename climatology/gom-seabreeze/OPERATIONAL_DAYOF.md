@@ -40,8 +40,10 @@ This is the difference between **"studying sea breezes"** (what usually / did ha
    `noaa-hrrr-bdp-pds` with F00..F(race_hour+2) available. run_case.sh's HRRR staging already
    pulls hourly F00; generalize it to "latest cycle" + forecast hours (F00..FNN of ONE cycle,
    not F00 of many) so it's a true forecast, not an analysis stitch.
-   **NOTE:** the HRRR-driven run currently fails at real.exe (met_em 1 level = ungrib/Vtable
-   level-count issue) — fix that first (Vtable.raphrrr level mapping / num_metgrid_levels).
+   **STATUS (2026-07-14): ingest CONFIRMED.** wrfnat native atmosphere (Vtable.raphrrr level-type
+   109, num_metgrid_levels=51) + **dual-sourced wrfprs soil** (wrfnat has no TSOIL / only 2 SOILW
+   layers → num_metgrid_soil_levels=9 from wrfprs) → real.exe writes valid wrfinput_d01/wrfbdy_d01.
+   Also fixed: innermost-domain MPI decomposition (HRRR d02=76 cells needs k×k ranks, patch≥10).
 3. **Anchor to today** — obs-nudge the morning's MADIS surface + aircraft (project_madis_ingest)
    so the run is tied to *this morning's* observed state, and (later) cycling (warm-start off the
    previous hour) for continuity.
@@ -68,6 +70,35 @@ This is the difference between **"studying sea breezes"** (what usually / did ha
 - LES gusts remain **expected character**, not a per-puff clock (see gust_viz / dashboard framing).
 - This is the **W4 (cycling) + W7 (productionize)** items from HRRR_vs_WRF_SAILFRAMES.md, plus the
   HRRR-driven fit (W1, done) and MADIS obs (W2/W3) as the anchoring inputs.
+
+## Cycling (W4) — design, not yet built
+
+"Cycling" = keep the forecast fresh through the morning instead of one early cold run. Two flavors,
+cheapest-useful first:
+
+**A. HRRR re-init cadence (partial cycling — DO THIS FIRST, ~free).** Re-run the HRRR-driven
+downscale from each new HRRR cycle as it lands (06Z→02ET, 09Z→05ET, 12Z→08ET). Each run is a fresh
+cold start off HRRR — but **HRRR is itself cycled hourly** (its own GSI 3D-EnVar assimilates
+radar/aircraft/mesonet every hour), so we inherit HRRR's DA freshness for zero extra machinery. This
+is the "freshness beats a single early run" note above, made concrete: the scheduler fires at 05:00
+and 08:00 ET, latest-cycle detection picks the newest HRRR, dashboards show the most recent run.
+Storage: overwrite `climatology/wrf-today/` each cycle (keep a `wrf-today-<cycle>Z/` archive for diff).
+
+**B. WRF warm-start (true continuity — LATER, only if A isn't enough).** Carry our *downscale's*
+spun-up state (sea-breeze circulation, SST-forced gradients, PBL/LES turbulence) across cycles via
+`wrfrst` restart files, so each cycle doesn't re-spin from HRRR's coarse init:
+- emit restarts: `restart_interval` = 60 min; retain last ~3 `wrfrst_d0N` (EBS work vol or S3
+  `gom/<date>/rst/`).
+- **The value is the LES nests.** d04/d05 turbulence needs ~30–60 min to develop; a cold LES each
+  cycle wastes that spin-up. Warm-start ONLY the LES nests from the prior cycle's `wrfrst`, keep
+  parents cold-from-fresh-HRRR — fresh synoptic + SST forcing *and* pre-spun turbulence for gusts.
+- **Caveat (why B is "later"):** blending a prior `wrfrst` atmosphere with a new HRRR init is a
+  mini-DA problem (interior/boundary mismatch → gravity-wave shock). Flavor A sidesteps it entirely
+  by leaning on HRRR's cycling. Don't build B until a benchmark shows A's per-cycle cold-start error
+  (esp. LES gust onset) actually limits the product.
+
+Ties to HRRR_vs_WRF_SAILFRAMES.md W4. Depends on the HRRR-driven ingest (#2 above) being confirmed
+first — a cold HRRR re-init is worthless until the HRRR ingest works end-to-end.
 
 ## Minimal first step
 

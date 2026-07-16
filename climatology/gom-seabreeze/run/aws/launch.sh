@@ -38,6 +38,12 @@ AMI=$(aws ssm get-parameter --region "$REGION" \
   --query Parameter.Value --output text)
 echo "  AMI=$AMI  type=$ITYPE"
 
+# F-offset HRRR init vars (threaded to the box; empty HRRR_CYCLE -> analysis branch on run_case.sh)
+START_HOUR="${GOM_START_HOUR:-0}"
+HRRR_CYCLE="${GOM_HRRR_CYCLE:-}"
+HRRR_CYCLE_DATE="${GOM_HRRR_CYCLE_DATE:-$DATE}"
+HRRR_START_FH="${GOM_HRRR_START_FH:-0}"
+
 echo "### render userdata"
 UD=$(sed -e "s|@@DATE@@|$DATE|g" -e "s|@@MODE@@|$MODE|g" -e "s|@@RUN_HOURS@@|$RUN_HOURS|g" \
         -e "s|@@S3@@|$S3|g" -e "s|@@TERMINATE@@|$TERMINATE|g" \
@@ -46,13 +52,21 @@ UD=$(sed -e "s|@@DATE@@|$DATE|g" -e "s|@@MODE@@|$MODE|g" -e "s|@@RUN_HOURS@@|$RU
         -e "s|@@OBS_NUDGE@@|$OBS_NUDGE|g" -e "s|@@OBSGRID_ONLY@@|$OBSGRID_ONLY|g" -e "s|@@OBS_EXCLUDE@@|$OBS_EXCLUDE|g" \
         -e "s|@@OBS_NUDGE_DOMS@@|$OBS_NUDGE_DOMS|g" \
         -e "s|@@LES@@|$LES|g" -e "s|@@LES_D04_HOUR@@|$LES_D04_HOUR|g" -e "s|@@LES_D05_HOUR@@|$LES_D05_HOUR|g" \
+        -e "s|@@START_HOUR@@|$START_HOUR|g" -e "s|@@HRRR_CYCLE@@|$HRRR_CYCLE|g" \
+        -e "s|@@HRRR_CYCLE_DATE@@|$HRRR_CYCLE_DATE|g" -e "s|@@HRRR_START_FH@@|$HRRR_START_FH|g" \
         "$HERE/userdata.sh" | base64)
 
-echo "### launch (Spot, terminate-on-shutdown, 150 GB gp3 for geog+work)"
+# GOM_ONDEMAND=1 -> drop spot market options (uses the SEPARATE on-demand vCPU quota, so it can
+# run in PARALLEL with a spot run occupying the spot quota; e.g. HRRR-ingest confirm alongside LES).
+MARKET_OPT='--instance-market-options MarketType=spot'
+LAUNCH_KIND="Spot"
+if [ "${GOM_ONDEMAND:-0}" = 1 ]; then MARKET_OPT=""; LAUNCH_KIND="On-Demand"; fi
+
+echo "### launch ($LAUNCH_KIND, terminate-on-shutdown, 150 GB gp3 for geog+work)"
 IID=$(aws ec2 run-instances --region "$REGION" --image-id "$AMI" --instance-type "$ITYPE" \
-  --instance-market-options 'MarketType=spot' \
+  $MARKET_OPT \
   --iam-instance-profile "Name=$PROFILE_NAME" \
-  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=150,VolumeType=gp3}' \
+  --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${GOM_DISK_GB:-150},VolumeType=gp3}" \
   --instance-initiated-shutdown-behavior terminate \
   --user-data "$UD" \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=gom-$DATE-$MODE}]" \

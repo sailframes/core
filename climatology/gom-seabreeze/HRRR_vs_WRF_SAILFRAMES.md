@@ -7,6 +7,23 @@ difference is configuration + the data-assimilation/operational machine around t
 
 ---
 
+## STATUS UPDATE (2026-07-14) — what changed, what remains
+
+Since the original comparison, several gaps CLOSED and one flipped in SailFrames' favor:
+
+| Weakness | Was | Now |
+|---|---|---|
+| W1 HRRR-driven | GFS-driven, d01 overran CONUS | **CONFIRMED end-to-end (2026-07-14):** domain fits CONUS; wrfnat native atmos (51 lvl) + **dual-sourced wrfprs soil** (9 lvl) → real.exe writes valid IC/BC. Ingest done. |
+| W2/W3 obs / gradient | surface-only, none | **obs-nudging BUILT + VALIDATED** — held-out 44013 MAE 2.80 vs free 3.22 kt; MADIS aircraft drafted (not run) |
+| W5 gusts | parameterized (≈HRRR) | **100 m LES BUILT + VALIDATED — RESOLVED gusts (gust factor 1.28); SailFrames now EXCEEDS HRRR here** (HRRR never runs LES) |
+| output | thin | LES 111 m gust source on the dashboard; gust_viz (movie/gustiness/trace) |
+
+**Current head-to-head:** SailFrames now **wins** resolution (1 km + **111 m LES**), SST, geography, **and resolved gusts**; HRRR still **wins** assimilation (radar/aircraft/satellite, **hourly cycling**) + operational robustness.
+
+**Still remaining (in leverage order):** (1) ~~confirm the HRRR-driven ingest~~ **DONE 2026-07-14** → HRRR-driving now inherits HRRR's hourly DA; (2) **operational day-of** — near-done (`forecast_today.sh` + `OPERATIONAL_DAYOF.md`), just needed the ingest that now works; (3) **MADIS aircraft + mesonet** obs (drafted) for upper-air + in-gradient anchoring — its own sub-project; (4) **cycling** (HRRR re-init cadence first, LES warm-start later — designed in OPERATIONAL_DAYOF.md). The core science (resolution, SST, gusts, obs-nudging) is done; what remains is **assimilation depth + making it operational.**
+
+---
+
 ## 0. TL;DR
 
 - **Same engine, different machine.** HRRR *is* a WRF-ARW configuration. So this is not "which
