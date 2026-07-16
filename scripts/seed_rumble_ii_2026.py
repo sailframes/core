@@ -73,13 +73,16 @@ REGATTA = {
     "website_url": "https://www.regattaman.com/results.php?race_id=116&yr=2026&eid=116",
 }
 
-# Per-class start gun (EDT) + course length off the sheet.
+# Per-class start gun (EDT) + course length off the sheet. Starts are
+# staggered on a 5-min rolling sequence: 18:35 (D/F/G), 18:40 (C), 18:45
+# (A/B) — verified against the raw results HTML (start = finish − elapsed
+# for every finisher; corrected = elapsed × rating checks out for all 50).
 CLASSES = [
-    {"id": "A", "name": "Class A", "start_time": local_iso("18:30:45"),
+    {"id": "A", "name": "Class A", "start_time": local_iso("18:45:00"),
      "rating_system": RATING_SYSTEM, "rating_type": RATING_TYPE, "race_len_nm": 4.40},
-    {"id": "B", "name": "Class B", "start_time": local_iso("18:30:45"),
+    {"id": "B", "name": "Class B", "start_time": local_iso("18:45:00"),
      "rating_system": RATING_SYSTEM, "rating_type": RATING_TYPE, "race_len_nm": 4.40},
-    {"id": "C", "name": "Class C", "start_time": local_iso("18:30:40"),
+    {"id": "C", "name": "Class C", "start_time": local_iso("18:40:00"),
      "rating_system": RATING_SYSTEM, "rating_type": RATING_TYPE, "race_len_nm": 4.40},
     {"id": "D", "name": "Class D", "start_time": local_iso("18:35:00"),
      "rating_system": RATING_SYSTEM, "rating_type": RATING_TYPE, "race_len_nm": 2.86},
