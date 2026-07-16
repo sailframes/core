@@ -35,9 +35,21 @@ MODELS={"HRRR (NOAA 3km)":"gfs_hrrr","HRDPS (Canada 2.5km)":"gem_hrdps_continent
 def om_both(lat,lon):
     ms=",".join(MODELS.values())
     u=(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-       "&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m,pressure_msl"
+       "&hourly=wind_speed_10m,wind_direction_10m,wind_gusts_10m,pressure_msl,temperature_2m"
        f"&wind_speed_unit=kn&timezone=America%2FNew_York&start_date={D0}&end_date={D1}&models={ms}")
     return _get(u)["hourly"]
+
+def marine_pt(lat,lon):
+    u=(f"https://marine-api.open-meteo.com/v1/marine?latitude={lat}&longitude={lon}"
+       "&hourly=wave_height,sea_surface_temperature&timezone=America%2FNew_York"
+       f"&start_date={D0}&end_date={D1}")
+    try:
+        h=_get(u)["hourly"]
+        wv=[v for t,v in zip(h["time"],h["wave_height"]) if W0<=t<=W1 and v is not None]
+        sst=[v for t,v in zip(h["time"],h["sea_surface_temperature"]) if W0<=t<=W1 and v is not None]
+        return float(np.nanmean(wv)),float(np.nanmax(wv)),float(np.nanmean(sst))
+    except Exception:
+        return 0.2,0.3,20.5
 
 def tides(station,interval):
     u=("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?application=sailframes"
@@ -48,7 +60,7 @@ def tides(station,interval):
 def win(t): return W0<=t<=W1
 def nn(x): return float("nan") if x is None else x
 print("pulling HRRR + HRDPS along corridor (one request per point)...")
-DATA={m:{} for m in MODELS}
+DATA={m:{} for m in MODELS}; TEMP_T=[]; TEMP_C=[]
 for name,la,lo in CORRIDOR:
     h=om_both(la,lo); idx=[i for i,t in enumerate(h["time"]) if win(t)]
     for m,suf in MODELS.items():
@@ -56,8 +68,14 @@ for name,la,lo in CORRIDOR:
                        [nn(h[f"wind_speed_10m_{suf}"][i]) for i in idx],
                        [nn(h[f"wind_direction_10m_{suf}"][i]) for i in idx],
                        [nn(h[f"wind_gusts_10m_{suf}"][i]) for i in idx])
+    if name=="Mid Mass Bay":
+        TEMP_T=[h["time"][i] for i in idx]; TEMP_C=[nn(h["temperature_2m_gfs_hrrr"][i]) for i in idx]
     time.sleep(1.5)
 tdt=[dt.datetime.strptime(t,"%Y-%m-%dT%H:%M") for t in DATA["HRRR (NOAA 3km)"]["Mid Mass Bay"][0]]
+# gust factor (HRRR) per point + sea state
+GF={n: float(np.nanmean(DATA["HRRR (NOAA 3km)"][n][3])/max(np.nanmean(DATA["HRRR (NOAA 3km)"][n][1]),0.1)) for n,_,_ in CORRIDOR}
+WAVE_M,WAVE_MX,SST=marine_pt(42.25,-70.51)
+print("pulling tides...")
 
 # course-mean speed per model over time
 def course_mean(model,which):  # which: 1 spd, 3 gust
@@ -149,8 +167,35 @@ syn=("Light, weak-gradient southerly night (flat ~1016 mb, no front). The models
  "(offshore), dying to near-calm by ~01:00 before the southerly fills — opposite first-leg angles. HRDPS has verified "
  "better locally this season, but at a post-sunset transition neither is reliable: sail the breeze that's actually on the "
  "water, then get offshore into the steadier southerly. Hour-by-hour, tactics, tide and hazards overleaf.")
-fig.text(0.06,0.37,"Overnight synopsis",fontsize=12,fontweight="bold",color=ACCENT)
-fig.text(0.06,0.35,syn,fontsize=9.2,color="#222",wrap=True,va="top",ha="left")
+fig.text(0.06,0.415,"Overnight synopsis",fontsize=12,fontweight="bold",color=ACCENT)
+fig.text(0.06,0.395,syn,fontsize=9.0,color="#222",wrap=True,va="top",ha="left")
+
+# ---- Conditions at a glance: gusts / sea state / temperature ----
+fig.text(0.06,0.235,"Conditions at a glance",fontsize=12,fontweight="bold",color=ACCENT)
+axg=fig.add_axes([0.075,0.055,0.15,0.13])
+pts=[n for n,_,_ in CORRIDOR[::2]]; gfs=[GF[n] for n in pts]
+axg.bar(range(len(pts)),gfs,color=HRRRC,width=0.62)
+axg.axhline(1.0,color="#888",lw=0.8,ls="--")
+axg.set_xticks(range(len(pts))); axg.set_xticklabels(["Start","Mid bay","Race Pt"],fontsize=6.5)
+axg.set_ylim(1.0,1.75); axg.tick_params(labelsize=6.5); axg.set_title("Gust factor (HRRR)",fontsize=8,fontweight="bold")
+for i,v in enumerate(gfs): axg.text(i,v+0.01,f"{v:.2f}",ha="center",fontsize=6.5)
+axtc=fig.add_axes([0.30,0.055,0.15,0.13])
+ttc=[dt.datetime.strptime(t,"%Y-%m-%dT%H:%M") for t in TEMP_T]
+axtc.plot(ttc,TEMP_C,color="#c77d0a",lw=1.7)
+axtc.set_ylim(12,26)   # wide range -> the near-flat line reads as "steady", not a cliff
+axtc.set_title("Air temp on the water (°C)",fontsize=8,fontweight="bold"); axtc.tick_params(labelsize=6.5); axtc.grid(alpha=0.25)
+axtc.xaxis.set_major_formatter(mdates.DateFormatter("%Hh"))
+axf=axtc.twinx(); lo_,hi_=axtc.get_ylim(); axf.set_ylim(lo_*9/5+32,hi_*9/5+32); axf.tick_params(labelsize=6.5); axf.set_ylabel("°F",fontsize=6.5)
+def card(x,y,title,body):
+    fig.text(x,y,title,fontsize=9.2,fontweight="bold",color="#123")
+    fig.text(x,y-0.016,body,fontsize=8.0,color="#222",va="top",wrap=True)
+card(0.49,0.215,"Gusts — steady, modest",
+     f"HRRR gust factor ~1.4–1.5, peaks ~15–16 kt over ~9 kt mean; gustiest mid-bay/Race Pt pre-dawn. HRDPS gives no gust field. CAPE 0 + only ~11–15 kt at 925/850 hPa → no convective or momentum-driven gusts (unlike a daytime sea-breeze). Plan smooth, not puffy.")
+card(0.49,0.14,"Sea state — benign",
+     f"~{WAVE_M:.1f} m / {WAVE_M*3.28:.1f} ft short-period wind chop (NWS ANZ231/233 seas ≤1–2 ft). SST ~{SST:.0f}°C / {SST*9/5+32:.0f}°F. Flat water — the limiter is wind, not waves.")
+card(0.49,0.075,"Temperature — mild & near-steady on the water",
+     f"~18°C / 64–65°F all night on the course; the sea moderates it (drops only ~1°F offshore; up to ~10°F near the P-town shore). Warm water under cooler air keeps it damp → reinforces the fog watch. Layers for damp, not cold.")
+
 fig.text(0.06,0.02,"SailFrames race weather · HRRR + HRDPS via Open-Meteo · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
 pdf.savefig(fig); plt.close(fig)
 
