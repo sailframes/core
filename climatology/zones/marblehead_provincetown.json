@@ -1,0 +1,24 @@
+{
+  "name": "Marblehead → Provincetown (overnight distance race)",
+  "note": "Overnight passage SE across Massachusetts Bay into Cape Cod Bay. Not a daytime sea-breeze venue -> forecast is gradient wind + coastal land-breeze at the start + tidal current at the Race Point/P-town approach. The heavy WRF/LES sea-breeze stack is NOT the right tool here (no nocturnal thermal signal, corridor too long for a 111 m nest); this zone drives the gradient-model corridor briefing (corridor_forecast.py).",
+  "bbox": [-70.90, -70.15, 42.00, 42.55],
+  "rhumb_bearing_deg": 133,
+  "distance_nm": 38,
+  "start": {"name": "Marblehead", "lat": 42.50, "lon": -70.83},
+  "finish": {"name": "Provincetown", "lat": 42.05, "lon": -70.20},
+  "waypoints": [
+    {"name": "Marblehead start", "lat": 42.50, "lon": -70.83},
+    {"name": "Mass Bay mid", "lat": 42.34, "lon": -70.55},
+    {"name": "Stellwagen / CC Bay approach", "lat": 42.18, "lon": -70.35},
+    {"name": "Race Point / P-town", "lat": 42.06, "lon": -70.22}
+  ],
+  "race": {
+    "date": "2026-07-17",
+    "start_local": "2026-07-17T19:00",
+    "expected_finish_local": "2026-07-18T03:00",
+    "window_local": ["2026-07-17T18:00", "2026-07-18T06:00"],
+    "tz": "America/New_York"
+  },
+  "marine_zones": {"mass_bay": "ANZ231", "cape_cod_bay": "ANZ233"},
+  "tide_stations": {"boston": "8443970", "provincetown": "8446121"}
+}
