@@ -344,12 +344,12 @@ axr.set_title("Wind veers ~100° clockwise with height",fontsize=9,fontweight="b
 axr.add_patch(Circle((0,0),1.0,fill=False,color="#ccc"))
 for lab,ang in [("N",0),("E",90),("S",180),("W",270)]:
     axr.text(0.9*np.sin(np.radians(ang)),0.9*np.cos(np.radians(ang)),lab,ha="center",va="center",fontsize=7.5,color="#999")
-for (spd,d),c,lab in [(sfc,"#e08a7a","Surface (SE)"),(w9,"#5aa0d0","925 hPa (W)"),(w8,ACCENT,"850 hPa (WSW)")]:
-    L=0.30+0.038*spd; dx=L*np.sin(np.radians(d)); dy=L*np.cos(np.radians(d))
+for (spd,d),c,lab in [(sfc,"#e08a7a","Surface (SE wind)"),(w9,"#5aa0d0","925 hPa (W wind)"),(w8,ACCENT,"850 hPa (WSW wind)")]:
+    to=(d+180)%360; L=0.30+0.038*spd; dx=L*np.sin(np.radians(to)); dy=L*np.cos(np.radians(to))
     axr.annotate("",xy=(dx,dy),xytext=(0,0),arrowprops=dict(arrowstyle="-|>",color=c,lw=2.6,mutation_scale=15))
-    axr.text(dx*1.16,dy*1.16,f"{lab}\n{d:.0f}°/{spd:.0f}kt",fontsize=6.8,ha="center",va="center",color=c,fontweight="bold")
-axr.set_xlim(-1.35,1.35); axr.set_ylim(-1.4,1.3)
-axr.text(0,-1.32,"arrows point to where the wind comes FROM",fontsize=6.5,ha="center",color="#999")
+    axr.text(dx*1.18,dy*1.18,f"{lab}\n{d:.0f}° / {spd:.0f} kt",fontsize=6.8,ha="center",va="center",color=c,fontweight="bold")
+axr.set_xlim(-1.4,1.4); axr.set_ylim(-1.4,1.3)
+axr.text(0,-1.32,"arrows point downwind — the way the wind blows (° = wind's source)",fontsize=6.5,ha="center",color="#999")
 
 fig.text(0.09,0.565,"What's happening",fontsize=12,fontweight="bold",color=ACCENT)
 fig.text(0.09,0.545,
@@ -378,3 +378,42 @@ fig.text(0.09,0.018,"SailFrames race weather · wind-shear from HRRR 925/850 hPa
 pdf.savefig(fig); plt.close(fig)
 pdf.close()
 print("wrote docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf")
+
+# ============================ SIMPLE PLAIN-LANGUAGE 1-PAGER ============================
+spdf=PdfPages("docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17_SIMPLE.pdf")
+fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
+fig.text(0.5,0.955,"Marblehead → Provincetown — Race Weather at a Glance",ha="center",fontsize=16.5,fontweight="bold",color=ACCENT)
+fig.text(0.5,0.933,"Friday, 7 PM start  ·  finish around 3 AM Saturday  ·  about 40 miles across the bay",ha="center",fontsize=10,color="#333")
+axm=fig.add_axes([0.10,0.515,0.80,0.39]); draw_map(axm)
+axm.set_title("Your route — Marblehead to Provincetown (red X = keep-out zone)",fontsize=10,fontweight="bold",color=ACCENT)
+
+fig.text(0.09,0.487,"The short version",fontsize=13,fontweight="bold",color=ACCENT)
+fig.text(0.09,0.465,
+ "A tricky, light start just after sunset, then a steady breeze from the south fills in and you reach across the bay in "
+ "8–12 kt with almost flat water. It stays mild (about 65°F) but damp overnight, and fog is possible. Nothing heavy — the "
+ "challenge is the light, shifty start and timing the tide at the Provincetown end.",
+ fontsize=10,color="#222",va="top",wrap=True)
+
+fig.text(0.09,0.385,"What to do",fontsize=13,fontweight="bold",color=ACCENT)
+simple=[
+ "Start smart — the wind is light and shifty at 7 PM. Get a clean lane off the line, then head offshore where there's more breeze.",
+ "Reach across in a steady southerly (8–12 kt). Stay out in the pressure, not tucked near the shore.",
+ "Expect puffs to shift — a bit stronger and from a slightly different angle. Don't over-commit to one direction.",
+ "Avoid the LNG buoys (red X on the map) — a no-entry zone. The straight-line course passes safely south of it.",
+ "Round Race Point before about 2:45 AM so the tide carries you into Provincetown; later, it pushes against you.",
+ "Dress for damp — mild (~65°F) but wet, with possible fog. Bring layers, and check the forecast again in the morning.",
+]
+y=0.36
+for s in simple:
+    fig.text(0.10,y,"•",fontsize=11,fontweight="bold",color=ACCENT)
+    fig.text(0.125,y+0.001,s,fontsize=9.7,color="#222",va="top",wrap=True)
+    y-=0.046
+
+fig.text(0.09,0.085,"Key facts",fontsize=11.5,fontweight="bold",color=ACCENT)
+fig.text(0.09,0.065,
+ "Wind: from the south, 8–12 kt (light ~5 kt at the start), gusts to ~15.   ·   Water: nearly flat, under 1 ft.   ·   "
+ "Air: ~65°F all night, damp, fog possible.   ·   Tide: favorable into Provincetown before ~2:45 AM.",
+ fontsize=9,color="#222",va="top",wrap=True)
+fig.text(0.09,0.03,"SailFrames race weather · plain-language summary · NOT for navigation — verify with official forecasts.",fontsize=7,color="#999")
+spdf.savefig(fig); plt.close(fig); spdf.close()
+print("wrote docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17_SIMPLE.pdf")
