@@ -75,6 +75,26 @@ tdt=[dt.datetime.strptime(t,"%Y-%m-%dT%H:%M") for t in DATA["HRRR (NOAA 3km)"]["
 # gust factor (HRRR) per point + sea state
 GF={n: float(np.nanmean(DATA["HRRR (NOAA 3km)"][n][3])/max(np.nanmean(DATA["HRRR (NOAA 3km)"][n][1]),0.1)) for n,_,_ in CORRIDOR}
 WAVE_M,WAVE_MX,SST=marine_pt(42.25,-70.51)
+
+def shear_pt(la,lo):   # surface / 925 / 850 speed+dir + low-level inversion, mid-bay
+    ms=",".join(MODELS.values())
+    fl=("wind_speed_10m,wind_direction_10m,wind_speed_925hPa,wind_direction_925hPa,"
+        "wind_speed_850hPa,wind_direction_850hPa,temperature_2m,temperature_925hPa")
+    u=(f"https://api.open-meteo.com/v1/forecast?latitude={la}&longitude={lo}&hourly={fl}"
+       f"&wind_speed_unit=kn&timezone=America%2FNew_York&start_date={D0}&end_date={D1}&models={ms}")
+    h=_get(u)["hourly"]; idx=[i for i,t in enumerate(h["time"]) if win(t)]
+    def vd(suf,k):
+        ds=[h[f"wind_direction_{k}_{suf}"][i] for i in idx if h[f"wind_direction_{k}_{suf}"][i] is not None]
+        return float(np.degrees(np.arctan2(np.mean([np.sin(np.radians(x)) for x in ds]),
+                                           np.mean([np.cos(np.radians(x)) for x in ds])))%360)
+    def sp(suf,k): return float(np.nanmean([nn(h[f"wind_speed_{k}_{suf}"][i]) for i in idx]))
+    def tp(suf,k): return float(np.nanmean([nn(h[f"{k}_{suf}"][i]) for i in idx]))
+    out={}
+    for m,suf in MODELS.items():
+        out[m]={"10":(sp(suf,"10m"),vd(suf,"10m")),"925":(sp(suf,"925hPa"),vd(suf,"925hPa")),
+                "850":(sp(suf,"850hPa"),vd(suf,"850hPa")),"inv":tp(suf,"temperature_925hPa")-tp(suf,"temperature_2m")}
+    return out
+SHEAR=shear_pt(42.25,-70.51)
 print("pulling tides...")
 
 # course-mean speed per model over time
@@ -151,13 +171,21 @@ for m,c in [("HRRR (NOAA 3km)",HRRRC),("HRDPS (Canada 2.5km)",HRDPSC)]:
 axw.set_title("Course-mean wind (kt)",fontsize=8.5,fontweight="bold"); axw.legend(fontsize=6.5,loc="upper left")
 axw.xaxis.set_major_formatter(mdates.DateFormatter("%Hh")); axw.tick_params(labelsize=6.5); axw.grid(alpha=0.25)
 axw.axvspan(dt.datetime(2026,7,17,19),dt.datetime(2026,7,18,3),color="#ffe9a8",alpha=0.3)
-# direction timeline
-axd=fig.add_axes([0.68,0.44,0.28,0.18])
-for m,c in [("HRRR (NOAA 3km)",HRRRC),("HRDPS (Canada 2.5km)",HRDPSC)]:
-    dmid=DATA[m]["Mid Mass Bay"][2]; axd.plot(tdt,dmid,".",color=c,ms=3)
-axd.set_title("Wind dir (° from, mid-bay)",fontsize=8.5,fontweight="bold"); axd.set_ylim(60,240)
-axd.axhspan(157.5,202.5,color="#cfe6cf",alpha=0.5); axd.text(tdt[0],205,"S",fontsize=6,color="#487a48")
-axd.xaxis.set_major_formatter(mdates.DateFormatter("%Hh")); axd.tick_params(labelsize=6.5); axd.grid(alpha=0.25)
+# vertical wind-shear profile (HRRR): light SE surface under a W-WNW flow aloft
+axs=fig.add_axes([0.655,0.435,0.32,0.205]); axs.set_xlim(-1.7,2.9); axs.set_ylim(-1.35,2.75)
+axs.set_aspect("equal"); axs.axis("off")
+axs.set_title("Wind shear — HRRR (mid-bay)",fontsize=8.5,fontweight="bold")
+for lab,k,y in [("Surface 10 m","10",0),("925 hPa ≈0.8 km","925",1),("850 hPa ≈1.5 km","850",2)]:
+    spd,d=SHEAR["HRRR (NOAA 3km)"][k]
+    to=(d+180)%360; L=0.10+0.022*spd
+    axs.annotate("",xy=(0.2+L*np.sin(np.radians(to)),y+L*np.cos(np.radians(to))),xytext=(0.2,y),
+                 arrowprops=dict(arrowstyle="-|>",color=ACCENT,lw=2.2,mutation_scale=13))
+    axs.text(1.25,y,f"{lab}\n{d:.0f}° / {spd:.0f} kt",fontsize=7,va="center",ha="left")
+axs.plot([0.2,0.2],[0,2],color="#ccc",lw=0.8,ls=":",zorder=0)
+inv=SHEAR["HRRR (NOAA 3km)"]["inv"]
+axs.text(-1.65,-0.55,f"~100° veer, wind ~2× in 1 km.\nLight SE surface under W–WNW ~16 kt.\n"
+         f"925 hPa {'+' if inv>=0 else ''}{inv:.1f}°C = {'inversion (decoupled)' if inv>0 else 'mixed'}.",
+         fontsize=6.2,color="#b3243b",va="top")
 
 # synopsis
 hr0=np.nanmean([DATA["HRRR (NOAA 3km)"][n][1][1] for n,_,_ in CORRIDOR])
@@ -224,7 +252,7 @@ for (r,c),cl in tab.get_celld().items():
 axt.set_title("Corridor wind — dir°/kt, H=HRRR (top) / C=HRDPS (bottom)",fontsize=9.5,fontweight="bold",color=ACCENT,pad=2)
 
 # tide curve
-axtide=fig.add_axes([0.06,0.43,0.88,0.13])
+axtide=fig.add_axes([0.06,0.46,0.88,0.10])
 tt=[dt.datetime.strptime(p["t"],"%Y-%m-%d %H:%M") for p in tide_curve]
 tv=[float(p["v"]) for p in tide_curve]
 sel=[(x,v) for x,v in zip(tt,tv) if dt.datetime(2026,7,17,17)<=x<=dt.datetime(2026,7,18,7)]
@@ -245,15 +273,16 @@ tac=[
 ("② The crossing (21:00–01:00) — reach in the filling southerly","Both models fill S/SW 8-12 kt offshore — a starboard reach that frees as the wind veers right. Pressure lives offshore/south (mid-bay ~10 kt vs shore 2-6). Commit south; stay on the pressure side, don't over-stand north toward Cape Ann."),
 ("③ ⚠ LNG Northeast Gateway — hard avoid","Two STL buoys at ~42.40 N (−70.60/−70.59) sit just N of the direct line. NO ENTRY within 500 m, no anchoring within ~1 nm. The rhumb passes ~5 nm south — staying on/south of the line is both faster (more breeze) and legal."),
 ("④ Race Point & finish (01:00–03:00) — the tide gate","S/SSW 8-11 kt, gusts to 15 into Cape Cod Bay. Flood builds to Boston high 02:45 ≈ finish. Round Race Point BEFORE ~02:45 to carry the flood in; later boats meet the building ebb. Finish current itself is minor (near high slack)."),
-("⑤ Night & hazards","Dark — thin crescent sets early, so nav by instruments, watches + lights set. Fog watch: July S-flow over cool water; NWS not flagging Fri night but recheck AM. Seas ≤2 ft, no Small Craft Advisory expected."),
+("⑤ Wind shear — expect shifty, veered puffs","Light SE/S surface sits under a W–WNW 13–16 kt flow at 925/850 hPa with a low-level inversion (decoupled night). Puffs mix a little of that down — shiftier and veered toward W/NW vs the mean, but capped ~16 kt. Toward dawn the layer mixes and the surface veers/builds to the gradient. Don't bank on one wind angle; sail conservatively through puffs, keep the boat in pressure."),
+("⑥ Night & hazards","Dark — thin crescent sets early, so nav by instruments, watches + lights set. Fog watch: July S-flow over ~20°C water; NWS not flagging Fri night but recheck AM. Seas ≤2 ft, no SCA expected."),
 ]
-y=0.335
-fig.text(0.06,0.365,"Tactics & strategy",fontsize=12,fontweight="bold",color=ACCENT)
+y=0.385
+fig.text(0.06,0.41,"Tactics & strategy",fontsize=12,fontweight="bold",color=ACCENT)
 for head,body in tac:
-    fig.text(0.06,y,head,fontsize=9.3,fontweight="bold",color="#123")
-    fig.text(0.06,y-0.015,body,fontsize=8.1,color="#222",wrap=True,va="top")
-    y-=0.062
-fig.text(0.06,0.018,"Confidence: moderate on the overnight reach + tide timing (models agree); low on the exact start (transition + lead). Re-run race morning + pre-start.",
+    fig.text(0.06,y,head,fontsize=9.1,fontweight="bold",color="#123")
+    fig.text(0.06,y-0.014,body,fontsize=7.9,color="#222",wrap=True,va="top")
+    y-=0.0585
+fig.text(0.06,0.016,"Confidence: moderate on the overnight reach + tide timing (models agree); low on the exact start (transition + lead). Re-run race morning + pre-start.",
          fontsize=7.2,color="#777",style="italic")
 pdf.savefig(fig); plt.close(fig)
 pdf.close()
