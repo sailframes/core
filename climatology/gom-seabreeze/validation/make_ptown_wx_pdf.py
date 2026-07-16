@@ -150,6 +150,36 @@ def draw_map(ax):
     ax.set_title("Route & overnight wind (HRRR mean arrows)",fontsize=9.5,fontweight="bold",color=ACCENT)
     ax.text(0.02,0.03,"~40 nm · start 19:00 EDT · finish ~03:00",transform=ax.transAxes,fontsize=7.5,color="#5b5344")
 
+def mean_ds(model,name):   # race-window vector-mean direction (FROM) + mean speed
+    d=[x for x in DATA[model][name][2] if not np.isnan(x)]; s=DATA[model][name][1]
+    md=np.degrees(np.arctan2(np.nanmean(np.sin(np.radians(d))),np.nanmean(np.cos(np.radians(d)))))%360
+    return md,float(np.nanmean(s))
+
+def draw_diffmap(ax):
+    """Map showing WHERE the two models differ: paired HRRR (red) / HRDPS (blue) mean-wind
+    arrows at each corridor point. Arrows diverge where the models disagree (the start),
+    converge where they agree (the finish)."""
+    ax.set_facecolor(SEA)
+    xs=[c[0] for c in COAST]; ys=[c[1] for c in COAST]
+    ax.fill(xs+[-70.0,-71.1,-71.1],ys+[41.7,41.7,42.75],color=LAND,zorder=0,lw=0)
+    ax.plot(xs,ys,color="#8a8170",lw=1.0,zorder=1)
+    ax.plot([p[1] for p in ROUTE],[p[0] for p in ROUTE],"-",color="#888",lw=1.5,zorder=3)
+    for name,la,lo in CORRIDOR:
+        for m,c in [("HRRR (NOAA 3km)",HRRRC),("HRDPS (Canada 2.5km)",HRDPSC)]:
+            md,s=mean_ds(m,name); to=(md+180)%360; L=0.03+0.007*s
+            ax.add_patch(FancyArrow(lo,la,L*np.sin(np.radians(to)),L*np.cos(np.radians(to)),
+                         width=0.003,head_width=0.022,head_length=0.017,color=c,alpha=0.9,
+                         zorder=6,length_includes_head=True))
+        ax.plot(lo,la,"o",ms=2.5,color="#333",zorder=5)
+    ax.plot(START[2],START[1],"*",ms=14,mfc="#2e8b57",mec="k",mew=0.8,zorder=8)
+    ax.annotate("START",(START[2],START[1]),xytext=(6,3),textcoords="offset points",fontsize=7,fontweight="bold",color="#1c5c3a")
+    ax.annotate("FINISH",(WP2[2],WP2[1]),xytext=(6,-2),textcoords="offset points",fontsize=7,fontweight="bold",color=ACCENT)
+    ax.plot([],[],color=HRRRC,lw=3,label="HRRR"); ax.plot([],[],color=HRDPSC,lw=3,label="HRDPS")
+    ax.legend(fontsize=7.5,loc="lower left",framealpha=0.9)
+    ax.set_xlim(-71.02,-70.05); ax.set_ylim(41.96,42.66); ax.set_aspect(1/np.cos(np.radians(42.3)))
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title("Where the models differ — mean-wind arrows (length ∝ speed)",fontsize=9.5,fontweight="bold",color=ACCENT)
+
 # ============================ BUILD PDF ============================
 pdf=PdfPages("docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf")
 gen=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
@@ -159,8 +189,10 @@ fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
 fig.text(0.5,0.965,"Marblehead → Provincetown — Overnight Race Weather",ha="center",fontsize=17,fontweight="bold",color=ACCENT)
 fig.text(0.5,0.943,"Friday 2026-07-17, 19:00 EDT start  ·  ~03:00 Sat finish  ·  ~40 nm SE across Massachusetts & Cape Cod Bays",
          ha="center",fontsize=9.5,color="#333")
-fig.text(0.5,0.927,f"Models: NOAA HRRR 3 km + Environment Canada HRDPS 2.5 km (Open-Meteo)  ·  generated {gen}  ·  ~24 h lead — refine race morning",
-         ha="center",fontsize=8,color="#777",style="italic")
+fig.text(0.5,0.925,"NOAA HRRR (3 km) and Environment Canada HRDPS (2.5 km) — two independent high-resolution models.",
+         ha="center",fontsize=8.4,color="#555")
+fig.text(0.5,0.911,f"They agree on the overnight but split on the start — compared below and mapped on p.2.   ·   {gen} · ~24 h lead.",
+         ha="center",fontsize=7.9,color="#888",style="italic")
 
 axm=fig.add_axes([0.06,0.44,0.56,0.45]); draw_map(axm)
 # wind speed timeline (model compare)
@@ -198,31 +230,31 @@ syn=("Light, weak-gradient southerly night (flat ~1016 mb, no front). The models
 fig.text(0.06,0.415,"Overnight synopsis",fontsize=12,fontweight="bold",color=ACCENT)
 fig.text(0.06,0.395,syn,fontsize=9.0,color="#222",wrap=True,va="top",ha="left")
 
-# ---- Conditions at a glance: gusts / sea state / temperature ----
-fig.text(0.06,0.235,"Conditions at a glance",fontsize=12,fontweight="bold",color=ACCENT)
-axg=fig.add_axes([0.075,0.055,0.15,0.13])
-pts=[n for n,_,_ in CORRIDOR[::2]]; gfs=[GF[n] for n in pts]
-axg.bar(range(len(pts)),gfs,color=HRRRC,width=0.62)
-axg.axhline(1.0,color="#888",lw=0.8,ls="--")
-axg.set_xticks(range(len(pts))); axg.set_xticklabels(["Start","Mid bay","Race Pt"],fontsize=6.5)
-axg.set_ylim(1.0,1.75); axg.tick_params(labelsize=6.5); axg.set_title("Gust factor (HRRR)",fontsize=8,fontweight="bold")
-for i,v in enumerate(gfs): axg.text(i,v+0.01,f"{v:.2f}",ha="center",fontsize=6.5)
-axtc=fig.add_axes([0.30,0.055,0.15,0.13])
-ttc=[dt.datetime.strptime(t,"%Y-%m-%dT%H:%M") for t in TEMP_T]
-axtc.plot(ttc,TEMP_C,color="#c77d0a",lw=1.7)
-axtc.set_ylim(12,26)   # wide range -> the near-flat line reads as "steady", not a cliff
-axtc.set_title("Air temp on the water (°C)",fontsize=8,fontweight="bold"); axtc.tick_params(labelsize=6.5); axtc.grid(alpha=0.25)
-axtc.xaxis.set_major_formatter(mdates.DateFormatter("%Hh"))
-axf=axtc.twinx(); lo_,hi_=axtc.get_ylim(); axf.set_ylim(lo_*9/5+32,hi_*9/5+32); axf.tick_params(labelsize=6.5); axf.set_ylabel("°F",fontsize=6.5)
+# ---- Left: how the two models differ · Right: conditions cards ----
+fig.text(0.06,0.235,"How the two models differ (this race)",fontsize=11,fontweight="bold",color=ACCENT)
+fig.text(0.06,0.212,
+ "Both are high-res mesoscale models and AGREE on\n"
+ "the overnight (S/SW 8–12 kt reach to Race Point).\n"
+ "• HRRR (NOAA, 3 km): hourly, radar/satellite DA —\n"
+ "  strong on convection, gusts & fast change. Holds\n"
+ "  a decoupled SE surface here; gives a gust field.\n"
+ "• HRDPS (Canada, 2.5 km): finer mesh; the better\n"
+ "  local performer this season. Mixes more → a NW\n"
+ "  land-breeze at the start; no separate gust field.\n"
+ "They split most at the START (near-opposite dirs);\n"
+ "they converge by the finish.",
+ fontsize=7.5,color="#222",va="top")
+
+fig.text(0.52,0.235,"Conditions at a glance",fontsize=11,fontweight="bold",color=ACCENT)
 def card(x,y,title,body):
-    fig.text(x,y,title,fontsize=9.2,fontweight="bold",color="#123")
-    fig.text(x,y-0.016,body,fontsize=8.0,color="#222",va="top",wrap=True)
-card(0.49,0.215,"Gusts — steady, modest",
-     f"HRRR gust factor ~1.4–1.5, peaks ~15–16 kt over ~9 kt mean; gustiest mid-bay/Race Pt pre-dawn. HRDPS gives no gust field. CAPE 0 + only ~11–15 kt at 925/850 hPa → no convective or momentum-driven gusts (unlike a daytime sea-breeze). Plan smooth, not puffy.")
-card(0.49,0.14,"Sea state — benign",
-     f"~{WAVE_M:.1f} m / {WAVE_M*3.28:.1f} ft short-period wind chop (NWS ANZ231/233 seas ≤1–2 ft). SST ~{SST:.0f}°C / {SST*9/5+32:.0f}°F. Flat water — the limiter is wind, not waves.")
-card(0.49,0.075,"Temperature — mild & near-steady on the water",
-     f"~18°C / 64–65°F all night on the course; the sea moderates it (drops only ~1°F offshore; up to ~10°F near the P-town shore). Warm water under cooler air keeps it damp → reinforces the fog watch. Layers for damp, not cold.")
+    fig.text(x,y,title,fontsize=9,fontweight="bold",color="#123")
+    fig.text(x,y-0.015,body,fontsize=7.9,color="#222",va="top",wrap=True)
+card(0.52,0.212,"Gusts — steady, modest",
+     "HRRR gust factor ~1.4–1.5, peaks ~15–16 kt over ~9 kt mean. CAPE 0 + only ~11–15 kt aloft → no convective or momentum-driven gusts. HRDPS: no gust field. Plan smooth, not puffy.")
+card(0.52,0.14,"Sea state — benign",
+     f"~{WAVE_M:.1f} m / {WAVE_M*3.28:.1f} ft short-period wind chop (NWS seas ≤1–2 ft). SST ~{SST:.0f}°C / {SST*9/5+32:.0f}°F. Flat water — the limiter is wind, not waves.")
+card(0.52,0.075,"Temperature — mild & near-steady",
+     "~18°C / 64–65°F all night on the water (sea-moderated: ~1°F drop offshore, up to ~10°F near the P-town shore). Warm water under cooler air → damp; reinforces the fog watch. Layers for damp, not cold.")
 
 fig.text(0.06,0.02,"SailFrames race weather · HRRR + HRDPS via Open-Meteo · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
 pdf.savefig(fig); plt.close(fig)
@@ -232,24 +264,24 @@ fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
 fig.text(0.5,0.965,"Tactics, Strategy & Timing",ha="center",fontsize=16,fontweight="bold",color=ACCENT)
 fig.text(0.5,0.945,"Marblehead → Provincetown · Fri 2026-07-17 overnight",ha="center",fontsize=9.5,color="#333")
 
-# corridor table (HRRR / HRDPS dir/spd at key times)
-keyt=["19:00","21:00","23:00","01:00","03:00","05:00"]
-def cell(m,n,tt):
-    T=DATA[m][n][0]
-    for i,x in enumerate(T):
-        if x[11:16]==tt: return f"{round(DATA[m][n][2][i]):03d}/{DATA[m][n][1][i]:.0f}"
-    return "—"
-axt=fig.add_axes([0.06,0.60,0.88,0.30]); axt.axis("off")
-cols=["Time ET"]+[n for n,_,_ in CORRIDOR]
-rows=[]
-for tt in keyt:
-    rows.append([tt+"  H\n       C"]+[f"{cell('HRRR (NOAA 3km)',n,tt)}\n{cell('HRDPS (Canada 2.5km)',n,tt)}" for n,_,_ in CORRIDOR])
-tab=axt.table(cellText=rows,colLabels=cols,loc="center",cellLoc="center")
-tab.auto_set_font_size(False); tab.set_fontsize(7.2); tab.scale(1,2.1)
-for (r,c),cl in tab.get_celld().items():
-    cl.set_edgecolor("#ccc")
-    if r==0: cl.set_facecolor(ACCENT); cl.set_text_props(color="w",fontweight="bold")
-axt.set_title("Corridor wind — dir°/kt, H=HRRR (top) / C=HRDPS (bottom)",fontsize=9.5,fontweight="bold",color=ACCENT,pad=2)
+# model-difference MAP (replaces the corridor table) + per-point comparison
+axdm=fig.add_axes([0.05,0.58,0.55,0.33]); draw_diffmap(axdm)
+fig.text(0.62,0.895,"HRRR vs HRDPS — mean wind by point",fontsize=9.5,fontweight="bold",color=ACCENT)
+yy=0.865
+for name,_,_ in CORRIDOR:
+    d1,s1=mean_ds("HRRR (NOAA 3km)",name); d2,s2=mean_ds("HRDPS (Canada 2.5km)",name)
+    delta=abs(((d1-d2+180)%360)-180)
+    fig.text(0.62,yy,f"{name}",fontsize=8,fontweight="bold",color="#123")
+    fig.text(0.62,yy-0.015,f"HRRR {d1:.0f}°/{s1:.0f}kt  ·  HRDPS {d2:.0f}°/{s2:.0f}kt  →  Δdir {delta:.0f}°",
+             fontsize=7.5,color="#c0392b" if delta>60 else "#2c6e2c")
+    yy-=0.044
+fig.text(0.62,yy+0.003,
+ "Biggest split at the START (near-opposite: a dying SE\n"
+ "sea-breeze vs a NW land-breeze). They converge to a\n"
+ "common S/SW by Race Point, HRDPS lighter throughout.\n"
+ "→ The first leg is the uncertain part — sail the actual\n"
+ "breeze; for the rest of the night both models agree.",
+ fontsize=7.6,color="#222",va="top")
 
 # tide curve
 axtide=fig.add_axes([0.06,0.46,0.88,0.10])
