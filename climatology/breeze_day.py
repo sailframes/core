@@ -515,6 +515,21 @@ def main():
                          wind850_kt=None if spd925_kt is None else round(spd925_kt, 1),
                          surface_breeze_kt=round(peak_breeze, 1))
 
+    # (#2) momentum-reservoir gust CEILING — the winds just above the surface layer (925/850)
+    # mix down in gusts when the BL is deep/unstable. Rumble II 2026-07-15: surface ~11 kt but
+    # 925=24 / 850=28 over CAPE 842 -> Logan gusted to 19-23 kt (the LES gust product missed this).
+    def _momentum_gust(surface_kt, w925_kt, w850_kt, cape):
+        if surface_kt is None:
+            return None
+        aloft = 0.0
+        if w925_kt: aloft = max(aloft, float(w925_kt))
+        if w850_kt: aloft = max(aloft, 0.85 * float(w850_kt))    # 850 higher -> discount (less fully mixed)
+        if aloft <= surface_kt:
+            return round(float(surface_kt), 1)
+        alpha = 0.9 if (cape and cape > 1000) else 0.75 if (cape and cape > 500) else 0.5
+        return round(float(surface_kt) + alpha * (aloft - float(surface_kt)), 1)
+    gust_potential = _momentum_gust(peak_breeze, spd925_kt, SYN_KT, cape_mid)
+
     out = {
         "date": a.date,
         "forecast": bool(FCST),                          # True = day-of HRRR forecast, not retrospective analysis
@@ -529,6 +544,7 @@ def main():
                              "source": "44013 buoy 06–10 LT"},
         "wind_925mb": {"from_deg": None if dir925 is None else round(dir925, 0),
                        "speed_kt": None if spd925_kt is None else round(spd925_kt, 1)},
+        "gust_potential_kt": gust_potential,             # momentum bring-down ceiling (surface + alpha*(aloft-surface))
         "dt_c": None if dt_c is None else round(dt_c, 1), "sst_c": sst, "tmax_c": tmax,
         "cape_midday": None if cape_mid is None else round(float(cape_mid), 0),
         "quadrant": q["quadrant"] if q else None,

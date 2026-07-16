@@ -58,7 +58,20 @@
 
   <div id="freshness" class="lede" style="font-size:12.5px;margin:0 0 14px">🕑 checking model freshness…</div>
 
-  <div id="statsbar" class="card"><h3>Gust statistics <span id="verdict"></span></h3><div class="stats" id="stats"></div></div>
+  <div id="statsbar" class="card"><h3>Gust statistics <span id="verdict"></span></h3><div class="stats" id="stats"></div>
+    <div id="gustWarn" style="display:none;margin-top:10px;padding:8px 11px;border-radius:6px;background:#3a2410;border:1px solid #7a4a12;color:#ffd08a;font-size:12.5px"></div></div>
+
+  <!-- (#4) independent-obs reality check: what actually blew, vs the model -->
+  <div id="obsCheck" class="card" style="display:none;margin-top:14px">
+    <h3>Reality check — model vs observed <span id="obsBias" class="verdict"></span></h3>
+    <div class="sub">Independent surface obs over the race window (NDBC buoys + Logan ASOS). If the model gust factor is well below these, trust the obs.</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:8px">
+      <thead><tr style="text-align:left;border-bottom:1px solid #2a3a4a;color:var(--mut)">
+        <th style="padding:6px 9px">Station</th><th style="padding:6px 9px">Sustained</th>
+        <th style="padding:6px 9px">Gust</th><th style="padding:6px 9px">Gust factor</th><th style="padding:6px 9px">Dir</th></tr></thead>
+      <tbody id="obsBody"></tbody>
+    </table></div>
+  </div>
 
   <div class="grid" style="margin-top:18px">
     <div class="card movie">
@@ -170,7 +183,7 @@
     const model = document.getElementById('model').value;
     const BASE = model === 'hrrr' ? '/climatology/gust-hrrr' : '/climatology/gust';
     const b = `${BASE}/${date}`;
-    const V = 'r8';   // bump on each re-render to bust CloudFront image cache
+    const V = 'r9';   // bump on each re-render to bust CloudFront image cache
     const mov = document.getElementById('movie'), movGif = document.getElementById('movieGif');
     mov.style.display = 'block'; movGif.style.display = 'none';
     mov.src = `${b}/pressure_movie.mp4?v=${V}`;
@@ -194,9 +207,14 @@
       const kt = x => (x==null?'—':x.toFixed(1));
       document.getElementById('stats').innerHTML =
         `<div class="stat"><b>${kt(s.course_mean_kt)}</b><span>mean (kt)</span></div>`+
-        `<div class="stat"><b>${kt(s.course_peak_kt)}</b><span>peak / gust (kt)</span></div>`+
+        `<div class="stat"><b>${kt(s.course_peak_kt)}</b><span>LES peak / gust (kt)</span></div>`+
         `<div class="stat"><b>${(s.course_gust_factor||0).toFixed(2)}</b><span>gust factor (peak÷mean)</span></div>`+
+        // (#2) momentum bring-down ceiling from the winds aloft — independent of LES turbulence
+        (s.gust_potential_kt!=null?`<div class="stat"><b style="color:#ffb257">${kt(s.gust_potential_kt)}</b><span>gust ceiling (925/850 mix-down)</span></div>`:'')+
         `<div class="stat"><b>${kt(s.spatial_std_kt)}</b><span>spatial spread (kt)</span></div>`;
+      window.__lesGF = (model==='hrrr') ? null : (s.course_gust_factor||null);   // for the obs bias compare
+      const gw = document.getElementById('gustWarn');
+      if (s.gust_warning) { gw.style.display=''; gw.innerHTML = '⚠ ' + s.gust_warning; } else { gw.style.display='none'; }
       const v = document.getElementById('verdict');
       if (model === 'hrrr') {
         v.className = 'verdict no';
@@ -207,6 +225,27 @@
         v.textContent = resolved ? 'turbulence RESOLVED' : (s.turbulence||'');
       }
     } catch(e){ document.getElementById('stats').innerHTML = '<span style="color:var(--mut)">stats unavailable</span>'; }
+    // (#4) obs reality check — render the model-vs-observed table if obs_check.json exists
+    try {
+      const o = await (await fetch(`${b}/obs_check.json?v=${V}`)).json();
+      const st = o.stations || {}; const keys = Object.keys(st);
+      if (keys.length) {
+        const kt = x => (x==null?'—':x.toFixed(1));
+        document.getElementById('obsBody').innerHTML = keys.map(k => { const r = st[k];
+          return `<tr style="border-bottom:1px solid #1c2836"><td style="padding:6px 9px;color:#fff">${r.name||k}</td>`+
+            `<td style="padding:6px 9px">${kt(r.sustained_mean_kt)} kt</td>`+
+            `<td style="padding:6px 9px;color:#ffb257;font-weight:600">${kt(r.gust_max_kt)} kt</td>`+
+            `<td style="padding:6px 9px">${(r.gust_factor||0).toFixed(2)}</td>`+
+            `<td style="padding:6px 9px;color:var(--mut)">${r.dir_mean_deg==null?'—':r.dir_mean_deg+'°'}</td></tr>`; }).join('');
+        // flag if the LES gust factor badly under-reads the strongest observed gust factor
+        const bias = document.getElementById('obsBias');
+        const les = window.__lesGF || null, obs = o.obs_gust_factor_max;
+        if (les && obs && obs > les + 0.3) { bias.className='verdict no'; bias.textContent = `model GF ${les.toFixed(2)} ≪ obs GF ${obs.toFixed(2)} — obs win`; }
+        else if (les && obs) { bias.className='verdict ok'; bias.textContent = `model GF ${les.toFixed(2)} ≈ obs ${obs.toFixed(2)}`; }
+        else { bias.className=''; bias.textContent=''; }
+        document.getElementById('obsCheck').style.display = '';
+      } else { document.getElementById('obsCheck').style.display = 'none'; }
+    } catch(e){ document.getElementById('obsCheck').style.display = 'none'; }
   }
   // embedded in the tactics "Gusts" tab -> hide our own header (tactics provides the chrome)
   if (new URLSearchParams(location.search).has('embed')) { const h = document.querySelector('header'); if (h) h.style.display = 'none'; }

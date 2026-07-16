@@ -8,6 +8,25 @@
 ! time_step=15 (3 km outer, CFL<18). Render fills dates + staggered LES starts
 ! + placement + levels. F-offset init keeps the whole run same-day (no nest
 ! day-boundary): init from HRRR fXX valid ~race-6h, integrate through the race.
+!
+! --- LES TURBULENCE SPIN-UP (Rumble II 2026-07-15 post-mortem) -------------------
+! That evening the course-point gust factor came out ~1.30 (near the code's own
+! LAMINAR? flag of 1.15) while Logan/Castle Island gusted 17-23 kt (GF 1.8-2.2) as
+! 925/850 = 24/28 kt mixed down over a hot unstable BL. Root cause was NOT spin-up
+! TIME (d03/d04 already start 14/15 Z via --les-d04-hour/--les-d05-hour = ~7 h before
+! the 22:30 Z start) but inflow turbulence SEEDING: the nests inherit smooth parent
+! inflow and the ~7.5 km upwind fetch to the course is marginal to develop resolved
+! eddies from noise alone over water. Three remedies, in order of leverage:
+!   1. Cell-perturbation method (Munoz-Esparza) — seed theta perturbations in the
+!      relaxation zone so flow arriving over the course is already turbulent. This is
+!      the real fix. STAGED, NOT ENABLED: the exact namelist vars differ by WRF build
+!      and an unknown var is a FATAL — validate against THIS container's Registry
+!      (grep Registry for 'perturb'/'stoch') before uncommenting the &stoch block below.
+!   2. Wider d04 (more upwind fetch over the rough/heated city) — needs geogrid
+!      re-verification of i/j_parent_start, so do it deliberately, not inline here.
+!   3. Belt-and-braces: the dashboard now also carries a momentum-reservoir gust
+!      CEILING (surface + alpha*(925/850 - surface)) computed independently of the
+!      LES, so a laminar nest can no longer under-warn on gusts. See gust_viz.py.
 ! =====================================================================
 
 &time_control
@@ -118,6 +137,21 @@
  gwd_opt                  = 0, 0, 0, 0,
  epssm                    = 0.2, 0.5, 0.5, 0.5,
 /
+
+! --- LES inflow turbulence seeding (STAGED — validate vs container Registry first) ---
+! Uncomment ONLY after confirming these vars exist in this WRF build (an unknown
+! namelist var FATALs real.exe/wrf.exe). Cell-perturbation / stochastic theta kick in
+! the lateral relaxation zone so the marine nests develop resolved gusts within fetch
+! instead of arriving laminar. Then re-check gust_viz Step-5: gust_factor should climb
+! well above the 1.15 LAMINAR threshold. See the header post-mortem.
+! &stoch
+!  num_stoch          = 1,
+!  rand_perturb       = 0, 0, 1, 1,        ! perturb the two LES nests only
+!  perturb_bdy        = 1,                  ! seed in the boundary/relaxation zone
+!  gridpt_stddev_rand_pert = 0.03, 0.03, 0.5, 0.5,
+!  lengthscale_rand_pert   = 500., 500., 300., 100.,
+!  timescale_rand_pert     = 120., 120., 120., 120.,
+! /
 
 &bdy_control
  spec_bdy_width           = 5,

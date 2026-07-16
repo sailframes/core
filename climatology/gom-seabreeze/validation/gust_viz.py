@@ -20,6 +20,30 @@ CEN = dict(lat=42.46, lon=-70.77)   # course center
 
 def sh(c): subprocess.run(c, shell=True, check=True)
 
+def momentum_gust_kt(surface_kt, w925_kt=None, w850_kt=None, cape=None):
+    """Downward-momentum-transport gust ceiling — the physics the LES kept missing
+    (Rumble II 07-15: LES said gust factor 1.30 / peak 12 kt; Logan gusted 17-23 kt
+    with 925=24 / 850=28 kt sitting over a hot unstable BL). Gusts tap the wind just
+    above the surface layer, brought down efficiently when the BL is deep/unstable.
+    Brasseur-lite: gust = surface + alpha*(reservoir - surface).  Independent of
+    whether the LES actually spins up turbulence, so it can't go laminar-quiet."""
+    if surface_kt is None:
+        return None
+    aloft = 0.0
+    if w925_kt: aloft = max(aloft, float(w925_kt))
+    if w850_kt: aloft = max(aloft, 0.85 * float(w850_kt))   # 850 is higher -> discount (less fully mixed down)
+    if aloft <= surface_kt:
+        return round(float(surface_kt), 1)
+    alpha = 0.5                                              # mixing efficiency (neutral)
+    if cape is not None:
+        if cape > 1000: alpha = 0.9                         # deep/unstable -> efficient bring-down
+        elif cape > 500: alpha = 0.75
+    return round(float(surface_kt) + alpha * (aloft - float(surface_kt)), 1)
+
+def _cp(src, dst):                                          # fire-and-forget S3 upload (non-fatal)
+    try: subprocess.run(f"aws s3 cp --quiet {src} {dst}", shell=True, check=False)
+    except Exception as e: print("  upload skip", src, e)
+
 def load(prefix, scratch, hh0, hh1, domain="d05"):
     import xarray as xr
     out = subprocess.run(f"aws s3 ls {prefix}/", shell=True, capture_output=True, text=True).stdout
@@ -79,6 +103,16 @@ def main():
     ap.add_argument("--hh0", type=int, default=13); ap.add_argument("--hh1", type=int, default=18)
     ap.add_argument("--bbox", default=None, help="crop plots to lo0,lo1,la0,la1 (match LES extent for HRRR compare)")
     ap.add_argument("--coast-shp", default=None, help="dir with GSHHG GSHHS_f_L1.shp (detailed coast; else model LANDMASK)")
+    # (#1) ship the cheap stills BEFORE the slow movie so a movie timeout can't sink the whole render
+    ap.add_argument("--upload-prefix", default=None, help="s3 dir to cp gustiness/point_trace/step5 to as soon as written")
+    ap.add_argument("--no-movie", action="store_true", help="skip the (slow) animated movie — stills only")
+    ap.add_argument("--max-movie-frames", type=int, default=180, help="decimate movie to <= this many frames (streamplot cost)")
+    # (#2) momentum-reservoir gust ceiling — winds just above the surface layer that mix down in gusts
+    ap.add_argument("--w925-kt", type=float, default=None, help="925 hPa wind speed (kt) for the gust ceiling")
+    ap.add_argument("--w850-kt", type=float, default=None, help="850 hPa wind speed (kt) for the gust ceiling")
+    ap.add_argument("--cape", type=float, default=None, help="midday CAPE (J/kg) — sets bring-down efficiency")
+    # (#5) surface-vs-gradient veer
+    ap.add_argument("--gradient-dir", type=float, default=None, help="gradient/aloft wind FROM (deg) to compare vs surface")
     a = ap.parse_args()
     global CEN; CEN = dict(lat=a.cen_lat, lon=a.cen_lon)
     recs, LM = load(a.prefix, a.scratch, a.hh0, a.hh1, a.domain)
@@ -93,12 +127,24 @@ def main():
     spatial_std = float(np.mean([r["spd"].std() for r in recs]))
     pt = S[:, jj, ii]
     gust_factor_pt = float(pt.max()/max(pt.mean(), .1))
+    laminar = not (spatial_std > 0.6 and gust_factor_pt > 1.15)
+    course_mean = float(pt.mean())
+    # (#2) momentum-reservoir gust ceiling from the winds aloft (independent of LES turbulence)
+    gpot = momentum_gust_kt(course_mean, a.w925_kt, a.w850_kt, a.cape)
     verdict = dict(frames=len(recs), spatial_std_kt=round(spatial_std, 3),
-                   course_mean_kt=round(float(pt.mean()), 2), course_peak_kt=round(float(pt.max()), 2),
+                   course_mean_kt=round(course_mean, 2), course_peak_kt=round(float(pt.max()), 2),
                    course_gust_factor=round(gust_factor_pt, 3),
-                   turbulence="RESOLVED" if spatial_std > 0.6 and gust_factor_pt > 1.15 else "LAMINAR?(check spin-up)")
+                   gust_potential_kt=gpot,                 # momentum bring-down ceiling (925/850 + instability)
+                   w925_kt=a.w925_kt, w850_kt=a.w850_kt, cape=a.cape,
+                   turbulence="RESOLVED" if not laminar else "LAMINAR?(check spin-up)")
+    if gpot is not None and laminar and gpot > float(pt.max()) + 1:
+        # the LES went quiet but the reservoir aloft says it should gust harder -> flag it loudly
+        verdict["gust_warning"] = (f"LES near-laminar (peak {pt.max():.0f} kt) but momentum ceiling "
+                                   f"is {gpot:.0f} kt from {a.w925_kt or a.w850_kt:.0f} kt aloft — trust the ceiling")
     print("STEP-5:", json.dumps(verdict))
     json.dump(verdict, open(f"{a.outdir}/step5_turbulence.json", "w"))
+    if a.upload_prefix:                                     # (#1) ship the verdict immediately
+        _cp(f"{a.outdir}/step5_turbulence.json", f"{a.upload_prefix}/step5_turbulence.json")
     try:
         import matplotlib; matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -152,13 +198,25 @@ def main():
             ax.quiverkey(qh, 0.83, 0.055, 10, "10 kt", labelpos="E", coordinates="axes",
                          color="white", labelcolor="white", fontproperties={"weight": "bold", "size": 10})
         mean_wind_ref(ax)
-        ax.set_title(f"Gustiness (gust factor peak/mean) — {a.domain}\ncyan=coast · white=mean flow (→10kt key) · magenta=CONSTANT wind kt/dir")
+        # (#5) surface vs gradient/aloft direction — offshore flow backs/veers off the gradient
+        veer = ""
+        if a.gradient_dir is not None:
+            dd = ((mean_dir - a.gradient_dir + 180) % 360) - 180        # signed, surface minus gradient
+            veer = (f"\nsurface {mean_dir:.0f}° vs gradient {a.gradient_dir:.0f}° "
+                    f"({'backed' if dd < 0 else 'veered'} {abs(dd):.0f}°)")
+        gp = f" · gust ceiling {gpot:.0f} kt" if gpot is not None else ""
+        ax.set_title(f"Gustiness (gust factor peak/mean) — {a.domain}{gp}"
+                     f"\ncyan=coast · white=mean flow (→10kt key) · magenta=CONSTANT wind kt/dir{veer}")
         fig.colorbar(pc, label="peak/mean", fraction=0.046, pad=0.02)
         fig.savefig(f"{a.outdir}/gustiness.png", dpi=110, bbox_inches="tight"); plt.close(fig)
         # (3) point trace
         fig, ax = plt.subplots(2, 1, figsize=(11, 5), sharex=True)
         t = [r["t"] for r in recs]
         ax[0].plot(t, pt, "b-", lw=.8); ax[0].axhline(pt.mean(), color="k", ls="--", lw=.6)
+        if gpot is not None:                                 # (#2) momentum bring-down ceiling reference
+            ax[0].axhline(gpot, color="darkorange", ls="-", lw=1.3)
+            ax[0].annotate(f"gust ceiling {gpot:.0f} kt (925/850 bring-down)", (t[0], gpot),
+                           color="darkorange", fontsize=8, fontweight="bold", va="bottom")
         ax[0].set_ylabel("speed (kt)"); ax[0].set_title(f"Course-center wind ({a.domain} 1-min) — gust factor {gust_factor_pt:.2f}")
         ax[1].plot(t, [r["dr"][jj, ii] for r in recs], "g.", ms=2); ax[1].set_ylabel("dir (from, deg)"); ax[1].set_ylim(0, 360)
         import matplotlib.dates as mdates
@@ -169,6 +227,19 @@ def main():
         ax[1].xaxis.set_major_formatter(plt.FuncFormatter(_tfmt))
         ax[1].set_xlabel("time (Boston ET / UTC Z)")
         fig.savefig(f"{a.outdir}/point_trace.png", dpi=110, bbox_inches="tight"); plt.close(fig)
+        # (#1) UPLOAD THE STILLS NOW — before the slow movie. A movie timeout can no longer
+        # leave the dashboard showing a stale render; the map + trace + verdict are already live.
+        if a.upload_prefix:
+            for n in ("gustiness.png", "point_trace.png", "step5_turbulence.json"):
+                _cp(f"{a.outdir}/{n}", f"{a.upload_prefix}/{n}")
+            print(f"  uploaded stills -> {a.upload_prefix}")
+        if a.no_movie:
+            print("  --no-movie: skipping animation"); print(f"wrote gustiness.png, point_trace.png -> {a.outdir}  mean_dir={mean_dir:.0f}"); return
+        # (#1) bound movie cost: decimate to <= max_movie_frames (per-frame streamplot is the bottleneck)
+        if len(recs) > a.max_movie_frames:
+            step_m = int(np.ceil(len(recs) / a.max_movie_frames))
+            recs = recs[::step_m]; S = S[::step_m]
+            print(f"  movie decimated to {len(recs)} frames (every {step_m})")
         # (1) pressure movie -- arrows ANIMATE with the instantaneous flow each frame
         fig, ax = plt.subplots(figsize=(7.4, 7.6))
         svmax = float(min(np.nanpercentile(S, 99.5), max(10, float(peak.max()))))
