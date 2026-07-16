@@ -191,7 +191,7 @@ fig.text(0.5,0.943,"Friday 2026-07-17, 19:00 EDT start  ·  ~03:00 Sat finish  �
          ha="center",fontsize=9.5,color="#333")
 fig.text(0.5,0.925,"NOAA HRRR (3 km) and Environment Canada HRDPS (2.5 km) — two independent high-resolution models.",
          ha="center",fontsize=8.4,color="#555")
-fig.text(0.5,0.911,f"They agree on the overnight but split on the start — compared below and mapped on p.2.   ·   {gen} · ~24 h lead.",
+fig.text(0.5,0.911,f"They agree on the overnight but split on the start — see the difference map + tactics on p.2.   ·   {gen} · ~24 h lead.",
          ha="center",fontsize=7.9,color="#888",style="italic")
 
 axm=fig.add_axes([0.06,0.44,0.56,0.45]); draw_map(axm)
@@ -203,21 +203,27 @@ for m,c in [("HRRR (NOAA 3km)",HRRRC),("HRDPS (Canada 2.5km)",HRDPSC)]:
 axw.set_title("Course-mean wind (kt)",fontsize=8.5,fontweight="bold"); axw.legend(fontsize=6.5,loc="upper left")
 axw.xaxis.set_major_formatter(mdates.DateFormatter("%Hh")); axw.tick_params(labelsize=6.5); axw.grid(alpha=0.25)
 axw.axvspan(dt.datetime(2026,7,17,19),dt.datetime(2026,7,18,3),color="#ffe9a8",alpha=0.3)
-# vertical wind-shear profile (HRRR): light SE surface under a W-WNW flow aloft
-axs=fig.add_axes([0.655,0.435,0.32,0.205]); axs.set_xlim(-1.7,2.9); axs.set_ylim(-1.35,2.75)
-axs.set_aspect("equal"); axs.axis("off")
-axs.set_title("Wind shear — HRRR (mid-bay)",fontsize=8.5,fontweight="bold")
-for lab,k,y in [("Surface 10 m","10",0),("925 hPa ≈0.8 km","925",1),("850 hPa ≈1.5 km","850",2)]:
-    spd,d=SHEAR["HRRR (NOAA 3km)"][k]
-    to=(d+180)%360; L=0.10+0.022*spd
-    axs.annotate("",xy=(0.2+L*np.sin(np.radians(to)),y+L*np.cos(np.radians(to))),xytext=(0.2,y),
-                 arrowprops=dict(arrowstyle="-|>",color=ACCENT,lw=2.2,mutation_scale=13))
-    axs.text(1.25,y,f"{lab}\n{d:.0f}° / {spd:.0f} kt",fontsize=7,va="center",ha="left")
-axs.plot([0.2,0.2],[0,2],color="#ccc",lw=0.8,ls=":",zorder=0)
-inv=SHEAR["HRRR (NOAA 3km)"]["inv"]
-axs.text(-1.65,-0.55,f"~100° veer, wind ~2× in 1 km.\nLight SE surface under W–WNW ~16 kt.\n"
-         f"925 hPa {'+' if inv>=0 else ''}{inv:.1f}°C = {'inversion (decoupled)' if inv>0 else 'mixed'}.\n→ full explainer + tactics on p.3",
-         fontsize=6.2,color="#b3243b",va="top")
+# wind-shear diagram (HRRR mid-bay): speed-with-height profile + direction/veer fan
+_sh=SHEAR["HRRR (NOAA 3km)"]; _sfc=_sh["10"]; _w9=_sh["925"]; _w8=_sh["850"]; inv=_sh["inv"]
+fig.text(0.795,0.648,"Wind shear (HRRR, mid-bay)",ha="center",fontsize=8.5,fontweight="bold",color=ACCENT)
+axsp=fig.add_axes([0.645,0.45,0.14,0.175])
+axsp.axhspan(0,800,color="#f4dbd2",alpha=0.7,zorder=0)
+axsp.plot([_sfc[0],_w9[0],_w8[0]],[10,760,1500],"-o",color=ACCENT,lw=1.8,ms=4)
+axsp.plot([_sfc[0]],[10],marker="^",ms=8,color="#2e8b57")
+axsp.set_xlim(0,20); axsp.set_ylim(0,1650); axsp.tick_params(labelsize=6)
+axsp.set_xlabel("wind kt",fontsize=6.5); axsp.set_ylabel("height m",fontsize=6.5)
+axsp.set_title("speed ~2× / km",fontsize=7,fontweight="bold"); axsp.grid(alpha=0.25)
+axfan=fig.add_axes([0.805,0.45,0.15,0.175]); axfan.set_aspect("equal"); axfan.axis("off")
+axfan.set_title("veers ~100°",fontsize=7,fontweight="bold")
+axfan.add_patch(Circle((0,0),1.0,fill=False,color="#ccc"))
+for _l,_a in [("N",0),("E",90),("S",180),("W",270)]:
+    axfan.text(0.82*np.sin(np.radians(_a)),0.82*np.cos(np.radians(_a)),_l,ha="center",va="center",fontsize=5.5,color="#999")
+for (_spd,_d),_c in [(_sfc,"#e08a7a"),(_w9,"#5aa0d0"),(_w8,ACCENT)]:
+    _to=(_d+180)%360; _L=0.32+0.032*_spd
+    axfan.annotate("",xy=(_L*np.sin(np.radians(_to)),_L*np.cos(np.radians(_to))),xytext=(0,0),
+                   arrowprops=dict(arrowstyle="-|>",color=_c,lw=1.8,mutation_scale=9))
+axfan.set_xlim(-1.25,1.25); axfan.set_ylim(-1.28,1.25)
+axfan.text(0,-1.2,"arrows = downwind",fontsize=5,ha="center",color="#999")
 
 # synopsis
 hr0=np.nanmean([DATA["HRRR (NOAA 3km)"][n][1][1] for n,_,_ in CORRIDOR])
@@ -230,19 +236,18 @@ syn=("Light, weak-gradient southerly night (flat ~1016 mb, no front). The models
 fig.text(0.06,0.415,"Overnight synopsis",fontsize=12,fontweight="bold",color=ACCENT)
 fig.text(0.06,0.395,syn,fontsize=9.0,color="#222",wrap=True,va="top",ha="left")
 
-# ---- Left: how the two models differ · Right: conditions cards ----
-fig.text(0.06,0.235,"How the two models differ (this race)",fontsize=11,fontweight="bold",color=ACCENT)
+# ---- Left: wind shear explained · Right: conditions cards ----
+fig.text(0.06,0.235,"Wind shear — what's happening",fontsize=11,fontweight="bold",color=ACCENT)
 fig.text(0.06,0.212,
- "Both are high-res mesoscale models and AGREE on\n"
- "the overnight (S/SW 8–12 kt reach to Race Point).\n"
- "• HRRR (NOAA, 3 km): hourly, radar/satellite DA —\n"
- "  strong on convection, gusts & fast change. Holds\n"
- "  a decoupled SE surface here; gives a gust field.\n"
- "• HRDPS (Canada, 2.5 km): finer mesh; the better\n"
- "  local performer this season. Mixes more → a NW\n"
- "  land-breeze at the start; no separate gust field.\n"
- "They split most at the START (near-opposite dirs);\n"
- "they converge by the finish.",
+ "After sunset the sea-cooled surface decouples from the\n"
+ "wind above — HRRR shows a low-level inversion (the air\n"
+ f"~0.8 km up is {inv:+.1f}°C WARMER than the surface). The\n"
+ "course feels a light thermal breeze; aloft the true\n"
+ "gradient, W–WNW 13–16 kt, flows almost freely — the two\n"
+ "are ~100° apart and speed nearly doubles in the first km.\n"
+ "A puff is a brief down-mix of that faster, veered air; by\n"
+ "dawn the layer re-mixes and the surface veers to W/SW.\n"
+ "→ what to DO with it: tactics bullet ⑤ (p.2).",
  fontsize=7.5,color="#222",va="top")
 
 fig.text(0.52,0.235,"Conditions at a glance",fontsize=11,fontweight="bold",color=ACCENT)
@@ -305,115 +310,19 @@ tac=[
 ("② The crossing (21:00–01:00) — reach in the filling southerly","Both models fill S/SW 8-12 kt offshore — a starboard reach that frees as the wind veers right. Pressure lives offshore/south (mid-bay ~10 kt vs shore 2-6). Commit south; stay on the pressure side, don't over-stand north toward Cape Ann."),
 ("③ ⚠ LNG Northeast Gateway — hard avoid","Two STL buoys at ~42.40 N (−70.60/−70.59) sit just N of the direct line. NO ENTRY within 500 m, no anchoring within ~1 nm. The rhumb passes ~5 nm south — staying on/south of the line is both faster (more breeze) and legal."),
 ("④ Race Point & finish (01:00–03:00) — the tide gate","S/SSW 8-11 kt, gusts to 15 into Cape Cod Bay. Flood builds to Boston high 02:45 ≈ finish. Round Race Point BEFORE ~02:45 to carry the flood in; later boats meet the building ebb. Finish current itself is minor (near high slack)."),
-("⑤ Wind shear — expect shifty, veered puffs (full explainer + trim, p.3)","Light SE/S surface sits under a W–WNW 13–16 kt flow at 925/850 hPa with a low-level inversion (decoupled night). Puffs mix a little of that down — shiftier and veered toward W/NW vs the mean, but capped ~16 kt. Toward dawn the layer mixes and the surface veers/builds to the gradient. Don't bank on one wind angle; sail conservatively through puffs, keep the boat in pressure."),
+("⑤ Wind shear — shifty, veered puffs; trim for twist","Light SE/S surface under a W–WNW 13–16 kt flow (inversion = decoupled; diagram + explainer on p.1). Puffs arrive VEERED toward W/NW and a bit stronger (cap ~16 kt): upwind, starboard lifts / port headers — tack on the headers, don't commit a side. Trim for TWIST — ease the upper leech (the masthead sees the stronger, veered wind). By dawn the surface veers/builds to W/SW."),
 ("⑥ Night & hazards","Dark — thin crescent sets early, so nav by instruments, watches + lights set. Fog watch: July S-flow over ~20°C water; NWS not flagging Fri night but recheck AM. Seas ≤2 ft, no SCA expected."),
 ]
-y=0.385
-fig.text(0.06,0.41,"Tactics & strategy",fontsize=12,fontweight="bold",color=ACCENT)
+y=0.405
+fig.text(0.06,0.43,"Tactics & strategy",fontsize=12,fontweight="bold",color=ACCENT)
 for head,body in tac:
     fig.text(0.06,y,head,fontsize=9.1,fontweight="bold",color="#123")
     fig.text(0.06,y-0.014,body,fontsize=7.9,color="#222",wrap=True,va="top")
-    y-=0.0585
+    nlines=max(2,(len(body)+117)//118)   # variable row height so a long bullet won't collide
+    y-=0.021+0.0138*nlines
 fig.text(0.06,0.016,"Confidence: moderate on the overnight reach + tide timing (models agree); low on the exact start (transition + lead). Re-run race morning + pre-start.",
          fontsize=7.2,color="#777",style="italic")
 pdf.savefig(fig); plt.close(fig)
 
-# ---------- PAGE 3: WIND SHEAR ----------
-fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
-fig.text(0.5,0.965,"Wind Shear Tonight — What It Means for Your Race",ha="center",fontsize=16,fontweight="bold",color=ACCENT)
-fig.text(0.5,0.945,"A light surface wind sits under a stronger, differently-directed flow aloft — the defining feature of this overnight.",
-         ha="center",fontsize=9.3,color="#333")
-sfc=SHEAR["HRRR (NOAA 3km)"]["10"]; w9=SHEAR["HRRR (NOAA 3km)"]["925"]; w8=SHEAR["HRRR (NOAA 3km)"]["850"]; inv=SHEAR["HRRR (NOAA 3km)"]["inv"]
-
-# speed-with-height profile (left)
-axp=fig.add_axes([0.09,0.605,0.37,0.285])
-axp.axhspan(0,800,color="#f4dbd2",alpha=0.7,zorder=0)
-axp.plot([sfc[0],w9[0],w8[0]],[10,760,1500],"-o",color=ACCENT,lw=2.3,ms=6,zorder=3)
-axp.plot([sfc[0]],[10],marker="^",ms=13,color="#2e8b57",zorder=4)
-axp.text(sfc[0]+0.4,70,f"Surface {sfc[0]:.0f} kt — what the boat feels",fontsize=7.4,va="bottom")
-axp.text(w9[0]+0.4,760,f"925 hPa (~0.8 km) {w9[0]:.0f} kt",fontsize=7.4,va="center")
-axp.text(w8[0]+0.4,1500,f"850 hPa (~1.5 km) {w8[0]:.0f} kt",fontsize=7.4,va="center")
-axp.text(1.0,430,"stable layer /\ninversion cap\ndecouples the\nsurface",fontsize=7,color="#b3243b",va="center",fontweight="bold")
-axp.set_xlim(0,20); axp.set_ylim(0,1650); axp.set_xlabel("wind speed (kt)",fontsize=8); axp.set_ylabel("height (m)",fontsize=8)
-axp.set_title("Speed nearly doubles in the first km",fontsize=9,fontweight="bold",color=ACCENT)
-axp.tick_params(labelsize=7); axp.grid(alpha=0.25)
-
-# direction / veer fan (right)
-axr=fig.add_axes([0.55,0.595,0.40,0.30]); axr.set_aspect("equal"); axr.axis("off")
-axr.set_title("Wind veers ~100° clockwise with height",fontsize=9,fontweight="bold",color=ACCENT)
-axr.add_patch(Circle((0,0),1.0,fill=False,color="#ccc"))
-for lab,ang in [("N",0),("E",90),("S",180),("W",270)]:
-    axr.text(0.9*np.sin(np.radians(ang)),0.9*np.cos(np.radians(ang)),lab,ha="center",va="center",fontsize=7.5,color="#999")
-for (spd,d),c,lab in [(sfc,"#e08a7a","Surface (SE wind)"),(w9,"#5aa0d0","925 hPa (W wind)"),(w8,ACCENT,"850 hPa (WSW wind)")]:
-    to=(d+180)%360; L=0.30+0.038*spd; dx=L*np.sin(np.radians(to)); dy=L*np.cos(np.radians(to))
-    axr.annotate("",xy=(dx,dy),xytext=(0,0),arrowprops=dict(arrowstyle="-|>",color=c,lw=2.6,mutation_scale=15))
-    axr.text(dx*1.18,dy*1.18,f"{lab}\n{d:.0f}° / {spd:.0f} kt",fontsize=6.8,ha="center",va="center",color=c,fontweight="bold")
-axr.set_xlim(-1.4,1.4); axr.set_ylim(-1.4,1.3)
-axr.text(0,-1.32,"arrows point downwind — the way the wind blows (° = wind's source)",fontsize=6.5,ha="center",color="#999")
-
-fig.text(0.09,0.565,"What's happening",fontsize=12,fontweight="bold",color=ACCENT)
-fig.text(0.09,0.545,
- "After sunset the sea-cooled surface layer decouples from the wind above — HRRR shows a low-level inversion (925 hPa is "
- f"{inv:+.1f}°C WARMER than the surface, a stable cap). Below it the course feels a light, thermal breeze (dying SE sea-breeze / "
- "land-breeze); above it the true gradient wind, W–WNW 13–16 kt, flows almost unimpeded. The two are ~100° apart and the speed "
- "nearly doubles in the first km. A puff is a brief moment when some of that faster, veered air mixes down; toward dawn the whole "
- "layer re-mixes and the surface swings toward the gradient.",
- fontsize=9,color="#222",va="top",wrap=True)
-
-fig.text(0.09,0.445,"Tactical consequences for sailing",fontsize=12,fontweight="bold",color=ACCENT)
-tac3=[
-("Puffs come in veered AND stronger","Not just more pressure — the puff arrives from further right (toward W/NW). Upwind: starboard lifts, port headers; reaching it frees then heads. Anticipate the shift, don't just trim for speed."),
-("Play the shifts — don't commit a side","Light and shifty rewards the boat that tacks on headers and keeps the bow in pressure, not a big side bet. The models even disagree on direction, so trust what you see over any single number."),
-("Trim for twist","The masthead sees a stronger, veered wind than the deck. Add twist — ease the upper leech (traveller down / vang off a touch upwind; more headsail twist). A closed leech stalls or backwinds up top."),
-("Masthead ≠ deck","Your wind vane and the water/telltales will disagree — that's the shear, not a fault. Steer to the jib telltales + boat feel; read the masthead fly to see the next puff/veer coming."),
-("Expect a dawn build & veer","As mixing returns near sunrise the gradient reaches the surface: the breeze should veer toward W/SW and build. Set up for the new wind before it fills — it comes from the gradient (offshore/right) side."),
-("Hunt where it mixes down","The fast air aloft is a reservoir; darker, textured water marks where it's reaching the surface. Sail toward the pressure — but it's capped ~16 kt, so gains are about staying IN pressure, not surviving gusts."),
-]
-y=0.42
-for h,b in tac3:
-    fig.text(0.09,y,"• "+h,fontsize=9.3,fontweight="bold",color="#123")
-    fig.text(0.11,y-0.016,b,fontsize=8.2,color="#222",va="top",wrap=True)
-    y-=0.064
-fig.text(0.09,0.018,"SailFrames race weather · wind-shear from HRRR 925/850 hPa vs 10 m · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
-pdf.savefig(fig); plt.close(fig)
 pdf.close()
-print("wrote docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf")
-
-# ============================ SIMPLE PLAIN-LANGUAGE 1-PAGER ============================
-spdf=PdfPages("docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17_SIMPLE.pdf")
-fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
-fig.text(0.5,0.955,"Marblehead → Provincetown — Race Weather at a Glance",ha="center",fontsize=16.5,fontweight="bold",color=ACCENT)
-fig.text(0.5,0.933,"Friday, 7 PM start  ·  finish around 3 AM Saturday  ·  about 40 miles across the bay",ha="center",fontsize=10,color="#333")
-axm=fig.add_axes([0.10,0.515,0.80,0.39]); draw_map(axm)
-axm.set_title("Your route — Marblehead to Provincetown (red X = keep-out zone)",fontsize=10,fontweight="bold",color=ACCENT)
-
-fig.text(0.09,0.487,"The short version",fontsize=13,fontweight="bold",color=ACCENT)
-fig.text(0.09,0.465,
- "A tricky, light start just after sunset, then a steady breeze from the south fills in and you reach across the bay in "
- "8–12 kt with almost flat water. It stays mild (about 65°F) but damp overnight, and fog is possible. Nothing heavy — the "
- "challenge is the light, shifty start and timing the tide at the Provincetown end.",
- fontsize=10,color="#222",va="top",wrap=True)
-
-fig.text(0.09,0.385,"What to do",fontsize=13,fontweight="bold",color=ACCENT)
-simple=[
- "Start smart — the wind is light and shifty at 7 PM. Get a clean lane off the line, then head offshore where there's more breeze.",
- "Reach across in a steady southerly (8–12 kt). Stay out in the pressure, not tucked near the shore.",
- "Expect puffs to shift — a bit stronger and from a slightly different angle. Don't over-commit to one direction.",
- "Avoid the LNG buoys (red X on the map) — a no-entry zone. The straight-line course passes safely south of it.",
- "Round Race Point before about 2:45 AM so the tide carries you into Provincetown; later, it pushes against you.",
- "Dress for damp — mild (~65°F) but wet, with possible fog. Bring layers, and check the forecast again in the morning.",
-]
-y=0.36
-for s in simple:
-    fig.text(0.10,y,"•",fontsize=11,fontweight="bold",color=ACCENT)
-    fig.text(0.125,y+0.001,s,fontsize=9.7,color="#222",va="top",wrap=True)
-    y-=0.046
-
-fig.text(0.09,0.085,"Key facts",fontsize=11.5,fontweight="bold",color=ACCENT)
-fig.text(0.09,0.065,
- "Wind: from the south, 8–12 kt (light ~5 kt at the start), gusts to ~15.   ·   Water: nearly flat, under 1 ft.   ·   "
- "Air: ~65°F all night, damp, fog possible.   ·   Tide: favorable into Provincetown before ~2:45 AM.",
- fontsize=9,color="#222",va="top",wrap=True)
-fig.text(0.09,0.03,"SailFrames race weather · plain-language summary · NOT for navigation — verify with official forecasts.",fontsize=7,color="#999")
-spdf.savefig(fig); plt.close(fig); spdf.close()
-print("wrote docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17_SIMPLE.pdf")
+print("wrote docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf (2 pages)")
