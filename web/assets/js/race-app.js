@@ -8100,7 +8100,9 @@ function updatePlaybackPosition() {
 
     // Weather overlay (HRRR wind / sea-breeze / tide / relief / dist) — driven by
     // the race clock. Init once (after map + race are ready), then sync each tick.
-    if (window.SFWeather && map && currentRace?.start_time) {
+    // Admin-only: both the topright control panel and the bottom-left color scale
+    // (legend) are gated behind IS_ADMIN, so non-admins never see the overlay.
+    if (window.SFWeather && IS_ADMIN && map && currentRace?.start_time) {
         const wxMs = new Date(currentRace.start_time).getTime() + currentTime * 1000;
         if (!sfwInited) {
             sfwInited = true;
