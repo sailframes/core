@@ -216,7 +216,7 @@ for lab,k,y in [("Surface 10 m","10",0),("925 hPa ≈0.8 km","925",1),("850 hPa 
 axs.plot([0.2,0.2],[0,2],color="#ccc",lw=0.8,ls=":",zorder=0)
 inv=SHEAR["HRRR (NOAA 3km)"]["inv"]
 axs.text(-1.65,-0.55,f"~100° veer, wind ~2× in 1 km.\nLight SE surface under W–WNW ~16 kt.\n"
-         f"925 hPa {'+' if inv>=0 else ''}{inv:.1f}°C = {'inversion (decoupled)' if inv>0 else 'mixed'}.",
+         f"925 hPa {'+' if inv>=0 else ''}{inv:.1f}°C = {'inversion (decoupled)' if inv>0 else 'mixed'}.\n→ full explainer + tactics on p.3",
          fontsize=6.2,color="#b3243b",va="top")
 
 # synopsis
@@ -305,7 +305,7 @@ tac=[
 ("② The crossing (21:00–01:00) — reach in the filling southerly","Both models fill S/SW 8-12 kt offshore — a starboard reach that frees as the wind veers right. Pressure lives offshore/south (mid-bay ~10 kt vs shore 2-6). Commit south; stay on the pressure side, don't over-stand north toward Cape Ann."),
 ("③ ⚠ LNG Northeast Gateway — hard avoid","Two STL buoys at ~42.40 N (−70.60/−70.59) sit just N of the direct line. NO ENTRY within 500 m, no anchoring within ~1 nm. The rhumb passes ~5 nm south — staying on/south of the line is both faster (more breeze) and legal."),
 ("④ Race Point & finish (01:00–03:00) — the tide gate","S/SSW 8-11 kt, gusts to 15 into Cape Cod Bay. Flood builds to Boston high 02:45 ≈ finish. Round Race Point BEFORE ~02:45 to carry the flood in; later boats meet the building ebb. Finish current itself is minor (near high slack)."),
-("⑤ Wind shear — expect shifty, veered puffs","Light SE/S surface sits under a W–WNW 13–16 kt flow at 925/850 hPa with a low-level inversion (decoupled night). Puffs mix a little of that down — shiftier and veered toward W/NW vs the mean, but capped ~16 kt. Toward dawn the layer mixes and the surface veers/builds to the gradient. Don't bank on one wind angle; sail conservatively through puffs, keep the boat in pressure."),
+("⑤ Wind shear — expect shifty, veered puffs (full explainer + trim, p.3)","Light SE/S surface sits under a W–WNW 13–16 kt flow at 925/850 hPa with a low-level inversion (decoupled night). Puffs mix a little of that down — shiftier and veered toward W/NW vs the mean, but capped ~16 kt. Toward dawn the layer mixes and the surface veers/builds to the gradient. Don't bank on one wind angle; sail conservatively through puffs, keep the boat in pressure."),
 ("⑥ Night & hazards","Dark — thin crescent sets early, so nav by instruments, watches + lights set. Fog watch: July S-flow over ~20°C water; NWS not flagging Fri night but recheck AM. Seas ≤2 ft, no SCA expected."),
 ]
 y=0.385
@@ -316,6 +316,65 @@ for head,body in tac:
     y-=0.0585
 fig.text(0.06,0.016,"Confidence: moderate on the overnight reach + tide timing (models agree); low on the exact start (transition + lead). Re-run race morning + pre-start.",
          fontsize=7.2,color="#777",style="italic")
+pdf.savefig(fig); plt.close(fig)
+
+# ---------- PAGE 3: WIND SHEAR ----------
+fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
+fig.text(0.5,0.965,"Wind Shear Tonight — What It Means for Your Race",ha="center",fontsize=16,fontweight="bold",color=ACCENT)
+fig.text(0.5,0.945,"A light surface wind sits under a stronger, differently-directed flow aloft — the defining feature of this overnight.",
+         ha="center",fontsize=9.3,color="#333")
+sfc=SHEAR["HRRR (NOAA 3km)"]["10"]; w9=SHEAR["HRRR (NOAA 3km)"]["925"]; w8=SHEAR["HRRR (NOAA 3km)"]["850"]; inv=SHEAR["HRRR (NOAA 3km)"]["inv"]
+
+# speed-with-height profile (left)
+axp=fig.add_axes([0.09,0.605,0.37,0.285])
+axp.axhspan(0,800,color="#f4dbd2",alpha=0.7,zorder=0)
+axp.plot([sfc[0],w9[0],w8[0]],[10,760,1500],"-o",color=ACCENT,lw=2.3,ms=6,zorder=3)
+axp.plot([sfc[0]],[10],marker="^",ms=13,color="#2e8b57",zorder=4)
+axp.text(sfc[0]+0.4,70,f"Surface {sfc[0]:.0f} kt — what the boat feels",fontsize=7.4,va="bottom")
+axp.text(w9[0]+0.4,760,f"925 hPa (~0.8 km) {w9[0]:.0f} kt",fontsize=7.4,va="center")
+axp.text(w8[0]+0.4,1500,f"850 hPa (~1.5 km) {w8[0]:.0f} kt",fontsize=7.4,va="center")
+axp.text(1.0,430,"stable layer /\ninversion cap\ndecouples the\nsurface",fontsize=7,color="#b3243b",va="center",fontweight="bold")
+axp.set_xlim(0,20); axp.set_ylim(0,1650); axp.set_xlabel("wind speed (kt)",fontsize=8); axp.set_ylabel("height (m)",fontsize=8)
+axp.set_title("Speed nearly doubles in the first km",fontsize=9,fontweight="bold",color=ACCENT)
+axp.tick_params(labelsize=7); axp.grid(alpha=0.25)
+
+# direction / veer fan (right)
+axr=fig.add_axes([0.55,0.595,0.40,0.30]); axr.set_aspect("equal"); axr.axis("off")
+axr.set_title("Wind veers ~100° clockwise with height",fontsize=9,fontweight="bold",color=ACCENT)
+axr.add_patch(Circle((0,0),1.0,fill=False,color="#ccc"))
+for lab,ang in [("N",0),("E",90),("S",180),("W",270)]:
+    axr.text(0.9*np.sin(np.radians(ang)),0.9*np.cos(np.radians(ang)),lab,ha="center",va="center",fontsize=7.5,color="#999")
+for (spd,d),c,lab in [(sfc,"#e08a7a","Surface (SE)"),(w9,"#5aa0d0","925 hPa (W)"),(w8,ACCENT,"850 hPa (WSW)")]:
+    L=0.30+0.038*spd; dx=L*np.sin(np.radians(d)); dy=L*np.cos(np.radians(d))
+    axr.annotate("",xy=(dx,dy),xytext=(0,0),arrowprops=dict(arrowstyle="-|>",color=c,lw=2.6,mutation_scale=15))
+    axr.text(dx*1.16,dy*1.16,f"{lab}\n{d:.0f}°/{spd:.0f}kt",fontsize=6.8,ha="center",va="center",color=c,fontweight="bold")
+axr.set_xlim(-1.35,1.35); axr.set_ylim(-1.4,1.3)
+axr.text(0,-1.32,"arrows point to where the wind comes FROM",fontsize=6.5,ha="center",color="#999")
+
+fig.text(0.09,0.565,"What's happening",fontsize=12,fontweight="bold",color=ACCENT)
+fig.text(0.09,0.545,
+ "After sunset the sea-cooled surface layer decouples from the wind above — HRRR shows a low-level inversion (925 hPa is "
+ f"{inv:+.1f}°C WARMER than the surface, a stable cap). Below it the course feels a light, thermal breeze (dying SE sea-breeze / "
+ "land-breeze); above it the true gradient wind, W–WNW 13–16 kt, flows almost unimpeded. The two are ~100° apart and the speed "
+ "nearly doubles in the first km. A puff is a brief moment when some of that faster, veered air mixes down; toward dawn the whole "
+ "layer re-mixes and the surface swings toward the gradient.",
+ fontsize=9,color="#222",va="top",wrap=True)
+
+fig.text(0.09,0.445,"Tactical consequences for sailing",fontsize=12,fontweight="bold",color=ACCENT)
+tac3=[
+("Puffs come in veered AND stronger","Not just more pressure — the puff arrives from further right (toward W/NW). Upwind: starboard lifts, port headers; reaching it frees then heads. Anticipate the shift, don't just trim for speed."),
+("Play the shifts — don't commit a side","Light and shifty rewards the boat that tacks on headers and keeps the bow in pressure, not a big side bet. The models even disagree on direction, so trust what you see over any single number."),
+("Trim for twist","The masthead sees a stronger, veered wind than the deck. Add twist — ease the upper leech (traveller down / vang off a touch upwind; more headsail twist). A closed leech stalls or backwinds up top."),
+("Masthead ≠ deck","Your wind vane and the water/telltales will disagree — that's the shear, not a fault. Steer to the jib telltales + boat feel; read the masthead fly to see the next puff/veer coming."),
+("Expect a dawn build & veer","As mixing returns near sunrise the gradient reaches the surface: the breeze should veer toward W/SW and build. Set up for the new wind before it fills — it comes from the gradient (offshore/right) side."),
+("Hunt where it mixes down","The fast air aloft is a reservoir; darker, textured water marks where it's reaching the surface. Sail toward the pressure — but it's capped ~16 kt, so gains are about staying IN pressure, not surviving gusts."),
+]
+y=0.42
+for h,b in tac3:
+    fig.text(0.09,y,"• "+h,fontsize=9.3,fontweight="bold",color="#123")
+    fig.text(0.11,y-0.016,b,fontsize=8.2,color="#222",va="top",wrap=True)
+    y-=0.064
+fig.text(0.09,0.018,"SailFrames race weather · wind-shear from HRRR 925/850 hPa vs 10 m · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
 pdf.savefig(fig); plt.close(fig)
 pdf.close()
 print("wrote docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf")
