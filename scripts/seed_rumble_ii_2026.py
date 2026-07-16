@@ -11,13 +11,14 @@ the stored race only needs per-boat rating/finish_time/finish_status and
 per-class start_time/rating_type. (All 36 finishers verified locally:
 elapsed and corrected match the sheet within ±2 s.)
 
-Four boats also have GPS tracks recorded on phone / watch apps; those are
+Five boats also have GPS tracks recorded on phone / watch apps; those are
 converted/uploaded and attached by boat_id so they play back on race.html:
 
-  - Agora    (52475,   Class B #1)  Sensor Logger  → Location.csv → GPX
-  - Saorsa   (USA 1111,Class B #2)  Navionics      → GPX  (folder spells it "Soarsa")
-  - Badger   (220,     Class D #1)  Waterspeed     → GPX
-  - Impromptu(6013,    Class F #1)  Sensor Logger  → Location.csv → GPX
+  - Agora     (52475,   Class B #1)  Sensor Logger  → Location.csv → GPX
+  - Saorsa    (USA 1111,Class B #2)  Navionics      → GPX  (folder spells it "Soarsa")
+  - Uproarious(USA 78,  Class B #8)  BasicAirData   → GPX
+  - Badger    (220,     Class D #1)  Waterspeed     → GPX
+  - Impromptu (6013,    Class F #1)  Sensor Logger  → Location.csv → GPX
 
 Boats are matched to the catalog by sail_number (real numbers) or by name
 (sail-less boats) and REUSED without patching, so we don't clobber a boat's
@@ -165,10 +166,11 @@ BOAT_TYPE_LOA = {
 
 # sail_number → ('gpx', glob) ready-made GPX, or ('sl', glob) Sensor Logger folder.
 TRACKS = {
-    "52475":    ("sl",  "Agora*"),      # Sensor Logger (Location.csv)
-    "USA 1111": ("gpx", "Soarsa*.gpx"), # Navionics (sheet spells it "Saorsa")
-    "220":      ("gpx", "Badger*.gpx"), # Waterspeed
-    "6013":     ("sl",  "Impromptu*"),  # Sensor Logger (Location.csv)
+    "52475":    ("sl",  "Agora*"),          # Sensor Logger (Location.csv)
+    "USA 1111": ("gpx", "Soarsa*.gpx"),     # Navionics (sheet spells it "Saorsa")
+    "220":      ("gpx", "Badger*.gpx"),     # Waterspeed
+    "6013":     ("sl",  "Impromptu*"),      # Sensor Logger (Location.csv)
+    "USA 78":   ("gpx", "Uproarious*.gpx"), # BasicAirData GPS Logger
 }
 
 
