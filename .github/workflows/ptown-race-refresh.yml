@@ -21,26 +21,32 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install PDF deps
+        run: pip install --quiet matplotlib numpy
       - name: Refresh corridor forecast
         run: |
           python3 climatology/corridor_forecast.py climatology/zones/marblehead_provincetown.json \
             --out docs/reports/mhd_ptown_brief.json \
             --md  docs/reports/RACE_BRIEFING_MARBLEHEAD_PTOWN_2026-07-17.auto.md
-      - name: Commit refreshed briefing
+      - name: Regenerate 2-page race weather PDF (HRRR + HRDPS)
+        continue-on-error: true   # a PDF hiccup must not block the briefing commit
+        run: python3 climatology/gom-seabreeze/validation/make_ptown_wx_pdf.py
+      - name: Commit refreshed briefing + PDF
         run: |
           git config user.name  "sailframes-bot"
           git config user.email "noreply@sailframes.com"
           git add docs/reports/mhd_ptown_brief.json \
-                  docs/reports/RACE_BRIEFING_MARBLEHEAD_PTOWN_2026-07-17.auto.md
+                  docs/reports/RACE_BRIEFING_MARBLEHEAD_PTOWN_2026-07-17.auto.md \
+                  docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf
           if git diff --cached --quiet; then
             echo "no forecast change"
           else
-            git commit -m "race refresh: Marblehead->Provincetown corridor forecast ($(date -u +%FT%TZ))"
+            git commit -m "race refresh: Marblehead->Provincetown briefing + PDF ($(date -u +%FT%TZ))"
             git push
           fi
