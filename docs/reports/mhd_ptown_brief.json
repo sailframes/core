@@ -2,7 +2,7 @@
  "zone": "Marblehead \u2192 Provincetown (overnight distance race)",
  "race": {
   "date": "2026-07-17",
-  "start_local": "2026-07-17T19:00",
+  "start_local": "2026-07-17T19:05",
   "expected_finish_local": "2026-07-18T03:00",
   "window_local": [
    "2026-07-17T18:00",
@@ -10,377 +10,377 @@
   ],
   "tz": "America/New_York"
  },
- "generated_utc": "2026-07-17T12:16Z",
+ "generated_utc": "2026-07-17T17:20Z",
  "corridor": {
   "Marblehead start": [
    {
     "t": "2026-07-17T18:00",
-    "dir": 100,
-    "kt": 5.3,
-    "gust": 12.4,
+    "dir": 176,
+    "kt": 3.1,
+    "gust": 12.2,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T19:00",
-    "dir": 52,
-    "kt": 5.4,
-    "gust": 8.6,
-    "mslp": 1014
+    "dir": 107,
+    "kt": 7.3,
+    "gust": 11.9,
+    "mslp": 1015
    },
    {
     "t": "2026-07-17T20:00",
-    "dir": 55,
-    "kt": 3.8,
+    "dir": 135,
+    "kt": 5.8,
     "gust": 5.6,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T21:00",
-    "dir": 40,
-    "kt": 3.3,
-    "gust": 3.5,
-    "mslp": 1015
+    "dir": 121,
+    "kt": 4.1,
+    "gust": 4.1,
+    "mslp": 1016
    },
    {
     "t": "2026-07-17T22:00",
-    "dir": 80,
-    "kt": 2.2,
-    "gust": 3.5,
-    "mslp": 1015
+    "dir": 137,
+    "kt": 4.3,
+    "gust": 4.3,
+    "mslp": 1016
    },
    {
     "t": "2026-07-17T23:00",
-    "dir": 157,
-    "kt": 1.5,
+    "dir": 147,
+    "kt": 3.2,
     "gust": 3.7,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T00:00",
-    "dir": 329,
-    "kt": 2.3,
-    "gust": 2.3,
+    "dir": 215,
+    "kt": 2.4,
+    "gust": 4.1,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T01:00",
-    "dir": 315,
-    "kt": 0.3,
-    "gust": 1.6,
+    "dir": 263,
+    "kt": 1.6,
+    "gust": 3.9,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T02:00",
-    "dir": 99,
-    "kt": 2.4,
-    "gust": 3.1,
-    "mslp": 1015
+    "dir": 86,
+    "kt": 2.5,
+    "gust": 4.1,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T03:00",
-    "dir": 256,
-    "kt": 0.8,
-    "gust": 2.9,
-    "mslp": 1015
+    "dir": 176,
+    "kt": 2.5,
+    "gust": 7.4,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T04:00",
-    "dir": 24,
-    "kt": 3.4,
-    "gust": 3.3,
-    "mslp": 1015
+    "dir": 145,
+    "kt": 2.4,
+    "gust": 7.8,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T05:00",
-    "dir": 156,
-    "kt": 3.8,
-    "gust": 4.1,
+    "dir": 187,
+    "kt": 10.6,
+    "gust": 12.6,
     "mslp": 1015
    },
    {
     "t": "2026-07-18T06:00",
-    "dir": 201,
-    "kt": 4.8,
-    "gust": 7.8,
+    "dir": 190,
+    "kt": 5.7,
+    "gust": 9.9,
     "mslp": 1015
    }
   ],
   "Mass Bay mid": [
    {
     "t": "2026-07-17T18:00",
-    "dir": 141,
-    "kt": 10.0,
-    "gust": 12.8,
+    "dir": 126,
+    "kt": 8.6,
+    "gust": 9.9,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T19:00",
-    "dir": 76,
-    "kt": 7.0,
-    "gust": 7.6,
+    "dir": 140,
+    "kt": 8.4,
+    "gust": 11.5,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T20:00",
-    "dir": 107,
-    "kt": 5.5,
-    "gust": 7.4,
-    "mslp": 1015
+    "dir": 150,
+    "kt": 7.8,
+    "gust": 11.5,
+    "mslp": 1016
    },
    {
     "t": "2026-07-17T21:00",
-    "dir": 103,
-    "kt": 4.2,
-    "gust": 5.8,
-    "mslp": 1015
+    "dir": 154,
+    "kt": 7.6,
+    "gust": 9.9,
+    "mslp": 1016
    },
    {
     "t": "2026-07-17T22:00",
-    "dir": 113,
-    "kt": 4.9,
-    "gust": 7.0,
-    "mslp": 1015
+    "dir": 149,
+    "kt": 6.4,
+    "gust": 8.2,
+    "mslp": 1016
    },
    {
     "t": "2026-07-17T23:00",
-    "dir": 159,
-    "kt": 5.4,
+    "dir": 140,
+    "kt": 5.1,
     "gust": 6.0,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T00:00",
-    "dir": 172,
-    "kt": 5.9,
-    "gust": 6.4,
+    "dir": 152,
+    "kt": 6.2,
+    "gust": 8.0,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T01:00",
-    "dir": 177,
-    "kt": 7.6,
-    "gust": 8.6,
+    "dir": 180,
+    "kt": 6.6,
+    "gust": 8.0,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T02:00",
-    "dir": 173,
-    "kt": 7.8,
-    "gust": 9.7,
-    "mslp": 1015
+    "dir": 195,
+    "kt": 6.6,
+    "gust": 8.6,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T03:00",
-    "dir": 170,
-    "kt": 6.7,
-    "gust": 9.1,
-    "mslp": 1015
+    "dir": 207,
+    "kt": 8.1,
+    "gust": 12.6,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T04:00",
-    "dir": 170,
-    "kt": 8.1,
-    "gust": 9.7,
-    "mslp": 1015
+    "dir": 196,
+    "kt": 7.1,
+    "gust": 11.5,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T05:00",
-    "dir": 180,
-    "kt": 7.2,
-    "gust": 13.8,
-    "mslp": 1015
+    "dir": 200,
+    "kt": 10.1,
+    "gust": 12.8,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T06:00",
-    "dir": 196,
-    "kt": 12.3,
-    "gust": 15.9,
+    "dir": 189,
+    "kt": 14.4,
+    "gust": 17.7,
     "mslp": 1015
    }
   ],
   "Stellwagen / CC Bay approach": [
    {
     "t": "2026-07-17T18:00",
-    "dir": 148,
-    "kt": 7.3,
-    "gust": 12.4,
+    "dir": 125,
+    "kt": 8.5,
+    "gust": 10.1,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T19:00",
-    "dir": 139,
-    "kt": 8.3,
-    "gust": 13.0,
+    "dir": 159,
+    "kt": 8.1,
+    "gust": 12.1,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T20:00",
-    "dir": 153,
-    "kt": 9.1,
-    "gust": 15.2,
-    "mslp": 1015
-   },
-   {
-    "t": "2026-07-17T21:00",
-    "dir": 171,
-    "kt": 10.4,
-    "gust": 16.3,
-    "mslp": 1015
-   },
-   {
-    "t": "2026-07-17T22:00",
-    "dir": 171,
-    "kt": 10.0,
-    "gust": 14.2,
-    "mslp": 1015
-   },
-   {
-    "t": "2026-07-17T23:00",
-    "dir": 167,
-    "kt": 9.2,
-    "gust": 12.2,
+    "dir": 154,
+    "kt": 7.1,
+    "gust": 12.1,
     "mslp": 1016
    },
    {
-    "t": "2026-07-18T00:00",
-    "dir": 169,
-    "kt": 9.1,
+    "t": "2026-07-17T21:00",
+    "dir": 146,
+    "kt": 7.0,
+    "gust": 9.5,
+    "mslp": 1016
+   },
+   {
+    "t": "2026-07-17T22:00",
+    "dir": 143,
+    "kt": 7.1,
+    "gust": 9.3,
+    "mslp": 1016
+   },
+   {
+    "t": "2026-07-17T23:00",
+    "dir": 155,
+    "kt": 7.5,
     "gust": 11.5,
     "mslp": 1016
    },
    {
+    "t": "2026-07-18T00:00",
+    "dir": 177,
+    "kt": 7.6,
+    "gust": 11.1,
+    "mslp": 1016
+   },
+   {
     "t": "2026-07-18T01:00",
-    "dir": 189,
+    "dir": 192,
     "kt": 8.3,
     "gust": 10.5,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T02:00",
-    "dir": 183,
-    "kt": 7.4,
-    "gust": 9.5,
-    "mslp": 1015
+    "dir": 177,
+    "kt": 6.4,
+    "gust": 8.4,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T03:00",
-    "dir": 175,
-    "kt": 8.2,
-    "gust": 10.3,
-    "mslp": 1015
+    "dir": 208,
+    "kt": 7.7,
+    "gust": 11.9,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T04:00",
-    "dir": 174,
-    "kt": 9.6,
-    "gust": 12.1,
-    "mslp": 1015
+    "dir": 205,
+    "kt": 8.3,
+    "gust": 13.4,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T05:00",
-    "dir": 193,
-    "kt": 12.2,
-    "gust": 15.4,
-    "mslp": 1015
+    "dir": 207,
+    "kt": 8.5,
+    "gust": 12.8,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T06:00",
-    "dir": 199,
-    "kt": 9.7,
-    "gust": 13.4,
-    "mslp": 1015
+    "dir": 188,
+    "kt": 13.6,
+    "gust": 17.7,
+    "mslp": 1016
    }
   ],
   "Race Point / P-town": [
    {
     "t": "2026-07-17T18:00",
-    "dir": 168,
-    "kt": 9.5,
-    "gust": 11.1,
+    "dir": 146,
+    "kt": 4.2,
+    "gust": 4.5,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T19:00",
-    "dir": 153,
-    "kt": 8.3,
-    "gust": 11.3,
+    "dir": 154,
+    "kt": 7.1,
+    "gust": 8.2,
     "mslp": 1015
    },
    {
     "t": "2026-07-17T20:00",
-    "dir": 169,
-    "kt": 10.1,
-    "gust": 15.9,
-    "mslp": 1015
+    "dir": 146,
+    "kt": 5.9,
+    "gust": 9.1,
+    "mslp": 1016
    },
    {
     "t": "2026-07-17T21:00",
-    "dir": 173,
-    "kt": 9.2,
-    "gust": 14.6,
+    "dir": 138,
+    "kt": 5.5,
+    "gust": 8.2,
     "mslp": 1016
    },
    {
     "t": "2026-07-17T22:00",
-    "dir": 169,
-    "kt": 8.3,
-    "gust": 13.0,
+    "dir": 147,
+    "kt": 5.3,
+    "gust": 9.5,
     "mslp": 1016
    },
    {
     "t": "2026-07-17T23:00",
-    "dir": 166,
-    "kt": 8.2,
-    "gust": 12.2,
+    "dir": 159,
+    "kt": 5.8,
+    "gust": 12.4,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T00:00",
     "dir": 171,
-    "kt": 7.9,
-    "gust": 10.7,
-    "mslp": 1017
+    "kt": 6.1,
+    "gust": 11.1,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T01:00",
-    "dir": 177,
-    "kt": 6.8,
-    "gust": 8.7,
+    "dir": 175,
+    "kt": 6.2,
+    "gust": 9.9,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T02:00",
     "dir": 180,
-    "kt": 5.4,
-    "gust": 7.4,
+    "kt": 6.2,
+    "gust": 9.9,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T03:00",
-    "dir": 180,
-    "kt": 6.2,
-    "gust": 9.9,
-    "mslp": 1015
+    "dir": 198,
+    "kt": 6.1,
+    "gust": 11.1,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T04:00",
-    "dir": 169,
-    "kt": 6.3,
-    "gust": 10.1,
-    "mslp": 1015
+    "dir": 209,
+    "kt": 7.3,
+    "gust": 13.0,
+    "mslp": 1016
    },
    {
     "t": "2026-07-18T05:00",
-    "dir": 193,
-    "kt": 8.4,
-    "gust": 15.4,
+    "dir": 194,
+    "kt": 7.0,
+    "gust": 11.1,
     "mslp": 1016
    },
    {
     "t": "2026-07-18T06:00",
-    "dir": 195,
-    "kt": 9.5,
-    "gust": 15.4,
+    "dir": 186,
+    "kt": 10.6,
+    "gust": 16.1,
     "mslp": 1016
    }
   ]
@@ -473,22 +473,22 @@
  },
  "marine": {
   "mass_bay": [
-   ".TODAY...NW winds 5 to 10 kt, becoming SE this afternoon. Seas",
-   ".TONIGHT...S winds 5 to 10 kt, becoming SW after midnight. Seas",
-   ".SAT...SW winds 10 to 15 kt with gusts up to 20 kt, becoming S",
+   "...SMALL CRAFT ADVISORY IN EFFECT FROM SATURDAY MORNING THROUGH",
+   ".THIS AFTERNOON...S winds around 5 kt. Seas 1 foot or less. Wave",
+   ".TONIGHT...S winds 5 to 10 kt. Seas 1 foot or less. Wave Detail:",
+   ".SAT...SW winds 5 to 10 kt with gusts up to 20 kt, becoming S",
    ".SAT NIGHT...SW winds 15 to 20 kt with gusts up to 30 kt. Seas",
-   ".SUN...W winds 10 to 15 kt, becoming NW 5 to 10 kt in the",
-   ".SUN NIGHT...NW winds 5 to 10 kt. Seas 1 foot or less. Wave",
+   ".SUN AND SUN NIGHT...NW winds 10 to 15 kt with gusts up to 25 kt.",
    ".MON THROUGH TUE...S winds 10 to 15 kt with gusts up to 20 kt.",
    ".TUE NIGHT...S winds 10 to 15 kt with gusts up to 25 kt. Seas"
   ],
   "cape_cod_bay": [
-   ".TODAY...NW winds 5 to 10 kt, becoming SW this afternoon. Seas",
-   ".TONIGHT...SW winds 10 to 15 kt, diminishing to 5 to 10 kt after",
-   ".SAT...SW winds 10 to 15 kt, becoming S 15 to 20 kt in the",
-   ".SAT NIGHT...SW winds 20 to 25 kt with gusts up to 30 kt. Seas",
-   ".SUN...W winds 15 to 20 kt, diminishing to 10 to 15 kt in the",
-   ".SUN NIGHT...NW winds 5 to 10 kt. Seas 2 to 4 ft. Wave Detail: SW",
+   "...SMALL CRAFT ADVISORY IN EFFECT FROM SATURDAY MORNING THROUGH",
+   ".THIS AFTERNOON...SW winds around 10 kt with gusts up to 20 kt.",
+   ".TONIGHT...SW winds 5 to 10 kt. Gusts up to 20 kt in the evening.",
+   ".SAT...SW winds 5 to 10 kt, becoming S around 15 kt in the",
+   ".SAT NIGHT...SW winds 15 to 20 kt with gusts up to 30 kt. Seas",
+   ".SUN AND SUN NIGHT...NW winds 10 to 15 kt with gusts up to 25 kt.",
    ".MON THROUGH TUE...S winds 10 to 15 kt with gusts up to 20 kt.",
    ".TUE NIGHT...S winds 15 to 20 kt with gusts up to 25 kt. Seas"
   ]
