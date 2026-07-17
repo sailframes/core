@@ -14,7 +14,7 @@
   ],
   "race": {
     "date": "2026-07-17",
-    "start_local": "2026-07-17T19:00",
+    "start_local": "2026-07-17T19:05",
     "expected_finish_local": "2026-07-18T03:00",
     "window_local": ["2026-07-17T18:00", "2026-07-18T06:00"],
     "tz": "America/New_York"

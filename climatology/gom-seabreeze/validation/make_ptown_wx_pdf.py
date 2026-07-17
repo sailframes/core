@@ -31,6 +31,33 @@ def _get(url,tries=5):
             last=e; time.sleep(2.5+3*i)
     raise last
 
+def _head_ok(u,timeout=12):
+    try:
+        urllib.request.urlopen(urllib.request.Request(u,method="HEAD"),timeout=timeout); return True
+    except Exception:
+        return False
+
+def model_cycles(now):
+    """Actual latest model RUN (cycle) times — Open-Meteo doesn't return them, so probe the
+    sources: HRRR (hourly) from the NOAA AWS open-data bucket, HRDPS (00/06/12/18Z) from ECCC
+    HPFX. Falls back to a latency estimate if a probe fails so the PDF never breaks. These are
+    the latest AVAILABLE cycles = what Open-Meteo serves."""
+    hrrr=None
+    for b in range(0,8):
+        c=now-dt.timedelta(hours=b)
+        if _head_ok(f"https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{c:%Y%m%d}/conus/hrrr.t{c:%H}z.wrfsfcf01.grib2"):
+            hrrr=f"{c:%Y-%m-%d} {c:%H}Z"; break
+    if not hrrr:
+        c=now-dt.timedelta(hours=1); hrrr=f"{c:%Y-%m-%d} {c:%H}Z (est.)"
+    hrdps=None
+    for b in range(0,5):
+        c=now-dt.timedelta(hours=b*6); run=c.replace(hour=(c.hour//6)*6,minute=0,second=0,microsecond=0)
+        if _head_ok(f"https://hpfx.collab.science.gc.ca/{run:%Y%m%d}/WXO-DD/model_hrdps/continental/2.5km/{run:%H}/000/"):
+            hrdps=f"{run:%Y-%m-%d} {run:%H}Z"; break
+    if not hrdps:
+        c=now-dt.timedelta(hours=4); run=c.replace(hour=(c.hour//6)*6); hrdps=f"{run:%Y-%m-%d} {run:%H}Z (est.)"
+    return hrrr,hrdps
+
 MODELS={"HRRR (NOAA 3km)":"gfs_hrrr","HRDPS (Canada 2.5km)":"gem_hrdps_continental"}
 def om_both(lat,lon):
     ms=",".join(MODELS.values())
@@ -55,7 +82,11 @@ def tides(station,interval):
     u=("https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?application=sailframes"
        f"&product=predictions&datum=MLLW&interval={interval}&units=english&time_zone=lst_ldt&format=json"
        f"&station={station}&begin_date={D0.replace('-','')}&end_date={D1.replace('-','')}")
-    return _get(u)["predictions"]
+    for _ in range(5):                       # NOAA CO-OPS occasionally returns an error object; retry
+        d=_get(u)
+        if "predictions" in d: return d["predictions"]
+        time.sleep(3)
+    raise RuntimeError("NOAA tide API returned no predictions")
 
 def win(t): return W0<=t<=W1
 def nn(x): return float("nan") if x is None else x
@@ -148,7 +179,7 @@ def draw_map(ax):
     ax.set_aspect(1/np.cos(np.radians(42.3)))
     ax.set_xticks([]); ax.set_yticks([])
     ax.set_title("Route & overnight wind (HRRR mean arrows)",fontsize=9.5,fontweight="bold",color=ACCENT)
-    ax.text(0.02,0.03,"~40 nm · start 19:00 EDT · finish ~03:00",transform=ax.transAxes,fontsize=7.5,color="#5b5344")
+    ax.text(0.02,0.03,"~40 nm · start 19:05 EDT · finish ~03:00",transform=ax.transAxes,fontsize=7.5,color="#5b5344")
 
 def mean_ds(model,name):   # race-window vector-mean direction (FROM) + mean speed
     d=[x for x in DATA[model][name][2] if not np.isnan(x)]; s=DATA[model][name][1]
@@ -185,19 +216,20 @@ pdf=PdfPages("docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf")
 _now=dt.datetime.now(dt.timezone.utc)
 gen=_now.strftime("%Y-%m-%d %H:%M UTC")
 gen_et=(_now-dt.timedelta(hours=4)).strftime("%b %d, %H:%M EDT")
-_lead=(dt.datetime(2026,7,17,23,0,tzinfo=dt.timezone.utc)-_now).total_seconds()/3600.0
-lead_str=(f"~{_lead:.0f} h before the 19:00 EDT start" if _lead>=1
+hrrr_cyc,hrdps_cyc=model_cycles(_now)   # actual latest model RUN times (differ: HRRR hourly, HRDPS 6-hourly)
+_lead=(dt.datetime(2026,7,17,23,5,tzinfo=dt.timezone.utc)-_now).total_seconds()/3600.0
+lead_str=(f"~{_lead:.0f} h before the 19:05 EDT start" if _lead>=1
           else (f"~{_lead*60:.0f} min before start" if _lead>0 else "race under way / complete"))
 
 # ---------- PAGE 1 ----------
 fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
 fig.text(0.5,0.965,"Marblehead → Provincetown — Overnight Race Weather",ha="center",fontsize=17,fontweight="bold",color=ACCENT)
-fig.text(0.5,0.943,"Friday 2026-07-17, 19:00 EDT start  ·  ~03:00 Sat finish  ·  ~40 nm SE across Massachusetts & Cape Cod Bays",
+fig.text(0.5,0.943,"Friday 2026-07-17, 19:05 EDT start  ·  ~03:00 Sat finish  ·  ~40 nm SE across Massachusetts & Cape Cod Bays",
          ha="center",fontsize=9.5,color="#333")
-fig.text(0.5,0.925,"NOAA HRRR (3 km) + Environment Canada HRDPS (2.5 km) — agree on the overnight, split on the start.",
-         ha="center",fontsize=8.4,color="#555")
-fig.text(0.5,0.911,f"Model data: latest HRRR + HRDPS cycles as of {gen_et}  ({gen})   ·   {lead_str}.",
-         ha="center",fontsize=7.9,color="#888",style="italic")
+fig.text(0.5,0.925,f"Model runs — NOAA HRRR 3 km: {hrrr_cyc}   ·   Env. Canada HRDPS 2.5 km: {hrdps_cyc}   (latest available cycles)",
+         ha="center",fontsize=8.2,color="#555")
+fig.text(0.5,0.911,f"retrieved {gen_et} ({gen})   ·   {lead_str}   ·   models agree on the overnight, split on the start.",
+         ha="center",fontsize=7.8,color="#888",style="italic")
 
 axm=fig.add_axes([0.06,0.44,0.56,0.45]); draw_map(axm)
 # wind speed timeline (model compare)
@@ -232,12 +264,13 @@ axfan.text(0,-1.2,"arrows = downwind",fontsize=5,ha="center",color="#999")
 
 # synopsis
 hr0=np.nanmean([DATA["HRRR (NOAA 3km)"][n][1][1] for n,_,_ in CORRIDOR])
-syn=("Light, weak-gradient southerly night (flat ~1016 mb, no front). The models AGREE on the overnight: the wind fills "
- "S/SW 8-12 kt offshore, a starboard-tack reach that gradually frees toward Race Point, seas ≤2 ft. They SHARPLY DISAGREE "
- "on the start: NOAA HRRR has SE ~10 kt (a reach/beat down the rhumb) while Canada HRDPS shows a NW land-breeze ~7 kt "
- "(offshore), dying to near-calm by ~01:00 before the southerly fills — opposite first-leg angles. HRDPS has verified "
- "better locally this season, but at a post-sunset transition neither is reliable: sail the breeze that's actually on the "
- "water, then get offshore into the steadier southerly. Hour-by-hour, tactics, tide and hazards overleaf.")
+syn=("Light southerly night on the EAST side of an approaching DRY trough (surface stays flat ~1016 mb — the trough and its "
+ "front hold to the west; models keep the race window rain-free with no pressure fall). The models AGREE on the overnight: "
+ "the wind fills S/SW 8-12 kt offshore, a starboard-tack reach that gradually frees toward Race Point, seas ≤2 ft. They "
+ "SHARPLY DISAGREE on the start: HRRR SE ~10 kt (a reach/beat down the rhumb) vs HRDPS a NW land-breeze ~7 kt (offshore), "
+ "dying to near-calm by ~01:00 before the southerly fills — opposite first-leg angles. Neither is reliable at a post-sunset "
+ "transition: sail the breeze on the water, then get offshore into the steadier southerly. Trough watch: skies likely OVERCAST "
+ "(dark, starless) and the SW FRESHENS near/after dawn (~11-12 kt, gusts ~15) — recheck today's short-lead runs for earlier timing.")
 fig.text(0.06,0.415,"Overnight synopsis",fontsize=12,fontweight="bold",color=ACCENT)
 fig.text(0.06,0.395,syn,fontsize=9.0,color="#222",wrap=True,va="top",ha="left")
 
@@ -266,7 +299,7 @@ card(0.52,0.14,"Sea state — benign",
 card(0.52,0.075,"Temperature — mild & near-steady",
      "~18°C / 64–65°F all night on the water (sea-moderated: ~1°F drop offshore, up to ~10°F near the P-town shore). Warm water under cooler air → damp; reinforces the fog watch. Layers for damp, not cold.")
 
-fig.text(0.06,0.02,f"SailFrames race weather · HRRR + HRDPS via Open-Meteo · model data {gen} · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
+fig.text(0.06,0.02,f"SailFrames · HRRR run {hrrr_cyc} + HRDPS run {hrdps_cyc} via Open-Meteo · retrieved {gen} · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
 pdf.savefig(fig); plt.close(fig)
 
 # ---------- PAGE 2 ----------
@@ -311,12 +344,12 @@ axtide.xaxis.set_major_formatter(mdates.DateFormatter("%Hh")); axtide.tick_param
 axtide.set_ylabel("ft",fontsize=7)
 
 tac=[
-("① Start (19:00–21:00) — models disagree, so read the water","HRRR: SE ~10 kt (reach/close-hauled). HRDPS: NW land-breeze ~7 kt (offshore), dying to calm ~01:00. Opposite angles — don't pre-commit. Sail the actual dock breeze; whatever it is it's LIGHT (≤8 kt). Get clear air off the line, then work OFFSHORE — the Marblehead shore is the light trap."),
+("① Start (19:05–21:00) — models disagree, so read the water","HRRR: SE ~10 kt (reach/close-hauled). HRDPS: NW land-breeze ~7 kt (offshore), dying to calm ~01:00. Opposite angles — don't pre-commit. Sail the actual dock breeze; whatever it is it's LIGHT (≤8 kt). Get clear air off the line, then work OFFSHORE — the Marblehead shore is the light trap."),
 ("② The crossing (21:00–01:00) — reach in the filling southerly","Both models fill S/SW 8-12 kt offshore — a starboard reach that frees as the wind veers right. Pressure lives offshore/south (mid-bay ~10 kt vs shore 2-6). Commit south; stay on the pressure side, don't over-stand north toward Cape Ann."),
 ("③ ⚠ LNG Northeast Gateway — hard avoid","Two STL buoys at ~42.40 N (−70.60/−70.59) sit just N of the direct line. NO ENTRY within 500 m, no anchoring within ~1 nm. The rhumb passes ~5 nm south — staying on/south of the line is both faster (more breeze) and legal."),
 ("④ Race Point & finish (01:00–03:00) — the tide gate","S/SSW 8-11 kt, gusts to 15 into Cape Cod Bay. Flood builds to Boston high 02:45 ≈ finish. Round Race Point BEFORE ~02:45 to carry the flood in; later boats meet the building ebb. Finish current itself is minor (near high slack)."),
 ("⑤ Wind shear — shifty, veered puffs; trim for twist","Light SE/S surface under a W–WNW 13–16 kt flow (inversion = decoupled; diagram + explainer on p.1). Puffs arrive VEERED toward W/NW and a bit stronger (cap ~16 kt): upwind, starboard lifts / port headers — tack on the headers, don't commit a side. Trim for TWIST — ease the upper leech (the masthead sees the stronger, veered wind). By dawn the surface veers/builds to W/SW."),
-("⑥ Night & hazards","Dark — thin crescent sets early, so nav by instruments, watches + lights set. Fog watch: July S-flow over ~20°C water; NWS not flagging Fri night but recheck AM. Seas ≤2 ft, no SCA expected."),
+("⑥ Night, sky & hazards","Dark — thin crescent sets early + likely OVERCAST ahead of the trough (HRRR 100% cloud, HRDPS clear — disagree) → nav by instruments, watches + lights. Approaching DRY trough stays west during the race (no rain, flat pressure) but the SW FRESHENS near/after dawn (~11-12 kt, gusts ~15) — recheck short-lead runs for earlier timing. Fog watch (S-flow over ~20°C water). Seas ≤2 ft, no SCA."),
 ]
 y=0.405
 fig.text(0.06,0.43,"Tactics & strategy",fontsize=12,fontweight="bold",color=ACCENT)
@@ -325,7 +358,7 @@ for head,body in tac:
     fig.text(0.06,y-0.014,body,fontsize=7.9,color="#222",wrap=True,va="top")
     nlines=max(2,(len(body)+117)//118)   # variable row height so a long bullet won't collide
     y-=0.021+0.0138*nlines
-fig.text(0.06,0.016,f"Model data: {gen_et} ({gen}).  Confidence: moderate on the overnight reach + tide timing (models agree); low on the exact start. Re-run race morning + pre-start.",
+fig.text(0.06,0.016,f"HRRR {hrrr_cyc} · HRDPS {hrdps_cyc}.  Confidence: moderate on the overnight + tide timing; low on the exact start — re-run pre-start.",
          fontsize=7.2,color="#777",style="italic")
 pdf.savefig(fig); plt.close(fig)
 
