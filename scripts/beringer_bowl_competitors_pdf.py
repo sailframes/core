@@ -46,15 +46,14 @@ fig.text(0.5,0.917,"Overnight JAM course (Marblehead → Provincetown) · MOW = 
 fig.text(0.5,0.892,"Sorted by handicap (Time-on-Time factor, high = faster-rated). MOW is the 3rd-highest rating of 12 — it OWES time to 9 of its 11 rivals (only Bora & Goldeneye owe MOW).",
          ha="center",fontsize=9,color="#666",style="italic")
 
-cols=["Sail","Boat","Type","Owner","Yacht club","TCF","vs MOW /hr","vs MOW (~8 h)","AIS / MMSI"]
-cw =[0.055,0.13,0.135,0.135,0.135,0.055,0.075,0.11,0.115]
+cols=["Sail","Boat","Type","Owner","Yacht club","TCF","vs MOW /hr","vs MOW (~8 h)"]
+cw =[0.06,0.155,0.17,0.16,0.155,0.06,0.085,0.105]
 
 def table(ax,rows,title):
     ax.axis("off"); ax.set_title(title,fontsize=12,fontweight="bold",color=ACCENT,loc="left",pad=6)
     cells=[]
     for (boat,sail,tcf,typ,owner,yc) in rows:
-        ais="see note ▶" if boat=="MAN OF WAR" else "—"
-        cells.append([sail,boat,typ,owner,yc,f"{tcf:.3f}",perhr(tcf),fmt(owed(tcf)),ais])
+        cells.append([sail,boat,typ,owner,yc,f"{tcf:.3f}",perhr(tcf),fmt(owed(tcf))])
     t=ax.table(cellText=cells,colLabels=cols,colWidths=cw,loc="center",cellLoc="left")
     t.auto_set_font_size(False); t.set_fontsize(8.7); t.scale(1,1.5)
     for (r,c),cl in t.get_celld().items():
@@ -71,13 +70,8 @@ note=("HANDICAP = Time-on-Time factor: corrected time = elapsed × factor (lower
  "sail faster to compensate).   “vs MOW” = (their factor − MOW 1.016) × elapsed.   + = the boat OWES MOW (must beat MOW across the line by that "
  "much to tie on corrected).   − = MOW OWES the boat (MOW must beat them across the line).   “/hr” = seconds per hour of elapsed; the “~8 h” column "
  "applies it to this race’s ~8 h expected elapsed (light air, ~40 nm) — scale it to your actual finish time using the /hr value.")
-fig.text(0.04,0.185,note,fontsize=8.3,color="#222",va="top",wrap=True)
-ais=("AIS / MMSI: not in the entry sheet. Club racers usually aren’t reliably identifiable by boat name — for MOW alone there are ≥3 US “Man o War” "
- "AIS records (MMSI 368191460 / 367567220 / 367627370) and none is confirmed as this C&C 41, so no MMSI is assigned here (a wrong number is worse "
- "than blank). To track rivals tonight: search each name on MarineTraffic/VesselFinder if they transmit AIS, or enter known MMSIs on the SailFrames "
- "race dashboard. Confirm MOW’s own MMSI from the VHF/DSC registration.")
-fig.text(0.04,0.095,ais,fontsize=8.3,color="#7a4a12",va="top",wrap=True)
-fig.text(0.04,0.02,f"Source: Beringer Bowl entry sheet (downloaded 2026-07-17) · generated {gen} · handicap math per Time-on-Time; verify against the official NoR/scoring.",
+fig.text(0.04,0.16,note,fontsize=8.6,color="#222",va="top",wrap=True)
+fig.text(0.04,0.03,f"Source: Beringer Bowl entry sheet (downloaded 2026-07-17) · generated {gen} · handicap math per Time-on-Time; verify against the official NoR/scoring.",
          fontsize=7,color="#999")
 pdf.savefig(fig); plt.close(fig); pdf.close()
 print("wrote docs/reports/BERINGER_BOWL_MOW_COMPETITORS_2026-07-17.pdf")
