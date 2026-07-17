@@ -75,8 +75,8 @@ def write_md(brief, Z, path):
         hi = ", ".join(f"{t[5:16]} {ty} {v:.1f}ft" for (t, ty, v) in tl if w0 <= t[:10] <= w1)
         L.append(f"**Tide {k}:** {hi}")
     for k, m in brief["marine"].items():
-        fri = " ".join(x for x in m if "FRI" in x.upper())[:220]
-        L.append(f"\n**Marine {k}:** {fri}")
+        near = " ".join(m[:2])[:240]   # first 2 dotted periods (current + next) — covers tonight
+        L.append(f"\n**Marine {k}:** {near}")
     open(path, "w").write("\n".join(L) + "\n")
 
 def main():
@@ -115,8 +115,7 @@ def main():
     for k, z in Z.get("marine_zones", {}).items():
         m = marine(z)
         brief["marine"][k] = m
-        fri = [x for x in m if "FRI" in x.upper()]
-        print(f"## marine {k} ({z}) Fri:", " ".join(fri[:2])[:180])
+        print(f"## marine {k} ({z}):", " ".join(m[:2])[:200])   # first 2 periods (current + next)
     if a.out:
         json.dump(brief, open(a.out, "w"), indent=1)
         print("\nwrote", a.out)

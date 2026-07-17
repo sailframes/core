@@ -4,6 +4,21 @@
 **Course:** ~**38 nm** rhumb line, bearing **~133° (SE)** across Massachusetts Bay into Cape Cod Bay
 **Lead time:** first-look at **~27 h** — refine Friday with short-lead HRRR + the actual breeze at the dock.
 *Sources: Open-Meteo (HRRR/GFS blend) corridor, NWS BOX marine zones ANZ231/233, NOAA CO-OPS tides. Regenerate: `python3 climatology/corridor_forecast.py climatology/zones/marblehead_provincetown.json`.*
+*Start corrected to **19:05 EDT**.*
+
+---
+
+## ⟳ MIDDAY REFRESH (Fri ~12:10 EDT, ~7 h lead — short-lead HRRR)
+
+**What changed vs the first-look:**
+- **Start now leans SE sea-breeze, ~7–8 kt at the gun** (19:05, ESE 110°→SE) — *not* the NW land-breeze; that only shows as a brief NW blip at ~18:00 pre-start. The earlier "opposite angles" uncertainty has **narrowed toward a light SE reach/beat.** Still light — sail the dock breeze.
+- **NEW: a near-calm hole forms inshore ~22:00–02:00** — the Marblehead/coast band drops to **2–3 kt and swings wildly** (SE→SW→variable) while **offshore holds 6–8 kt.** → Getting **offshore early is now the #1 priority** (real parking risk if you hug the coast).
+- **Overnight is lighter than the first-look "8–12 kt": ~6–8 kt offshore during the race**, veering S→SSW→SW. The real **SW build (12–17 kt, gusts ~18) is at 05–06 AM — after most boats finish (~03:00).** Slow boats still out past ~05:00 get the fresh breeze.
+- **Fog: NOT in the NWS forecast** (ANZ231/233 = 0 fog/visibility mentions; TONIGHT S/SW 5–10 kt, seas ≤1 ft). Downgrade the fog watch — still July, but it isn't forecast.
+- **Tide gate unchanged:** Boston Low **20:24** / High **02:40** → start ≈ LW slack, finish ≈ HW slack. **Round Race Point before ~02:45** to carry the last flood into Cape Cod Bay; later = building ebb.
+- Pressure flat 1015–1016, seas ≤1–2 ft (ANZ233 gusts to ~20 kt early evening in Cape Cod Bay).
+
+**Refreshed bottom line:** a **light, SE-start, S/SW-overnight** night — sail the SE breeze off the line, **escape the inshore calm hole by getting south/offshore fast**, hold the reach in 6–8 kt, and **round Race Point before ~02:45.** Next update pre-start (~17:15 EDT).
 
 ---
 
