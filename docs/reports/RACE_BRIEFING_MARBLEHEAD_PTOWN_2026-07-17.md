@@ -8,6 +8,17 @@
 
 ---
 
+## ★ PRE-START FINAL CALL (Fri ~16:55 EDT, ~2 h to gun — with LIVE OBS)
+
+**Observed right now:** KBOS Logan **WNW 290–300° / 11–12 kt, gusts 16**; buoy 44013 (16 nm offshore) **nearly calm, S 2 kt.** → the breeze is a **WNW offshore flow living INSHORE, dead offshore** — the HRDPS land-breeze is verifying, *not* the HRRR sea-breeze.
+
+- **START (19:05): expect a decaying WNW — likely 6–12 kt from the NW quadrant = a DOWNWIND / broad-reach start under jib & main** (the SE rhumb runs ~dead downwind of a WNW breeze). It *may* ease/swing light-SE (a beat) if it collapses by sunset — so **watch the committee-boat wind in the last 30 min and set up for what's there.** Most likely: **running/reaching, not a beat.**
+- **FIRST LEG — reversal of the earlier "get offshore" advice:** with the breeze WNW off the land, **pressure is INSHORE and offshore is a hole (44013 = 2 kt).** Off the start, **stay in the breeze nearer the coast while the WNW holds** — don't bail offshore into the calm. **Then**, as the WNW dies mid-evening and the light **S/SW fills overnight, transition offshore/south** into the new pressure. (If the gun-wind is already light SE, the classic get-offshore applies — but right now inshore is where the wind is.)
+- **FOG: none** — ANZ231/233 clean, good visibility observed. Low risk.
+- **TIDE / RACE POINT:** start ≈ low-water slack (Boston Low **20:24**); flood builds to High **02:40**. **Round Race Point before ~02:45** to carry the last flood into Cape Cod Bay; later = building ebb.
+
+---
+
 ## ⟳ MIDDAY REFRESH (Fri ~12:10 EDT, ~7 h lead — short-lead HRRR)
 
 **What changed vs the first-look:**
