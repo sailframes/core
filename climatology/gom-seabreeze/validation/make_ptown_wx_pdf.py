@@ -182,16 +182,21 @@ def draw_diffmap(ax):
 
 # ============================ BUILD PDF ============================
 pdf=PdfPages("docs/reports/RACE_WX_MARBLEHEAD_PTOWN_2026-07-17.pdf")
-gen=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+_now=dt.datetime.now(dt.timezone.utc)
+gen=_now.strftime("%Y-%m-%d %H:%M UTC")
+gen_et=(_now-dt.timedelta(hours=4)).strftime("%b %d, %H:%M EDT")
+_lead=(dt.datetime(2026,7,17,23,0,tzinfo=dt.timezone.utc)-_now).total_seconds()/3600.0
+lead_str=(f"~{_lead:.0f} h before the 19:00 EDT start" if _lead>=1
+          else (f"~{_lead*60:.0f} min before start" if _lead>0 else "race under way / complete"))
 
 # ---------- PAGE 1 ----------
 fig=plt.figure(figsize=(8.5,11)); fig.patch.set_facecolor("white")
 fig.text(0.5,0.965,"Marblehead → Provincetown — Overnight Race Weather",ha="center",fontsize=17,fontweight="bold",color=ACCENT)
 fig.text(0.5,0.943,"Friday 2026-07-17, 19:00 EDT start  ·  ~03:00 Sat finish  ·  ~40 nm SE across Massachusetts & Cape Cod Bays",
          ha="center",fontsize=9.5,color="#333")
-fig.text(0.5,0.925,"NOAA HRRR (3 km) and Environment Canada HRDPS (2.5 km) — two independent high-resolution models.",
+fig.text(0.5,0.925,"NOAA HRRR (3 km) + Environment Canada HRDPS (2.5 km) — agree on the overnight, split on the start.",
          ha="center",fontsize=8.4,color="#555")
-fig.text(0.5,0.911,f"They agree on the overnight but split on the start — see the difference map + tactics on p.2.   ·   {gen} · ~24 h lead.",
+fig.text(0.5,0.911,f"Model data: latest HRRR + HRDPS cycles as of {gen_et}  ({gen})   ·   {lead_str}.",
          ha="center",fontsize=7.9,color="#888",style="italic")
 
 axm=fig.add_axes([0.06,0.44,0.56,0.45]); draw_map(axm)
@@ -261,7 +266,7 @@ card(0.52,0.14,"Sea state — benign",
 card(0.52,0.075,"Temperature — mild & near-steady",
      "~18°C / 64–65°F all night on the water (sea-moderated: ~1°F drop offshore, up to ~10°F near the P-town shore). Warm water under cooler air → damp; reinforces the fog watch. Layers for damp, not cold.")
 
-fig.text(0.06,0.02,"SailFrames race weather · HRRR + HRDPS via Open-Meteo · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
+fig.text(0.06,0.02,f"SailFrames race weather · HRRR + HRDPS via Open-Meteo · model data {gen} · NOT for navigation — verify with official forecasts",fontsize=6.5,color="#999")
 pdf.savefig(fig); plt.close(fig)
 
 # ---------- PAGE 2 ----------
@@ -320,7 +325,7 @@ for head,body in tac:
     fig.text(0.06,y-0.014,body,fontsize=7.9,color="#222",wrap=True,va="top")
     nlines=max(2,(len(body)+117)//118)   # variable row height so a long bullet won't collide
     y-=0.021+0.0138*nlines
-fig.text(0.06,0.016,"Confidence: moderate on the overnight reach + tide timing (models agree); low on the exact start (transition + lead). Re-run race morning + pre-start.",
+fig.text(0.06,0.016,f"Model data: {gen_et} ({gen}).  Confidence: moderate on the overnight reach + tide timing (models agree); low on the exact start. Re-run race morning + pre-start.",
          fontsize=7.2,color="#777",style="italic")
 pdf.savefig(fig); plt.close(fig)
 
