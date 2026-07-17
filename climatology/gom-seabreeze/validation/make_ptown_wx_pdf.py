@@ -267,7 +267,7 @@ hr0=np.nanmean([DATA["HRRR (NOAA 3km)"][n][1][1] for n,_,_ in CORRIDOR])
 syn=("Light southerly night on the EAST side of an approaching DRY trough (surface stays flat ~1016 mb — the trough and its "
  "front hold to the west; models keep the race window rain-free with no pressure fall). The models AGREE on the overnight: "
  "the wind fills S/SW a LIGHT ~7-9 kt offshore (gusts to ~13), a starboard-tack reach that gradually frees toward Race Point, seas ≤2 ft. They "
- "SHARPLY DISAGREE on the start: HRRR SE ~10 kt (a reach/beat down the rhumb) vs HRDPS a NW land-breeze ~7 kt (offshore), "
+ "SHARPLY DISAGREE on the start: HRRR SE ~7 kt (a reach/beat down the rhumb) vs HRDPS a WNW land-breeze ~8 kt (offshore), "
  "dying to near-calm by ~01:00 before the southerly fills — opposite first-leg angles. Neither is reliable at a post-sunset "
  "transition: sail the breeze on the water, then get offshore into the steadier southerly. Trough watch: skies likely OVERCAST "
  "(dark, starless) and the SW FRESHENS near/after dawn (~11-12 kt, gusts ~15) — recheck today's short-lead runs for earlier timing.")
@@ -344,12 +344,12 @@ axtide.xaxis.set_major_formatter(mdates.DateFormatter("%Hh")); axtide.tick_param
 axtide.set_ylabel("ft",fontsize=7)
 
 tac=[
-("① Start (19:05–21:00) — models disagree, so read the water","HRRR: SE ~10 kt (reach/close-hauled). HRDPS: NW land-breeze ~7 kt (offshore), dying to calm ~01:00. Opposite angles — don't pre-commit. Sail the actual dock breeze; whatever it is it's LIGHT (≤8 kt). Get clear air off the line, then work OFFSHORE — the Marblehead shore is the light trap."),
+("① Start (19:05–21:00) — models disagree, so read the water","HRRR: SE ~7 kt (reach/close-hauled). HRDPS: WNW land-breeze ~8 kt (offshore), both dying after ~21:00. Opposite angles — don't pre-commit; sail the actual dock breeze (it's LIGHT, ≤8 kt). NEW: the inshore band goes near-calm (2-3 kt, shifty) ~22:00-02:00 while offshore holds 6-8 kt — so get clear air off the line and work OFFSHORE hard; the Marblehead shore is a parking lot mid-race."),
 ("② The crossing (21:00–01:00) — reach in the filling southerly","Both models fill S/SW a light ~7-9 kt offshore (gusts ~13), building to ~11-12 only near dawn — a starboard reach that frees as the wind veers right. Pressure lives offshore/south (mid-bay ~10 kt vs shore 2-6). Commit south; stay on the pressure side, don't over-stand north toward Cape Ann."),
 ("③ ⚠ LNG Northeast Gateway — hard avoid","Two STL buoys at ~42.40 N (−70.60/−70.59) sit just N of the direct line. NO ENTRY within 500 m, no anchoring within ~1 nm. The rhumb passes ~5 nm south — staying on/south of the line is both faster (more breeze) and legal."),
 ("④ Race Point & finish (01:00–03:00) — the tide gate","S/SSW 8-11 kt, gusts to 15 into Cape Cod Bay. Flood builds to Boston high 02:45 ≈ finish. Round Race Point BEFORE ~02:45 to carry the flood in; later boats meet the building ebb. Finish current itself is minor (near high slack)."),
 ("⑤ Wind shear — shifty, veered puffs; trim for twist","Light SE/S surface under a W–WNW 13–16 kt flow (inversion = decoupled; diagram + explainer on p.1). Puffs arrive VEERED toward W/NW and a bit stronger (cap ~16 kt): upwind, starboard lifts / port headers — tack on the headers, don't commit a side. Trim for TWIST — ease the upper leech (the masthead sees the stronger, veered wind). By dawn the surface veers/builds to W/SW."),
-("⑥ Night, sky & hazards","Dark — thin crescent sets early + likely OVERCAST ahead of the trough (HRRR 100% cloud, HRDPS clear — disagree) → nav by instruments, watches + lights. Approaching DRY trough stays west during the race (no rain, flat pressure) but the SW FRESHENS near/after dawn (~11-12 kt, gusts ~15) — recheck short-lead runs for earlier timing. Fog watch (S-flow over ~20°C water). Seas ≤2 ft, no SCA."),
+("⑥ Night, sky & hazards","Dark — thin crescent sets early + likely OVERCAST ahead of the trough (HRRR cloud, HRDPS clearer) → nav by instruments, watches + lights. Approaching DRY trough stays west during the race (no rain, flat pressure); the real SW build (12-17 kt, gusts ~18) holds off to ~05-06 AM — after most finish. FOG: not in tonight's NWS forecast (ANZ231/233 clean) — low risk. Seas ≤1-2 ft (ANZ233 gusts ~20 kt early eve), no SCA."),
 ]
 y=0.405
 fig.text(0.06,0.43,"Tactics & strategy",fontsize=12,fontweight="bold",color=ACCENT)
