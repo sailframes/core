@@ -7,7 +7,7 @@ import datetime as dt, math
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Rectangle
 
 ACCENT="#0b3d66"; SEA="#eef4f8"; LAND="#e7e1d4"; GATE="#c0392b"; ROUTEC="#0b3d66"
 gen=dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%MZ")
@@ -148,6 +148,17 @@ wh=("WOODS HOLE (COD0911, The Strait) — flood 077° / ebb 261°; max ~2.4–3.
  "  (transit at the 11:42 SLACK.)")
 fig.text(0.06,0.385,ccc,fontsize=7.6,color="#222",va="top",family="monospace")
 fig.text(0.06,0.315,wh,fontsize=7.6,color="#222",va="top",family="monospace")
+# --- Rain & convection risk callout (HRRR vs HRDPS) ---
+fig.add_artist(Rectangle((0.055,0.085),0.89,0.165,facecolor="#fdf3e3",edgecolor=GATE,lw=1.3,zorder=0,transform=fig.transFigure))
+fig.text(0.075,0.232,"⛈  Rain & convection risk  (HRRR vs HRDPS)",fontsize=11,fontweight="bold",color=GATE)
+fig.text(0.075,0.212,
+ "RAIN — Tue (Leg 1) DRY (~0 mm, both models).  Wed (Leg 2) WET, showers likely: HRRR light rain (53–88% prob),\n"
+ "HRDPS heavier showers (15–46 mm over Buzzards Bay / Vineyard Sound). Carry foulies; reduced viz in showers.\n"
+ "THUNDER — Tue low (CAPE 0–170).  Wed MODERATE / possible (CAPE 400–850 + a showery front): scattered afternoon\n"
+ "cells; HRRR gusts to ~38 kt = squall gust-fronts. A storm at Woods Hole / in Vineyard Sound is a real hazard.\n"
+ "→ Reinforces the plan: cross EARLY (Woods Hole 11:42 slack → Edgartown ~14:00) before the afternoon convection.\n"
+ "Wed AM, check for firing cells — delay or use the Quicks Hole bail-out if storms are up.",
+ fontsize=7.9,color="#222",va="top",linespacing=1.35)
 fig.text(0.06,0.02,f"SailFrames delivery plan · generated {gen} · NOT for navigation — verify against Eldridge, NOAA charts + Canal Control.",fontsize=6.5,color="#999")
 pdf.savefig(fig); plt.close(fig); pdf.close()
 print("wrote docs/reports/DELIVERY_EAGLE_BOSTON_EDGARTOWN_2026-07-21.pdf")
