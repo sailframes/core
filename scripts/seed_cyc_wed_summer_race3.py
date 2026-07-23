@@ -86,8 +86,9 @@ BOAT_TYPE_LOA = {
 }
 
 TRACKS = {
-    "52475": ("sl", "Agora*"),      # Sensor Logger
-    "4396":  ("sl", "Charisma*"),   # Sensor Logger
+    "52475": ("sl",  "Agora*"),                        # Sensor Logger
+    "4396":  ("sl",  "Charisma*"),                     # Sensor Logger
+    "470":   ("gpx", "Special Sauce*Navionics*.gpx"),  # Navionics export
 }
 
 
