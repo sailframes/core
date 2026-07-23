@@ -89,6 +89,7 @@ TRACKS = {
     "52475": ("sl",  "Agora*"),                        # Sensor Logger
     "4396":  ("sl",  "Charisma*"),                     # Sensor Logger
     "470":   ("gpx", "Special Sauce*Navionics*.gpx"),  # Navionics export
+    "52816": ("vkx", "RockIt*.vkx"),                   # Vakaros (3.1 MB, under the 6 MB multipart limit)
 }
 
 
@@ -105,11 +106,11 @@ def _request(method, path, body=None):
         raise
 
 
-def _multipart_upload(path, filename, file_bytes):
+def _multipart_upload(path, filename, file_bytes, part_ctype="application/gpx+xml"):
     boundary = f"----sfboundary{uuid.uuid4().hex}"
     pre = (f"--{boundary}\r\n"
            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-           f"Content-Type: application/gpx+xml\r\n\r\n").encode()
+           f"Content-Type: {part_ctype}\r\n\r\n").encode()
     body = pre + file_bytes + f"\r\n--{boundary}--\r\n".encode()
     req = urllib.request.Request(f"{API_BASE}{path}", data=body, method="POST",
                                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
@@ -253,22 +254,27 @@ def main():
         if not boat_id or not src:
             print(f"  ! track for sail {sail}: boat_id={boat_id} src={src} — skipped", file=sys.stderr)
             continue
+        endpoint, ctype = "gpx", "application/gpx+xml"
         if kind == "gpx":
             with open(src, "rb") as f:
-                gpx_bytes = f.read()
+                file_bytes = f.read()
             fname = src.split("/")[-1]
-        else:
-            gpx_bytes, n = sensorlogger_to_gpx(src, sail)
+        elif kind == "vkx":                                    # Vakaros — raw .vkx to the /vkx endpoint
+            with open(src, "rb") as f:
+                file_bytes = f.read()
+            fname, endpoint, ctype = f"{sail}.vkx", "vkx", "application/octet-stream"
+        else:                                                  # Sensor Logger folder -> GPX
+            file_bytes, n = sensorlogger_to_gpx(src, sail)
             fname = f"{sail}.gpx"
         _, res = _multipart_upload(
-            f"/api/races/{race_id}/boats-by-id/{boat_id}/gpx", fname, gpx_bytes)
+            f"/api/races/{race_id}/boats-by-id/{boat_id}/{endpoint}", fname, file_bytes, ctype)
         print(f"  track {sail}: {res.get('points')} pts "
               f"({res.get('start_time')} → {res.get('end_time')})")
 
     fin = sum(1 for r in ROWS if r[8] == "FIN")
     print(f"\n✓ Regatta {regatta_id} · Race {race_id}")
     print(f"  https://sailframes.com/race.html?race={race_id}")
-    print(f"  {len(ROWS)} boats ({fin} finishers) · 2 GPS tracks attached")
+    print(ff"  {len(ROWS)} boats ({fin} finishers) · {len(TRACKS)} GPS tracks attached")
 
 
 if __name__ == "__main__":
