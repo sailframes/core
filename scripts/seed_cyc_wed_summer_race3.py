@@ -274,7 +274,7 @@ def main():
     fin = sum(1 for r in ROWS if r[8] == "FIN")
     print(f"\n✓ Regatta {regatta_id} · Race {race_id}")
     print(f"  https://sailframes.com/race.html?race={race_id}")
-    print(ff"  {len(ROWS)} boats ({fin} finishers) · {len(TRACKS)} GPS tracks attached")
+    print(f"  {len(ROWS)} boats ({fin} finishers) · {len(TRACKS)} GPS tracks attached")
 
 
 if __name__ == "__main__":
